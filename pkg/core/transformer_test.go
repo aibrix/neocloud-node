@@ -109,3 +109,147 @@ func TestTransformerRejectsUnsupportedSpecs(t *testing.T) {
 		})
 	}
 }
+
+func TestTransformerMapsSupportedCompatibilityFields(t *testing.T) {
+	t.Parallel()
+
+	transformer := DefaultTransformer{}
+	request, err := transformer.Transform(PodSpec{
+		Namespace:        "default",
+		Name:             "train-job",
+		WorkloadUID:      "pod-123",
+		RestartPolicy:    RestartPolicyOnFailure,
+		ImagePullSecrets: []string{"registry-creds"},
+		Annotations: map[string]string{
+			AnnotationProvider: "runpod",
+			AnnotationGPUType:  "H100",
+		},
+		Containers: []ContainerSpec{
+			{
+				Name:    "main",
+				Image:   "example.com/train:latest",
+				Command: []string{"python"},
+				Args:    []string{"train.py"},
+				Env: map[string]string{
+					"MODEL": "llama",
+				},
+				Ports: []PortSpec{
+					{Name: "metrics", ContainerPort: 9090, Protocol: "TCP"},
+				},
+				Resources: ResourceSpec{
+					GPUCount: 1,
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Transform returned error: %v", err)
+	}
+
+	if request.RestartPolicy != string(RestartPolicyOnFailure) {
+		t.Fatalf("restart policy = %q, want %q", request.RestartPolicy, RestartPolicyOnFailure)
+	}
+	if len(request.ImagePullSecrets) != 1 || request.ImagePullSecrets[0] != "registry-creds" {
+		t.Fatalf("image pull secrets = %#v, want registry-creds", request.ImagePullSecrets)
+	}
+	if len(request.Ports) != 1 {
+		t.Fatalf("ports length = %d, want 1", len(request.Ports))
+	}
+	if request.Ports[0].Name != "metrics" || request.Ports[0].ContainerPort != 9090 || request.Ports[0].Protocol != "TCP" {
+		t.Fatalf("port = %#v, want metrics TCP 9090", request.Ports[0])
+	}
+}
+
+func TestTransformerRejectsPhase1UnsupportedSpecs(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		pod   PodSpec
+		code  string
+		field string
+	}{
+		{
+			name: "restart policy always",
+			pod: PodSpec{
+				RestartPolicy: RestartPolicyAlways,
+				Containers: []ContainerSpec{
+					{Name: "main", Image: "example.com/train:latest", Resources: ResourceSpec{GPUCount: 1}},
+				},
+			},
+			code:  "UnsupportedRestartPolicy",
+			field: "spec.restartPolicy",
+		},
+		{
+			name: "init containers",
+			pod: PodSpec{
+				InitContainers: []ContainerSpec{
+					{Name: "init", Image: "example.com/init:latest"},
+				},
+				Containers: []ContainerSpec{
+					{Name: "main", Image: "example.com/train:latest", Resources: ResourceSpec{GPUCount: 1}},
+				},
+			},
+			code:  "UnsupportedInitContainers",
+			field: "spec.initContainers",
+		},
+		{
+			name: "volumes",
+			pod: PodSpec{
+				Volumes: []VolumeSpec{
+					{Name: "data", Kind: "persistentVolumeClaim"},
+				},
+				Containers: []ContainerSpec{
+					{Name: "main", Image: "example.com/train:latest", Resources: ResourceSpec{GPUCount: 1}},
+				},
+			},
+			code:  "UnsupportedVolumes",
+			field: "spec.volumes",
+		},
+		{
+			name: "host network",
+			pod: PodSpec{
+				HostNetwork: true,
+				Containers: []ContainerSpec{
+					{Name: "main", Image: "example.com/train:latest", Resources: ResourceSpec{GPUCount: 1}},
+				},
+			},
+			code:  "UnsupportedHostNetwork",
+			field: "spec.hostNetwork",
+		},
+		{
+			name: "privileged container",
+			pod: PodSpec{
+				Containers: []ContainerSpec{
+					{
+						Name:            "main",
+						Image:           "example.com/train:latest",
+						Resources:       ResourceSpec{GPUCount: 1},
+						SecurityContext: SecurityContext{Privileged: true},
+					},
+				},
+			},
+			code:  "UnsupportedPrivilegedContainer",
+			field: "spec.containers[0].securityContext.privileged",
+		},
+	}
+
+	transformer := DefaultTransformer{}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := transformer.Transform(tt.pod)
+			var unsupported *UnsupportedSpecError
+			if !errors.As(err, &unsupported) {
+				t.Fatalf("Transform error = %v, want UnsupportedSpecError", err)
+			}
+			if unsupported.Code != tt.code {
+				t.Fatalf("unsupported code = %q, want %q", unsupported.Code, tt.code)
+			}
+			if unsupported.Field != tt.field {
+				t.Fatalf("unsupported field = %q, want %q", unsupported.Field, tt.field)
+			}
+		})
+	}
+}

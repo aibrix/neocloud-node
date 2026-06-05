@@ -15,15 +15,24 @@ const (
 )
 
 type WorkloadRequest struct {
-	Image      string
-	Command    []string
-	Args       []string
-	Env        map[string]string
-	GPUCount   int
-	GPUType    string
-	MaxPrice   string
-	Provider   string
-	RegionHint string
+	Image            string
+	Command          []string
+	Args             []string
+	Env              map[string]string
+	GPUCount         int
+	GPUType          string
+	MaxPrice         string
+	Provider         string
+	RegionHint       string
+	RestartPolicy    string
+	ImagePullSecrets []string
+	Ports            []Port
+}
+
+type Port struct {
+	Name          string
+	ContainerPort int
+	Protocol      string
 }
 
 type Placement struct {
