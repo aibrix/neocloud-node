@@ -8,12 +8,25 @@ import (
 type LifecycleService struct {
 	store    BindingStore
 	provider ProviderAdapter
+	guard    *LaunchGuard
 }
 
-func NewLifecycleService(store BindingStore, provider ProviderAdapter) *LifecycleService {
-	return &LifecycleService{
+type LifecycleOption func(*LifecycleService)
+
+func NewLifecycleService(store BindingStore, provider ProviderAdapter, options ...LifecycleOption) *LifecycleService {
+	service := &LifecycleService{
 		store:    store,
 		provider: provider,
+	}
+	for _, option := range options {
+		option(service)
+	}
+	return service
+}
+
+func WithLaunchGuard(guard LaunchGuard) LifecycleOption {
+	return func(service *LifecycleService) {
+		service.guard = &guard
 	}
 }
 
@@ -24,6 +37,14 @@ func (s *LifecycleService) EnsureCreated(ctx context.Context, desired Binding) (
 	}
 	if binding.RemoteID != "" {
 		return binding, nil
+	}
+	if s.guard != nil {
+		if err := s.guard.Validate(binding.Request); err != nil {
+			binding.Phase = BindingFailed
+			binding.LastError = err.Error()
+			_ = s.store.Update(ctx, binding)
+			return binding, err
+		}
 	}
 
 	remote, err := s.provider.Create(ctx, idempotencyKey(binding), binding.Request)

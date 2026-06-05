@@ -113,3 +113,37 @@ func (p *deleteOnceProvider) Delete(ctx context.Context, remoteID string) error 
 	}
 	return p.ProviderAdapter.Delete(ctx, remoteID)
 }
+
+func TestLifecycleServiceRejectsPolicyViolationBeforeProviderCreate(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := NewMemoryBindingStore()
+	provider := NewFakeProvider("runpod")
+	service := NewLifecycleService(
+		store,
+		provider,
+		WithLaunchGuard(NewLaunchGuard(LaunchPolicy{RequireMaxPrice: true})),
+	)
+
+	_, err := service.EnsureCreated(ctx, Binding{
+		Namespace:   "default",
+		Name:        "train-job",
+		WorkloadUID: "pod-123",
+		Request: WorkloadRequest{
+			Image:    "example.com/train:latest",
+			GPUCount: 1,
+			Provider: "runpod",
+		},
+	})
+	var violation *PolicyViolationError
+	if !errors.As(err, &violation) {
+		t.Fatalf("EnsureCreated error = %v, want PolicyViolationError", err)
+	}
+	if violation.Code != "MissingMaxPrice" {
+		t.Fatalf("violation code = %q, want MissingMaxPrice", violation.Code)
+	}
+	if provider.CreateCount() != 0 {
+		t.Fatalf("provider CreateCount = %d, want 0", provider.CreateCount())
+	}
+}
