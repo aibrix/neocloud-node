@@ -10,6 +10,9 @@
 - `NotifyPods` supports the Virtual Kubelet async pod status callback.
 - `NewProviderFunc` returns an upstream `nodeutil.NewProviderFunc`, so the provider can be embedded directly in `nodeutil.NewNode` while letting upstream create the default node status provider.
 - `GetStatsSummary` returns a stable kubelet stats summary containing known pod references and container names.
+- `GetMetricsResource` exposes binding phase and current hourly burn-rate metrics from durable `BindingStore` state:
+  - `gpu_burst_node_binding_phase`
+  - `gpu_burst_node_current_burn_rate_usd_per_hour`
 - Unsupported pod specs are returned as `errdefs.InvalidInput` before a provider adapter can launch remote resources.
 
 ## Explicitly Not Implemented Yet

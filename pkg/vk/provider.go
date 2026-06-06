@@ -44,6 +44,7 @@ type Config struct {
 type Provider struct {
 	transformer PodTransformer
 	lifecycle   *core.LifecycleService
+	store       core.BindingStore
 	nodeName    string
 	recorder    EventRecorder
 
@@ -77,6 +78,7 @@ func NewProvider(config Config) (*Provider, error) {
 	return &Provider{
 		transformer: config.Transformer,
 		lifecycle:   core.NewLifecycleService(config.Store, config.Adapter, options...),
+		store:       config.Store,
 		nodeName:    config.NodeName,
 		recorder:    config.EventRecorder,
 		pods:        make(map[string]*corev1.Pod),
@@ -242,7 +244,11 @@ func (p *Provider) GetMetricsResource(ctx context.Context) ([]*dto.MetricFamily,
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return []*dto.MetricFamily{}, nil
+	bindings, err := p.store.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return bindingMetricFamilies(bindings), nil
 }
 
 func (p *Provider) upsertPod(ctx context.Context, pod *corev1.Pod) error {
@@ -401,6 +407,74 @@ func podStats(pod *corev1.Pod) stats.PodStats {
 		})
 	}
 	return podStats
+}
+
+func bindingMetricFamilies(bindings []core.Binding) []*dto.MetricFamily {
+	sort.SliceStable(bindings, func(i, j int) bool {
+		if bindings[i].Namespace != bindings[j].Namespace {
+			return bindings[i].Namespace < bindings[j].Namespace
+		}
+		return bindings[i].Name < bindings[j].Name
+	})
+
+	phaseFamily := gaugeFamily(
+		"gpu_burst_node_binding_phase",
+		"Current CloudPodBinding phase by pod.",
+	)
+	burnRateFamily := gaugeFamily(
+		"gpu_burst_node_current_burn_rate_usd_per_hour",
+		"Current estimated provider burn rate in USD per hour by pod.",
+	)
+
+	for _, binding := range bindings {
+		provider := firstNonEmpty(binding.Placement.Provider, binding.Request.Provider)
+		phaseFamily.Metric = append(phaseFamily.Metric, gaugeMetric(1,
+			label("namespace", binding.Namespace),
+			label("pod", binding.Name),
+			label("provider", provider),
+			label("phase", string(binding.Phase)),
+		))
+		if binding.Cost.HourlyUSD > 0 {
+			burnRateFamily.Metric = append(burnRateFamily.Metric, gaugeMetric(binding.Cost.HourlyUSD,
+				label("namespace", binding.Namespace),
+				label("pod", binding.Name),
+				label("provider", provider),
+				label("remote_id", binding.RemoteID),
+				label("cost_source", binding.Cost.Source),
+			))
+		}
+	}
+
+	return []*dto.MetricFamily{phaseFamily, burnRateFamily}
+}
+
+func gaugeFamily(name string, help string) *dto.MetricFamily {
+	metricType := dto.MetricType_GAUGE
+	return &dto.MetricFamily{
+		Name: &name,
+		Help: &help,
+		Type: &metricType,
+	}
+}
+
+func gaugeMetric(value float64, labels ...*dto.LabelPair) *dto.Metric {
+	return &dto.Metric{
+		Label: labels,
+		Gauge: &dto.Gauge{Value: &value},
+	}
+}
+
+func label(name string, value string) *dto.LabelPair {
+	return &dto.LabelPair{Name: &name, Value: &value}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func podPhase(phase core.BindingPhase) corev1.PodPhase {

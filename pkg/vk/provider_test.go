@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	dto "github.com/prometheus/client_model/go"
 	"github.com/virtual-kubelet/virtual-kubelet/errdefs"
 	"github.com/virtual-kubelet/virtual-kubelet/node/api"
 	"github.com/virtual-kubelet/virtual-kubelet/node/nodeutil"
@@ -243,6 +244,46 @@ func TestStatsSummaryIncludesKnownPods(t *testing.T) {
 	}
 }
 
+func TestMetricsResourceIncludesBindingBurnRate(t *testing.T) {
+	ctx := context.Background()
+	provider := newTestProvider(t, pricedProvider{
+		remoteID:   "remote-cost",
+		provider:   "runpod",
+		phase:      core.RemoteRunning,
+		hourlyCost: 0.74,
+		costSource: "runpod.adjustedCostPerHr",
+	})
+	pod := gpuPod("costed", "uid-costed")
+
+	if err := provider.CreatePod(ctx, pod); err != nil {
+		t.Fatalf("CreatePod() error = %v", err)
+	}
+	metrics, err := provider.GetMetricsResource(ctx)
+	if err != nil {
+		t.Fatalf("GetMetricsResource() error = %v", err)
+	}
+	family := requireMetricFamily(t, metrics, "gpu_burst_node_current_burn_rate_usd_per_hour")
+	value := requireGaugeValue(t, family, map[string]string{
+		"namespace": "default",
+		"pod":       "costed",
+		"provider":  "runpod",
+		"remote_id": "remote-cost",
+	})
+	if value != 0.74 {
+		t.Fatalf("burn rate = %.2f, want 0.74", value)
+	}
+
+	phaseFamily := requireMetricFamily(t, metrics, "gpu_burst_node_binding_phase")
+	if got := requireGaugeValue(t, phaseFamily, map[string]string{
+		"namespace": "default",
+		"pod":       "costed",
+		"provider":  "runpod",
+		"phase":     string(core.BindingRunning),
+	}); got != 1 {
+		t.Fatalf("phase gauge = %.2f, want 1", got)
+	}
+}
+
 func TestGetPodStatusSyncsRemoteProviderPhase(t *testing.T) {
 	ctx := context.Background()
 	adapter := &phaseProvider{phase: core.RemoteRunning}
@@ -436,6 +477,52 @@ func assertInvalidInput(t *testing.T, method string, err error) {
 	}
 }
 
+func requireMetricFamily(t *testing.T, families []*dto.MetricFamily, name string) *dto.MetricFamily {
+	t.Helper()
+
+	for _, family := range families {
+		if family.GetName() == name {
+			return family
+		}
+	}
+	t.Fatalf("metric family %q not found in %#v", name, families)
+	return nil
+}
+
+func requireGaugeValue(t *testing.T, family *dto.MetricFamily, labels map[string]string) float64 {
+	t.Helper()
+
+	for _, metric := range family.Metric {
+		if metricLabelsMatch(metric, labels) {
+			if metric.Gauge == nil {
+				t.Fatalf("metric %#v has no gauge", metric)
+			}
+			return metric.Gauge.GetValue()
+		}
+	}
+	t.Fatalf("metric labels %#v not found in family %#v", labels, family)
+	return 0
+}
+
+func metricLabelsMatch(metric *dto.Metric, labels map[string]string) bool {
+	for key, want := range labels {
+		var found bool
+		for _, label := range metric.Label {
+			if label.GetName() == key {
+				if label.GetValue() != want {
+					return false
+				}
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
 func assertEventContains(t *testing.T, recorder *record.FakeRecorder, eventType string, reason string) {
 	t.Helper()
 
@@ -465,6 +552,14 @@ func (nopReadWriteCloser) Close() error {
 
 type phaseProvider struct {
 	phase core.RemotePhase
+}
+
+type pricedProvider struct {
+	remoteID   string
+	provider   string
+	phase      core.RemotePhase
+	hourlyCost float64
+	costSource string
 }
 
 type failingProvider struct {
@@ -502,5 +597,31 @@ func (p *phaseProvider) Get(ctx context.Context, remoteID string) (core.RemoteRe
 }
 
 func (p *phaseProvider) Delete(ctx context.Context, remoteID string) error {
+	return nil
+}
+
+func (p pricedProvider) Create(ctx context.Context, idempotencyKey string, request core.WorkloadRequest) (core.RemoteResource, error) {
+	return core.RemoteResource{
+		ID:             p.remoteID,
+		IdempotencyKey: idempotencyKey,
+		Provider:       p.provider,
+		Phase:          p.phase,
+		Request:        request,
+		HourlyCost:     p.hourlyCost,
+		CostSource:     p.costSource,
+	}, nil
+}
+
+func (p pricedProvider) Get(ctx context.Context, remoteID string) (core.RemoteResource, error) {
+	return core.RemoteResource{
+		ID:         remoteID,
+		Provider:   p.provider,
+		Phase:      p.phase,
+		HourlyCost: p.hourlyCost,
+		CostSource: p.costSource,
+	}, nil
+}
+
+func (p pricedProvider) Delete(ctx context.Context, remoteID string) error {
 	return nil
 }
