@@ -11,6 +11,6 @@ Current Phase 0 status:
 - Minimal transformer for one GPU container.
 - Fake provider adapter with idempotent create/delete semantics.
 - Lifecycle service that keeps local binding state until remote cleanup succeeds.
+- Kubernetes `corev1.Pod` adapter in `pkg/kube`.
 
 The production integration will wrap this core with upstream Virtual Kubelet and Kubernetes clients.
-
