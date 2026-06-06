@@ -80,11 +80,13 @@ func TestParseOptionsReadsOrphanSweeperOptions(t *testing.T) {
 	env := mapEnv(map[string]string{
 		"GPU_BURST_ORPHAN_SWEEPER_INTERVAL": "5m",
 		"GPU_BURST_ORPHAN_SWEEPER_DRY_RUN":  "false",
+		"GPU_BURST_STATUS_SYNC_INTERVAL":    "20s",
 	})
 
 	options, err := ParseOptions([]string{
 		"--orphan-sweeper-interval=30s",
 		"--orphan-sweeper-dry-run=true",
+		"--status-sync-interval=3s",
 	}, env)
 	if err != nil {
 		t.Fatalf("ParseOptions() error = %v", err)
@@ -94,6 +96,9 @@ func TestParseOptionsReadsOrphanSweeperOptions(t *testing.T) {
 	}
 	if !options.OrphanSweeperDryRun {
 		t.Fatal("OrphanSweeperDryRun = false, want true flag override")
+	}
+	if options.StatusSyncInterval != 3*time.Second {
+		t.Fatalf("StatusSyncInterval = %s, want 3s", options.StatusSyncInterval)
 	}
 }
 

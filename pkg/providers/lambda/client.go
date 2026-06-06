@@ -211,8 +211,8 @@ func (c *Client) launchPayload(idempotencyKey string, name string, request core.
 		Name:             name,
 		Hostname:         name,
 		Tags: []tag{
-			{Key: "gpu-burst-node.aibrix.ai/workload", Value: idempotencyKey},
-			{Key: "gpu-burst-node.aibrix.ai/managed-by", Value: "gpu-burst-node"},
+			{Key: "gpu-burst-node:aibrix:workload", Value: idempotencyKey},
+			{Key: "gpu-burst-node:aibrix:managed-by", Value: "gpu-burst-node"},
 		},
 	}
 	if imageID := providerHint(request, core.AnnotationLambdaImageID); imageID != "" {

@@ -159,6 +159,11 @@ PY
 
 lambda_list_by_name() {
 	local name="$1"
+	lambda_list_by_name_with_status "$name" | awk '{print $1}'
+}
+
+lambda_list_by_name_with_status() {
+	local name="$1"
 	local body_file
 	body_file="$(mktemp)"
 	local status
@@ -180,7 +185,7 @@ with open(sys.argv[2], encoding="utf-8") as f:
 
 for instance in data.get("data", []):
     if instance.get("name") == name:
-        print(instance.get("id", ""))
+        print(instance.get("id", ""), instance.get("status", ""))
 PY
 	rm -f "$body_file"
 }
@@ -269,11 +274,12 @@ start_controller() {
     --binding-store=kubernetes \
     --listen-addr="$LISTEN_ADDR" \
     --lambda-region="$REGION" \
-    --lambda-instance-type="$INSTANCE_TYPE" \
-    --lambda-ssh-key-names="${LAMBDA_E2E_SSH_KEY_NAMES:-${LAMBDA_CLOUD_SSH_KEYS:-}}" \
-    --advertise-gpu-count=1 \
-    --advertise-pod-capacity=5 \
-    --max-gpu-count=1 &
+		--lambda-instance-type="$INSTANCE_TYPE" \
+		--lambda-ssh-key-names="${LAMBDA_E2E_SSH_KEY_NAMES:-${LAMBDA_CLOUD_SSH_KEYS:-}}" \
+		--status-sync-interval="${LAMBDA_E2E_STATUS_SYNC_INTERVAL:-5s}" \
+		--advertise-gpu-count=1 \
+		--advertise-pod-capacity=5 \
+		--max-gpu-count=1 &
   CONTROLLER_PID=$!
   local deadline=$((SECONDS + 60))
   until "$KUBECTL" get "node/${NODE_NAME}" >/dev/null 2>&1; do
@@ -358,10 +364,18 @@ delete_pod_and_wait_cleanup() {
 }
 
 final_orphan_check() {
-  local external_name="$1"
-  local remaining
-  remaining="$(lambda_list_by_name "$external_name" | wc -l | tr -d ' ')"
-  [[ "$remaining" == "0" ]] || fail "found $remaining Lambda instance(s) still matching $external_name"
+	local external_name="$1"
+	local deadline=$((SECONDS + 300))
+	local matches active
+	while ((SECONDS < deadline)); do
+		matches="$(lambda_list_by_name_with_status "$external_name" | sed '/^$/d' || true)"
+		[[ -z "$matches" ]] && return 0
+		active="$(awk '$2 != "terminated" { print }' <<<"$matches")"
+		[[ -z "$active" ]] && return 0
+		log "waiting for Lambda termination: ${active//$'\n'/; }"
+		sleep 10
+	done
+	fail "Lambda instance(s) still not terminated for ${external_name}: ${active:-unknown}"
 }
 
 main() {

@@ -80,6 +80,8 @@ type Options struct {
 
 	OrphanSweeperInterval time.Duration
 	OrphanSweeperDryRun   bool
+
+	StatusSyncInterval time.Duration
 }
 
 func ParseOptions(args []string, getenv func(string) string) (Options, error) {
@@ -116,6 +118,7 @@ func ParseOptions(args []string, getenv func(string) string) (Options, error) {
 
 		OrphanSweeperInterval: durationEnv(getenv, "GPU_BURST_ORPHAN_SWEEPER_INTERVAL", 0),
 		OrphanSweeperDryRun:   boolEnv(getenv, "GPU_BURST_ORPHAN_SWEEPER_DRY_RUN", true),
+		StatusSyncInterval:    durationEnv(getenv, "GPU_BURST_STATUS_SYNC_INTERVAL", 15*time.Second),
 	}
 
 	fs := flag.NewFlagSet("gpu-burst-node", flag.ContinueOnError)
@@ -145,6 +148,7 @@ func ParseOptions(args []string, getenv func(string) string) (Options, error) {
 	fs.StringVar(&options.AdvertiseMemory, "advertise-memory", options.AdvertiseMemory, "virtual node memory capacity advertised to the scheduler")
 	fs.DurationVar(&options.OrphanSweeperInterval, "orphan-sweeper-interval", options.OrphanSweeperInterval, "periodic orphan sweeper interval; 0 disables it")
 	fs.BoolVar(&options.OrphanSweeperDryRun, "orphan-sweeper-dry-run", options.OrphanSweeperDryRun, "report orphaned provider resources without deleting them")
+	fs.DurationVar(&options.StatusSyncInterval, "status-sync-interval", options.StatusSyncInterval, "periodic remote status sync interval; 0 disables it")
 
 	if err := fs.Parse(args); err != nil {
 		return Options{}, err
@@ -202,6 +206,8 @@ func NewNode(ctx context.Context, options Options, kubeClient kubernetes.Interfa
 		NodeName:    options.NodeName,
 		EventRecorder: newEventRecorder(kubeClient,
 			"gpu-burst-node/"+options.Provider),
+		StatusSyncContext:  ctx,
+		StatusSyncInterval: options.StatusSyncInterval,
 	}
 
 	nodeOptions := []nodeutil.NodeOpt{

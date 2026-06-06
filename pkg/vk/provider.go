@@ -7,6 +7,7 @@ import (
 	"io"
 	"sort"
 	"sync"
+	"time"
 
 	dto "github.com/prometheus/client_model/go"
 	"github.com/virtual-kubelet/virtual-kubelet/errdefs"
@@ -39,6 +40,9 @@ type Config struct {
 	LaunchGuard   *core.LaunchGuard
 	NodeName      string
 	EventRecorder EventRecorder
+
+	StatusSyncContext  context.Context
+	StatusSyncInterval time.Duration
 }
 
 type Provider struct {
@@ -75,14 +79,22 @@ func NewProvider(config Config) (*Provider, error) {
 		options = append(options, core.WithLaunchGuard(*config.LaunchGuard))
 	}
 
-	return &Provider{
+	provider := &Provider{
 		transformer: config.Transformer,
 		lifecycle:   core.NewLifecycleService(config.Store, config.Adapter, options...),
 		store:       config.Store,
 		nodeName:    config.NodeName,
 		recorder:    config.EventRecorder,
 		pods:        make(map[string]*corev1.Pod),
-	}, nil
+	}
+	if config.StatusSyncInterval > 0 {
+		syncContext := config.StatusSyncContext
+		if syncContext == nil {
+			syncContext = context.Background()
+		}
+		go provider.runStatusSync(syncContext, config.StatusSyncInterval)
+	}
+	return provider, nil
 }
 
 func NewProviderFunc(config Config) nodeutil.NewProviderFunc {
@@ -249,6 +261,36 @@ func (p *Provider) GetMetricsResource(ctx context.Context) ([]*dto.MetricFamily,
 		return nil, err
 	}
 	return bindingMetricFamilies(bindings), nil
+}
+
+func (p *Provider) runStatusSync(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			p.syncCachedPods(ctx)
+		}
+	}
+}
+
+func (p *Provider) syncCachedPods(ctx context.Context) {
+	p.mu.RLock()
+	pods := make([]*corev1.Pod, 0, len(p.pods))
+	for _, pod := range p.pods {
+		pods = append(pods, pod.DeepCopy())
+	}
+	p.mu.RUnlock()
+
+	for _, pod := range pods {
+		if ctx.Err() != nil {
+			return
+		}
+		_, _ = p.syncPodStatus(ctx, pod)
+	}
 }
 
 func (p *Provider) upsertPod(ctx context.Context, pod *corev1.Pod) error {

@@ -72,6 +72,10 @@ func TestClientCreateLaunchesLambdaInstance(t *testing.T) {
 	assertPayloadString(t, gotPayload, "name", "gpu-burst-node-default-pod-123")
 	assertPayloadStringSlice(t, gotPayload, "ssh_key_names", []string{"job-key"})
 	assertPayloadString(t, gotPayload, "user_data", "#cloud-config")
+	assertPayloadTags(t, gotPayload, map[string]string{
+		"gpu-burst-node:aibrix:workload":   "default/pod-123",
+		"gpu-burst-node:aibrix:managed-by": "gpu-burst-node",
+	})
 
 	image, ok := gotPayload["image"].(map[string]any)
 	if !ok || image["id"] != "image-1" {
@@ -278,6 +282,30 @@ func assertPayloadStringSlice(t *testing.T, payload map[string]any, key string, 
 	for idx := range raw {
 		if raw[idx] != want[idx] {
 			t.Fatalf("%s[%d] = %#v, want %q", key, idx, raw[idx], want[idx])
+		}
+	}
+}
+
+func assertPayloadTags(t *testing.T, payload map[string]any, want map[string]string) {
+	t.Helper()
+
+	raw, ok := payload["tags"].([]any)
+	if !ok {
+		t.Fatalf("tags = %#v, want object array", payload["tags"])
+	}
+	got := make(map[string]string, len(raw))
+	for _, item := range raw {
+		tag, ok := item.(map[string]any)
+		if !ok {
+			t.Fatalf("tag item = %#v, want object", item)
+		}
+		key, _ := tag["key"].(string)
+		value, _ := tag["value"].(string)
+		got[key] = value
+	}
+	for key, value := range want {
+		if got[key] != value {
+			t.Fatalf("tag %q = %q, want %q; tags=%#v", key, got[key], value, got)
 		}
 	}
 }

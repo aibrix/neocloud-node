@@ -5,7 +5,9 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	dto "github.com/prometheus/client_model/go"
 	"github.com/virtual-kubelet/virtual-kubelet/errdefs"
@@ -309,6 +311,60 @@ func TestGetPodStatusSyncsRemoteProviderPhase(t *testing.T) {
 	}
 	if cached.Status.Phase != corev1.PodSucceeded {
 		t.Fatalf("cached phase = %s, want %s", cached.Status.Phase, corev1.PodSucceeded)
+	}
+}
+
+func TestStatusSyncLoopUpdatesCachedPodWithoutExternalStatusRead(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	adapter := &phaseProvider{phase: core.RemotePending}
+	provider := newTestProviderWithConfig(t, Config{
+		Adapter:            adapter,
+		StatusSyncContext:  ctx,
+		StatusSyncInterval: 10 * time.Millisecond,
+	})
+	pod := gpuPod("sync-loop", "uid-sync-loop")
+
+	var mu sync.Mutex
+	var notified []corev1.PodPhase
+	provider.NotifyPods(ctx, func(pod *corev1.Pod) {
+		mu.Lock()
+		defer mu.Unlock()
+		notified = append(notified, pod.Status.Phase)
+	})
+
+	if err := provider.CreatePod(ctx, pod); err != nil {
+		t.Fatalf("CreatePod() error = %v", err)
+	}
+	if cached := provider.getCachedPod(podKey("default", "sync-loop")); cached.Status.Phase != corev1.PodPending {
+		t.Fatalf("cached phase after create = %s, want Pending", cached.Status.Phase)
+	}
+
+	adapter.phase = core.RemoteRunning
+	deadline := time.After(time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-deadline:
+			cached := provider.getCachedPod(podKey("default", "sync-loop"))
+			mu.Lock()
+			defer mu.Unlock()
+			t.Fatalf("cached phase = %s, want Running; notified=%v", cached.Status.Phase, notified)
+		case <-ticker.C:
+			cached := provider.getCachedPod(podKey("default", "sync-loop"))
+			if cached.Status.Phase != corev1.PodRunning {
+				continue
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			for _, phase := range notified {
+				if phase == corev1.PodRunning {
+					return
+				}
+			}
+			t.Fatalf("cached phase is Running but notifier never sent Running; notified=%v", notified)
+		}
 	}
 }
 
