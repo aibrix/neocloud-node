@@ -97,6 +97,26 @@ func (s *BindingStore) GetByWorkloadUID(ctx context.Context, namespace string, w
 	return bindingFromObject(object)
 }
 
+func (s *BindingStore) List(ctx context.Context) ([]core.Binding, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	list, err := s.client.Resource(CloudPodBindingsGVR).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	bindings := make([]core.Binding, 0, len(list.Items))
+	for index := range list.Items {
+		binding, err := bindingFromObject(&list.Items[index])
+		if err != nil {
+			return nil, err
+		}
+		bindings = append(bindings, binding)
+	}
+	return bindings, nil
+}
+
 func (s *BindingStore) Update(ctx context.Context, binding core.Binding) error {
 	if err := ctx.Err(); err != nil {
 		return err

@@ -140,6 +140,10 @@ func (c *Client) List(ctx context.Context, filter InstanceFilter) ([]core.Remote
 	return resources, nil
 }
 
+func (c *Client) ListRemoteResources(ctx context.Context) ([]core.RemoteResource, error) {
+	return c.List(ctx, InstanceFilter{})
+}
+
 func (c *Client) FindByExternalName(ctx context.Context, name string) (core.RemoteResource, error) {
 	instances, err := c.List(ctx, InstanceFilter{Name: name})
 	if err != nil {
@@ -345,9 +349,10 @@ type InstanceFilter struct {
 
 func remoteFromInstance(instance instance) core.RemoteResource {
 	return core.RemoteResource{
-		ID:       instance.ID,
-		Provider: providerName,
-		Phase:    phaseFromStatus(instance.Status),
+		ID:           instance.ID,
+		ExternalName: instance.Name,
+		Provider:     providerName,
+		Phase:        phaseFromStatus(instance.Status),
 	}
 }
 
@@ -458,10 +463,7 @@ func classifyHTTPStatus(statusCode int, body string) core.ErrorClass {
 }
 
 func externalName(idempotencyKey string) string {
-	name := strings.ToLower(idempotencyKey)
-	replacer := strings.NewReplacer("/", "-", "_", "-", ".", "-", ":", "-")
-	name = replacer.Replace(name)
-	name = "gpu-burst-node-" + name
+	name := core.ManagedExternalName(idempotencyKey)
 	if len(name) > 64 {
 		return name[:64]
 	}

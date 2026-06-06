@@ -8,6 +8,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic/fake"
 
 	"github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/core"
@@ -15,7 +16,7 @@ import (
 
 func TestCreateOrGetCreatesCloudPodBinding(t *testing.T) {
 	ctx := context.Background()
-	store := NewBindingStore(fake.NewSimpleDynamicClient(runtime.NewScheme()))
+	store := newTestBindingStore()
 	binding := testBinding()
 
 	got, created, err := store.CreateOrGet(ctx, binding)
@@ -57,7 +58,7 @@ func TestCreateOrGetCreatesCloudPodBinding(t *testing.T) {
 
 func TestCreateOrGetReturnsExistingBindingWithoutOverwritingRemoteState(t *testing.T) {
 	ctx := context.Background()
-	store := NewBindingStore(fake.NewSimpleDynamicClient(runtime.NewScheme()))
+	store := newTestBindingStore()
 	binding := testBinding()
 
 	if _, _, err := store.CreateOrGet(ctx, binding); err != nil {
@@ -85,7 +86,7 @@ func TestCreateOrGetReturnsExistingBindingWithoutOverwritingRemoteState(t *testi
 
 func TestUpdatePersistsRemoteStatus(t *testing.T) {
 	ctx := context.Background()
-	store := NewBindingStore(fake.NewSimpleDynamicClient(runtime.NewScheme()))
+	store := newTestBindingStore()
 	binding := testBinding()
 	if _, _, err := store.CreateOrGet(ctx, binding); err != nil {
 		t.Fatalf("CreateOrGet() setup error = %v", err)
@@ -136,9 +137,34 @@ func TestUpdatePersistsRemoteStatus(t *testing.T) {
 	}
 }
 
+func TestListReturnsBindingsAcrossNamespaces(t *testing.T) {
+	ctx := context.Background()
+	store := newTestBindingStore()
+
+	first := testBinding()
+	second := testBinding()
+	second.Namespace = "other"
+	second.Name = "train-2"
+	second.WorkloadUID = "22222222-2222-3333-4444-555555555555"
+	if _, _, err := store.CreateOrGet(ctx, first); err != nil {
+		t.Fatalf("CreateOrGet() first error = %v", err)
+	}
+	if _, _, err := store.CreateOrGet(ctx, second); err != nil {
+		t.Fatalf("CreateOrGet() second error = %v", err)
+	}
+
+	bindings, err := store.List(ctx)
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(bindings) != 2 {
+		t.Fatalf("len(List()) = %d, want 2", len(bindings))
+	}
+}
+
 func TestMarkDeletingAndCompleteDelete(t *testing.T) {
 	ctx := context.Background()
-	store := NewBindingStore(fake.NewSimpleDynamicClient(runtime.NewScheme()))
+	store := newTestBindingStore()
 	binding := testBinding()
 	if _, _, err := store.CreateOrGet(ctx, binding); err != nil {
 		t.Fatalf("CreateOrGet() setup error = %v", err)
@@ -163,7 +189,7 @@ func TestMarkDeletingAndCompleteDelete(t *testing.T) {
 
 func TestGetByWorkloadUIDReturnsBindingNotFound(t *testing.T) {
 	ctx := context.Background()
-	store := NewBindingStore(fake.NewSimpleDynamicClient(runtime.NewScheme()))
+	store := newTestBindingStore()
 
 	_, err := store.GetByWorkloadUID(ctx, "default", "missing")
 	if !errors.Is(err, core.ErrBindingNotFound) {
@@ -197,6 +223,15 @@ func testBinding() core.Binding {
 			},
 		},
 	}
+}
+
+func newTestBindingStore() *BindingStore {
+	return NewBindingStore(fake.NewSimpleDynamicClientWithCustomListKinds(
+		runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{
+			CloudPodBindingsGVR: CloudPodBindingKind + "List",
+		},
+	))
 }
 
 func hasString(values []string, want string) bool {

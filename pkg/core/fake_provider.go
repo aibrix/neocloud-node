@@ -22,6 +22,7 @@ const (
 type RemoteResource struct {
 	ID             string
 	IdempotencyKey string
+	ExternalName   string
 	Provider       string
 	Phase          RemotePhase
 	Request        WorkloadRequest
@@ -67,6 +68,7 @@ func (p *FakeProvider) Create(ctx context.Context, idempotencyKey string, reques
 	remote := RemoteResource{
 		ID:             fmt.Sprintf("%s-%d", p.provider, p.sequence),
 		IdempotencyKey: idempotencyKey,
+		ExternalName:   ManagedExternalName(idempotencyKey),
 		Provider:       p.provider,
 		Phase:          RemoteRunning,
 		Request:        request,

@@ -8,6 +8,7 @@ import (
 type BindingStore interface {
 	CreateOrGet(ctx context.Context, binding Binding) (Binding, bool, error)
 	GetByWorkloadUID(ctx context.Context, namespace string, workloadUID string) (Binding, error)
+	List(ctx context.Context) ([]Binding, error)
 	Update(ctx context.Context, binding Binding) error
 	MarkDeleting(ctx context.Context, namespace string, workloadUID string) (Binding, error)
 	CompleteDelete(ctx context.Context, namespace string, workloadUID string) error
@@ -56,6 +57,21 @@ func (s *MemoryBindingStore) GetByWorkloadUID(ctx context.Context, namespace str
 		return Binding{}, ErrBindingNotFound
 	}
 	return binding, nil
+}
+
+func (s *MemoryBindingStore) List(ctx context.Context) ([]Binding, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	out := make([]Binding, 0, len(s.bindings))
+	for _, binding := range s.bindings {
+		out = append(out, binding)
+	}
+	return out, nil
 }
 
 func (s *MemoryBindingStore) Update(ctx context.Context, binding Binding) error {

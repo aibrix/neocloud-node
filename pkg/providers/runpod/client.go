@@ -144,6 +144,10 @@ func (c *Client) List(ctx context.Context, filter PodFilter) ([]core.RemoteResou
 	return resources, nil
 }
 
+func (c *Client) ListRemoteResources(ctx context.Context) ([]core.RemoteResource, error) {
+	return c.List(ctx, PodFilter{IncludeMachine: true, IncludeNetworkVolume: true})
+}
+
 func (c *Client) FindByExternalName(ctx context.Context, name string) (core.RemoteResource, error) {
 	pods, err := c.List(ctx, PodFilter{Name: name, IncludeMachine: true, IncludeNetworkVolume: true})
 	if err != nil {
@@ -271,6 +275,7 @@ func remoteFromPod(pod podResponse, idempotencyKey string, request core.Workload
 	return core.RemoteResource{
 		ID:             pod.ID,
 		IdempotencyKey: idempotencyKey,
+		ExternalName:   pod.Name,
 		Provider:       providerName,
 		Phase:          phaseFromDesiredStatus(pod.DesiredStatus),
 		Request:        request,
@@ -291,10 +296,7 @@ func phaseFromDesiredStatus(status string) core.RemotePhase {
 }
 
 func externalName(idempotencyKey string) string {
-	name := strings.ToLower(idempotencyKey)
-	replacer := strings.NewReplacer("/", "-", "_", "-", ".", "-", ":", "-")
-	name = replacer.Replace(name)
-	name = "gpu-burst-node-" + name
+	name := core.ManagedExternalName(idempotencyKey)
 	if len(name) > 191 {
 		return name[:191]
 	}

@@ -6,7 +6,7 @@
 
 这份计划把项目拆成可以逐阶段验证的工程路线。当前共识是：MVP 保持简单，不引入定制 scheduler、不引入 Kueue、不引入一组策略 CRD；用户入口仍然是标准 `Pod` / `Job` 加少量 annotations；只新增一个内部状态 CRD `CloudPodBinding`；`BindingStore`、`Transformer`、`ProviderAdapter` 都是代码内部接口，不是 CRD。
 
-2026-06-06 更新：真实联调先不作为阶段门槛。当前优先积累可测代码和清晰策略模型，E2E 等 API-key、账号、清理流程准备好后再做。spot/interruptible、成本、burn-rate、fallback 策略单独见 [Spot Market Strategy](spot-market-strategy.md)。AIBrix batch 和 GPU Burst Node 共享 resource manager 的设计见 [Shared Resource Manager Architecture](resource-manager-architecture.md)。
+2026-06-06 更新：真实联调先不作为阶段门槛。当前优先积累可测代码和清晰策略模型，E2E 等 API-key、账号、清理流程准备好后再做。spot/interruptible、成本、burn-rate、fallback 策略单独见 [Spot Market Strategy](spot-market-strategy.md)。AIBrix batch 和 GPU Burst Node 共享 resource manager 的设计见 [Shared Resource Manager Architecture](resource-manager-architecture.md)。orphan sweeper 机制见 [Orphan Sweeper](orphan-sweeper.md)。
 
 ## 总体阶段
 
