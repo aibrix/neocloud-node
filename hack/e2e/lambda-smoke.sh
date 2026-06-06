@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 KUBECTL="${KUBECTL:-kubectl}"
 GO="${GO:-go}"
 PYTHON="${PYTHON:-python3}"
+CURL="${CURL:-curl}"
 
 NODE_NAME="${GPU_BURST_E2E_NODE_NAME:-aibrix-gpu-burst-lambda-e2e}"
 NAMESPACE="${GPU_BURST_E2E_NAMESPACE:-default}"
@@ -37,79 +38,85 @@ require_env() {
 }
 
 lambda_api() {
-  local method="$1"
-  local path="$2"
-  local body="${3:-}"
-  "$PYTHON" - "$method" "$path" "$body" <<'PY'
+	local method="$1"
+	local path="$2"
+	local body="${3:-}"
+	local body_file
+	body_file="$(mktemp)"
+	local status
+	status="$(lambda_request "$body_file" "$method" "$path" "$body" "Bearer ${LAMBDA_API_KEY}")"
+	if ! is_success_status "$status"; then
+		status="$(lambda_request "$body_file" "$method" "$path" "$body" "$(lambda_basic_auth_header)")"
+	fi
+	printf '%s\n' "$status"
+	cat "$body_file"
+	rm -f "$body_file"
+}
+
+lambda_basic_auth_header() {
+	"$PYTHON" <<'PY'
 import base64
 import os
-import sys
-import urllib.error
-import urllib.request
 
-method = sys.argv[1]
-path = sys.argv[2]
-body = sys.argv[3].encode() if len(sys.argv) > 3 and sys.argv[3] else None
-base = os.environ.get("LAMBDA_BASE_URL", "https://cloud.lambda.ai/api/v1").rstrip("/")
-api_key = os.environ.get("LAMBDA_API_KEY") or os.environ.get("LAMBDA_CLOUD_API_KEY")
-headers = {
-    "Accept": "application/json",
-    "Content-Type": "application/json",
-    "Authorization": "Bearer " + api_key,
-}
-request = urllib.request.Request(base + path, data=body, headers=headers, method=method)
-try:
-    with urllib.request.urlopen(request, timeout=30) as response:
-        print(response.status)
-        print(response.read().decode("utf-8", "replace"))
-except urllib.error.HTTPError as exc:
-    fallback_headers = dict(headers)
-    fallback_headers["Authorization"] = "Basic " + base64.b64encode((api_key + ":").encode()).decode()
-    request = urllib.request.Request(base + path, data=body, headers=fallback_headers, method=method)
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            print(response.status)
-            print(response.read().decode("utf-8", "replace"))
-    except urllib.error.HTTPError as basic_exc:
-        print(basic_exc.code)
-        print(basic_exc.read().decode("utf-8", "replace"))
-        sys.exit(0)
+api_key = os.environ["LAMBDA_API_KEY"]
+print("Basic " + base64.b64encode((api_key + ":").encode()).decode())
 PY
 }
 
+lambda_request() {
+	local output_file="$1"
+	local method="$2"
+	local path="$3"
+	local body="$4"
+	local authorization="$5"
+	local url="${LAMBDA_BASE_URL%/}${path}"
+	local args=(
+		-sS
+		-m 30
+		-X "$method"
+		-H "Accept: application/json"
+		-H "Authorization: ${authorization}"
+		-o "$output_file"
+		-w "%{http_code}"
+	)
+	if [[ -n "$body" ]]; then
+		args+=(-H "Content-Type: application/json" --data "$body")
+	fi
+	args+=("$url")
+	local status
+	if ! status="$("$CURL" "${args[@]}")"; then
+		printf '000'
+		return 0
+	fi
+	printf '%s' "$status"
+}
+
+is_success_status() {
+	local status="$1"
+	[[ "$status" =~ ^2[0-9][0-9]$ ]]
+}
+
 select_lambda_capacity() {
-  "$PYTHON" <<'PY'
-import base64
+	local body_file
+	body_file="$(mktemp)"
+	local status
+	status="$(lambda_request "$body_file" GET "/instance-types" "" "Bearer ${LAMBDA_API_KEY}")"
+	if ! is_success_status "$status"; then
+		status="$(lambda_request "$body_file" GET "/instance-types" "" "$(lambda_basic_auth_header)")"
+	fi
+	if ! is_success_status "$status"; then
+		local detail
+		detail="$(tr '\n' ' ' <"$body_file" | cut -c1-300)"
+		rm -f "$body_file"
+		fail "Lambda instance-types request failed: status=${status} detail=${detail}"
+	fi
+	"$PYTHON" - "$body_file" <<'PY'
 import json
 import os
 import sys
-import urllib.error
-import urllib.request
 
-base = os.environ.get("LAMBDA_BASE_URL", "https://cloud.lambda.ai/api/v1").rstrip("/")
-api_key = os.environ.get("LAMBDA_API_KEY") or os.environ.get("LAMBDA_CLOUD_API_KEY")
-if not api_key:
-    raise SystemExit("missing LAMBDA_API_KEY or LAMBDA_CLOUD_API_KEY")
-
-def fetch(auth):
-    req = urllib.request.Request(base + "/instance-types", headers={
-        "Accept": "application/json",
-        "Authorization": auth,
-    })
-    with urllib.request.urlopen(req, timeout=30) as response:
-        return json.loads(response.read().decode("utf-8"))
-
-try:
-    data = fetch("Bearer " + api_key)
-except urllib.error.HTTPError as bearer_error:
-    try:
-        data = fetch("Basic " + base64.b64encode((api_key + ":").encode()).decode())
-    except urllib.error.HTTPError as basic_error:
-        detail = basic_error.read().decode("utf-8", "replace")[:300].replace("\n", " ")
-        raise SystemExit(
-            f"Lambda instance-types request failed: bearer={bearer_error.code} "
-            f"basic={basic_error.code} detail={detail}"
-        )
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
 
 items = data.get("data", {})
 if isinstance(items, list):
@@ -147,39 +154,35 @@ for name in preferred:
 
 raise SystemExit("no allowed single-GPU Lambda capacity found for gpu_1x_a10 or gpu_1x_a100")
 PY
+	rm -f "$body_file"
 }
 
 lambda_list_by_name() {
-  local name="$1"
-  "$PYTHON" - "$name" <<'PY'
-import base64
+	local name="$1"
+	local body_file
+	body_file="$(mktemp)"
+	local status
+	status="$(lambda_request "$body_file" GET "/instances" "" "Bearer ${LAMBDA_API_KEY}")"
+	if ! is_success_status "$status"; then
+		status="$(lambda_request "$body_file" GET "/instances" "" "$(lambda_basic_auth_header)")"
+	fi
+	if ! is_success_status "$status"; then
+		rm -f "$body_file"
+		return 0
+	fi
+	"$PYTHON" - "$name" "$body_file" <<'PY'
 import json
-import os
 import sys
-import urllib.error
-import urllib.request
 
 name = sys.argv[1]
-base = os.environ.get("LAMBDA_BASE_URL", "https://cloud.lambda.ai/api/v1").rstrip("/")
-api_key = os.environ.get("LAMBDA_API_KEY") or os.environ.get("LAMBDA_CLOUD_API_KEY")
-
-def fetch(auth):
-    req = urllib.request.Request(base + "/instances", headers={
-        "Accept": "application/json",
-        "Authorization": auth,
-    })
-    with urllib.request.urlopen(req, timeout=30) as response:
-        return json.loads(response.read().decode("utf-8"))
-
-try:
-    data = fetch("Bearer " + api_key)
-except urllib.error.HTTPError:
-    data = fetch("Basic " + base64.b64encode((api_key + ":").encode()).decode())
+with open(sys.argv[2], encoding="utf-8") as f:
+    data = json.load(f)
 
 for instance in data.get("data", []):
     if instance.get("name") == name:
         print(instance.get("id", ""))
 PY
+	rm -f "$body_file"
 }
 
 terminate_lambda_by_id() {
@@ -371,9 +374,10 @@ main() {
     export LAMBDA_E2E_SSH_KEY_NAMES="$LAMBDA_CLOUD_SSH_KEYS"
   fi
   require_env LAMBDA_E2E_SSH_KEY_NAMES
-  require_command "$KUBECTL"
-  require_command "$GO"
-  require_command "$PYTHON"
+	require_command "$KUBECTL"
+	require_command "$GO"
+	require_command "$PYTHON"
+	require_command "$CURL"
 
   if [[ -z "$INSTANCE_TYPE" || -z "$REGION" ]]; then
     read -r INSTANCE_TYPE REGION price_cents < <(select_lambda_capacity)
