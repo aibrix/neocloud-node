@@ -18,6 +18,8 @@ The Phase 5 placement planner is a provider-neutral mechanism. It does not repla
 - optional region order
 - cold start, expected spot lifetime and migration cost when known
 
+Provider offers come from the `resource.OfferCatalog` interface. Provider-specific code implements `ProviderOfferSource`; `CompositeCatalog` merges multiple sources and preserves per-provider catalog errors. This keeps catalog refresh, capacity probing and price collection separate from the risk/cost planner.
+
 ## Selection Order
 
 The planner first rejects offers that cannot satisfy the request:
@@ -61,12 +63,16 @@ The deadline/cold-start/migration inputs are inspired by SkyNomad, but the plann
 
 ## Outputs
 
-`PlacementDecision` contains:
+`resource.Engine.Select` returns a `Selection` containing:
 
-- `Selected`: the chosen offer.
-- `Rejected`: rejected offers and reasons.
+- `Decision.Selected`: the chosen offer.
+- `Decision.Fallback`: other matching offers in failover order.
+- `Decision.Rejected`: rejected offers and reasons.
+- `CatalogErrors`: provider catalog failures that occurred while collecting offers.
 
-If no offer matches, `SelectOffer` returns `PlacementUnavailableError` with the rejected candidates. The controller should surface these reasons through Kubernetes Events and binding status.
+If one provider catalog fails but another provider returns usable offers, selection can continue and keep the catalog error for Kubernetes Events, metrics and `CloudPodBinding.status.attempts`. If every catalog source fails, `CompositeCatalog` returns structured `CatalogErrors`.
+
+If no offer matches, `Planner.Plan` returns `UnavailableError` with the rejected candidates. The controller should surface these reasons through Kubernetes Events and binding status.
 
 Every provider create/get/delete failure must be reduced to a stable error class before placement or fallback consumes it. Raw provider messages are diagnostic details, not policy inputs.
 
@@ -75,7 +81,7 @@ Every provider create/get/delete failure must be reduced to a stable error class
 - No custom Kubernetes scheduler.
 - No Kueue integration.
 - No CRD policy API.
-- No provider catalog refresh in the current code.
+- No dynamic provider catalog refresh in the current code.
 - No historical provider scorecard in the current code.
 - No automatic retry/backoff cache in the current code.
 - No survival-analysis lifetime predictor in the current code.
