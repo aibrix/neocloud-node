@@ -266,7 +266,10 @@ func (c *Client) doJSON(req *http.Request, expectedStatus int, out any) error {
 	if out == nil {
 		return nil
 	}
-	return json.NewDecoder(bytes.NewReader(body)).Decode(out)
+	if err := json.NewDecoder(bytes.NewReader(body)).Decode(out); err != nil {
+		return providerDecodeError(req, err)
+	}
+	return nil
 }
 
 type launchRequest struct {
@@ -427,6 +430,16 @@ func providerTransportError(req *http.Request, err error) error {
 		Operation: strings.ToLower(req.Method),
 		Class:     core.ClassifyError(err),
 		Message:   err.Error(),
+		Err:       err,
+	}
+}
+
+func providerDecodeError(req *http.Request, err error) error {
+	return &core.ProviderError{
+		Provider:  providerName,
+		Operation: strings.ToLower(req.Method),
+		Class:     core.ErrorClassTransient,
+		Message:   "decode provider response: " + err.Error(),
 		Err:       err,
 	}
 }

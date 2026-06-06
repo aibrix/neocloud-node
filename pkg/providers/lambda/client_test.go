@@ -85,6 +85,50 @@ func TestClientCreateLaunchesLambdaInstance(t *testing.T) {
 	}
 }
 
+func TestClientCreateRecoversDecodeFailureByExternalName(t *testing.T) {
+	t.Parallel()
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		switch {
+		case requests == 1 && r.Method == http.MethodPost && r.URL.Path == "/instance-operations/launch":
+			_, _ = w.Write([]byte(`{"data":`))
+		case requests == 2 && r.Method == http.MethodGet && r.URL.Path == "/instances":
+			_, _ = w.Write([]byte(`{"data":[{
+				"id":"lambda-created",
+				"name":"gpu-burst-node-default-pod-123",
+				"status":"active",
+				"instance_type":{"price_cents_per_hour":74}
+			}]}`))
+		default:
+			t.Fatalf("unexpected request %d %s %s", requests, r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{
+		BaseURL:             server.URL,
+		APIKey:              "lambda-key",
+		DefaultRegion:       "us-west-1",
+		DefaultInstanceType: "gpu_1x_a10",
+		DefaultSSHKeyNames:  []string{"default-key"},
+	})
+	remote, err := client.Create(context.Background(), "default/pod-123", core.WorkloadRequest{
+		Image:    "example.com/train:latest",
+		GPUCount: 1,
+	})
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if remote.ID != "lambda-created" {
+		t.Fatalf("remote ID = %q, want lambda-created", remote.ID)
+	}
+	if remote.HourlyCost != 0.74 {
+		t.Fatalf("hourly cost = %.2f, want 0.74", remote.HourlyCost)
+	}
+}
+
 func TestClientGetMapsLambdaStatus(t *testing.T) {
 	t.Parallel()
 
