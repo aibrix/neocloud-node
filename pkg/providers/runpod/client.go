@@ -177,7 +177,7 @@ func (c *Client) Delete(ctx context.Context, remoteID string) error {
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return err
+		return providerTransportError(httpReq, err)
 	}
 	defer resp.Body.Close()
 
@@ -185,7 +185,10 @@ func (c *Client) Delete(ctx context.Context, remoteID string) error {
 	case http.StatusNoContent, http.StatusNotFound:
 		return nil
 	default:
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		if err != nil {
+			return providerTransportError(httpReq, err)
+		}
 		return providerHTTPError(httpReq, resp.StatusCode, body)
 	}
 }

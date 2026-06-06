@@ -331,6 +331,33 @@ func TestClientDeleteTreatsNotFoundAsSuccess(t *testing.T) {
 	}
 }
 
+func TestClientDeleteClassifiesTransportErrors(t *testing.T) {
+	t.Parallel()
+
+	client := NewClient(Config{
+		BaseURL: "https://runpod.example",
+		APIKey:  "test-token",
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, context.DeadlineExceeded
+		})},
+	})
+
+	err := client.Delete(context.Background(), "runpod-1")
+	if err == nil {
+		t.Fatal("Delete() error = nil, want transport error")
+	}
+	var providerErr *core.ProviderError
+	if !errors.As(err, &providerErr) {
+		t.Fatalf("Delete() error = %T %[1]v, want ProviderError", err)
+	}
+	if providerErr.Operation != "delete" {
+		t.Fatalf("operation = %q, want delete", providerErr.Operation)
+	}
+	if providerErr.Class != core.ErrorClassTimeout {
+		t.Fatalf("class = %s, want %s", providerErr.Class, core.ErrorClassTimeout)
+	}
+}
+
 func assertPayloadString(t *testing.T, payload map[string]any, key string, want string) {
 	t.Helper()
 
@@ -338,6 +365,12 @@ func assertPayloadString(t *testing.T, payload map[string]any, key string, want 
 	if !ok || got != want {
 		t.Fatalf("%s = %#v, want %q", key, payload[key], want)
 	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
 }
 
 func assertPayloadStringSlice(t *testing.T, payload map[string]any, key string, want []string) {
