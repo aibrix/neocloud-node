@@ -177,7 +177,7 @@ Implement now:
 - durable attempts and conditions.
 - RunPod advanced create/list/status fields.
 - Lambda API adapter skeleton with launch/get/list/terminate.
-- resource manager package with pure planner interfaces and fake tests.
+- `pkg/resource` package with pure planner types and deterministic tests.
 - spot strategy document and metrics names.
 
 Defer:
@@ -197,4 +197,3 @@ Defer:
 - Every fallback attempt is durable before the next provider create is attempted.
 - No provider adapter imports Kubernetes packages.
 - No VK provider imports AIBrix batch packages.
-
