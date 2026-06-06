@@ -28,6 +28,27 @@ Phase 4 cloud-init contains:
 - command and args
 - callback `curl` with workload ID and exit code
 
+## Callback Contract
+
+When the kubelet API server is enabled, GPU Burst Node serves:
+
+`POST /gpu-burst-node/v1/runner/status`
+
+Payload:
+
+```json
+{
+  "workloadID": "default/pod-uid",
+  "exitCode": 0,
+  "message": "optional detail"
+}
+```
+
+The controller resolves `workloadID` as `<namespace>/<podUID>` and updates the durable binding:
+
+- `exitCode == 0` -> `CloudPodBinding.status.phase=Succeeded`
+- `exitCode != 0` -> `CloudPodBinding.status.phase=Failed` with a `RunnerExitCode` condition
+
 ## Validation
 
 `BuildCloudInit` rejects:
@@ -40,11 +61,10 @@ Phase 4 cloud-init contains:
 
 ## Current Limitations
 
-- No Lambda Cloud API calls yet.
 - No SSH fallback.
 - No log streaming.
 - No secure secret delivery model.
 - No checkpoint hook.
 - No retry or timeout supervisor on the VM.
+- No heartbeat protocol yet.
 - No structured runner binary yet; Phase 4 uses shell/cloud-init only.
-

@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"errors"
+	"strconv"
 	"time"
 )
 
@@ -126,6 +127,43 @@ func (s *LifecycleService) EnsureDeleted(ctx context.Context, namespace string, 
 	return s.store.CompleteDelete(ctx, namespace, workloadUID)
 }
 
+func RecordRunnerStatus(ctx context.Context, store BindingStore, namespace string, workloadUID string, exitCode int, message string) (Binding, error) {
+	if err := ctx.Err(); err != nil {
+		return Binding{}, err
+	}
+	if store == nil {
+		return Binding{}, errors.New("missing binding store")
+	}
+	binding, err := store.GetByWorkloadUID(ctx, namespace, workloadUID)
+	if err != nil {
+		return Binding{}, err
+	}
+	if exitCode == 0 {
+		binding.Phase = BindingSucceeded
+		binding.LastError = ""
+	} else {
+		binding.Phase = BindingFailed
+		binding.LastError = runnerFailureMessage(exitCode, message)
+		SetCondition(&binding, BindingCondition{
+			Type:    ConditionProviderError,
+			Status:  ConditionTrue,
+			Reason:  "RunnerExitCode",
+			Message: binding.LastError,
+		})
+	}
+	if err := store.Update(ctx, binding); err != nil {
+		return Binding{}, err
+	}
+	return binding, nil
+}
+
+func runnerFailureMessage(exitCode int, message string) string {
+	if message != "" {
+		return message
+	}
+	return "runner exited with code " + strconv.Itoa(exitCode)
+}
+
 func recordProviderFailure(binding *Binding, provider string, region string, reason string, err error) {
 	if binding == nil {
 		return
@@ -206,7 +244,7 @@ func bindingPhaseFromRemote(phase RemotePhase) BindingPhase {
 	case RemoteRunning:
 		return BindingRunning
 	case RemoteSucceeded:
-		return BindingDeleted
+		return BindingSucceeded
 	case RemoteFailed:
 		return BindingFailed
 	case RemoteDeleted:

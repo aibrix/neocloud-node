@@ -1,7 +1,10 @@
 package app
 
 import (
+	"bytes"
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -10,6 +13,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	kubefake "k8s.io/client-go/kubernetes/fake"
+
+	"github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/core"
 )
 
 func TestParseOptionsDefaultsToFakeProviderAndKubernetesStore(t *testing.T) {
@@ -236,6 +241,39 @@ func TestNewNodeStartsOrphanSweeperForRunPodCleaner(t *testing.T) {
 	}
 	if node == nil {
 		t.Fatal("NewNode() = nil, want node")
+	}
+}
+
+func TestRunnerStatusHandlerUpdatesBinding(t *testing.T) {
+	ctx := context.Background()
+	store := core.NewMemoryBindingStore()
+	_, _, err := store.CreateOrGet(ctx, core.Binding{
+		Namespace:   "default",
+		Name:        "lambda-runner",
+		WorkloadUID: "uid-lambda-runner",
+		RemoteID:    "lambda-1",
+		Phase:       core.BindingRunning,
+		Request:     core.WorkloadRequest{Provider: ProviderLambda},
+	})
+	if err != nil {
+		t.Fatalf("CreateOrGet() error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/gpu-burst-node/v1/runner/status",
+		bytes.NewBufferString(`{"workloadID":"default/uid-lambda-runner","exitCode":0,"message":"ok"}`))
+	recorder := httptest.NewRecorder()
+
+	runnerStatusHandler(store).ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("status code = %d, want %d; body=%s", recorder.Code, http.StatusNoContent, recorder.Body.String())
+	}
+	binding, err := store.GetByWorkloadUID(ctx, "default", "uid-lambda-runner")
+	if err != nil {
+		t.Fatalf("GetByWorkloadUID() error = %v", err)
+	}
+	if binding.Phase != core.BindingSucceeded {
+		t.Fatalf("phase = %s, want %s", binding.Phase, core.BindingSucceeded)
 	}
 }
 

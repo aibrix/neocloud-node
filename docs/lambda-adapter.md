@@ -55,9 +55,6 @@ Delete treats `RemoteNotFound` as successful cleanup.
 ## Current Limitations
 
 - No real Lambda integration test yet.
-- The runner callback endpoint is not implemented in the controller; `user_data` is generated when a callback URL is configured, but status still comes from Lambda instance state.
+- The controller exposes `POST /gpu-burst-node/v1/runner/status` when the kubelet API server is enabled. The shell runner can report terminal exit code through this endpoint, but heartbeat and logs are not implemented yet.
 - No automatic SSH key creation.
 - No logs collection.
-- No price extraction from instance type metadata yet.
-- No orphan sweeper integration yet.
-

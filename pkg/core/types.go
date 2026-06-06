@@ -10,11 +10,12 @@ var ErrBindingNotFound = errors.New("binding not found")
 type BindingPhase string
 
 const (
-	BindingPending  BindingPhase = "Pending"
-	BindingRunning  BindingPhase = "Running"
-	BindingDeleting BindingPhase = "Deleting"
-	BindingDeleted  BindingPhase = "Deleted"
-	BindingFailed   BindingPhase = "Failed"
+	BindingPending   BindingPhase = "Pending"
+	BindingRunning   BindingPhase = "Running"
+	BindingSucceeded BindingPhase = "Succeeded"
+	BindingDeleting  BindingPhase = "Deleting"
+	BindingDeleted   BindingPhase = "Deleted"
+	BindingFailed    BindingPhase = "Failed"
 )
 
 type WorkloadRequest struct {

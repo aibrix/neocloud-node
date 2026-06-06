@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -28,6 +29,7 @@ import (
 	"github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/core"
 	lambdacloud "github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/providers/lambda"
 	"github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/providers/runpod"
+	"github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/runner"
 	kstore "github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/store/kubernetes"
 	"github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/vk"
 )
@@ -217,6 +219,7 @@ func NewNode(ctx context.Context, options Options, kubeClient kubernetes.Interfa
 			return nil, err
 		}
 		mux := http.NewServeMux()
+		mux.Handle("/gpu-burst-node/v1/runner/status", runnerStatusHandler(store))
 		nodeOptions = append(nodeOptions,
 			nodeutil.AttachProviderRoutes(mux),
 			func(config *nodeutil.NodeConfig) error {
@@ -322,6 +325,35 @@ func newEventRecorder(kubeClient kubernetes.Interface, component string) record.
 	broadcaster := record.NewBroadcaster()
 	broadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: kubeClient.CoreV1().Events("")})
 	return broadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: component})
+}
+
+func runnerStatusHandler(store core.BindingStore) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var report runner.StatusReport
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&report); err != nil {
+			http.Error(w, "decode runner status: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		namespace, workloadUID, err := report.NamespaceAndUID()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if _, err := core.RecordRunnerStatus(r.Context(), store, namespace, workloadUID, report.ExitCode, report.Message); err != nil {
+			if errors.Is(err, core.ErrBindingNotFound) {
+				http.Error(w, err.Error(), http.StatusNotFound)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
 }
 
 func startOrphanSweeper(ctx context.Context, store core.BindingStore, adapter core.ProviderAdapter, options Options) error {

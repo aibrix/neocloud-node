@@ -87,6 +87,68 @@ func TestLifecycleServiceRecordsRemoteCostOnCreate(t *testing.T) {
 	}
 }
 
+func TestRecordRunnerStatusMarksBindingSucceeded(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := NewMemoryBindingStore()
+	_, _, err := store.CreateOrGet(ctx, Binding{
+		Namespace:   "default",
+		Name:        "runner-success",
+		WorkloadUID: "uid-runner-success",
+		RemoteID:    "lambda-1",
+		Phase:       BindingRunning,
+		Request:     WorkloadRequest{Provider: "lambda"},
+	})
+	if err != nil {
+		t.Fatalf("CreateOrGet() error = %v", err)
+	}
+
+	binding, err := RecordRunnerStatus(ctx, store, "default", "uid-runner-success", 0, "completed")
+	if err != nil {
+		t.Fatalf("RecordRunnerStatus() error = %v", err)
+	}
+	if binding.Phase != BindingSucceeded {
+		t.Fatalf("phase = %s, want %s", binding.Phase, BindingSucceeded)
+	}
+	if binding.LastError != "" {
+		t.Fatalf("last error = %q, want empty", binding.LastError)
+	}
+}
+
+func TestRecordRunnerStatusMarksBindingFailed(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := NewMemoryBindingStore()
+	_, _, err := store.CreateOrGet(ctx, Binding{
+		Namespace:   "default",
+		Name:        "runner-failed",
+		WorkloadUID: "uid-runner-failed",
+		RemoteID:    "lambda-1",
+		Phase:       BindingRunning,
+		Request:     WorkloadRequest{Provider: "lambda"},
+	})
+	if err != nil {
+		t.Fatalf("CreateOrGet() error = %v", err)
+	}
+
+	binding, err := RecordRunnerStatus(ctx, store, "default", "uid-runner-failed", 137, "killed")
+	if err != nil {
+		t.Fatalf("RecordRunnerStatus() error = %v", err)
+	}
+	if binding.Phase != BindingFailed {
+		t.Fatalf("phase = %s, want %s", binding.Phase, BindingFailed)
+	}
+	if binding.LastError == "" {
+		t.Fatal("last error is empty, want runner failure")
+	}
+	condition := FindCondition(binding.Conditions, ConditionProviderError)
+	if condition == nil || condition.Reason != "RunnerExitCode" || condition.Status != ConditionTrue {
+		t.Fatalf("condition = %#v, want RunnerExitCode provider error", condition)
+	}
+}
+
 func TestLifecycleServiceEnsureDeletedKeepsBindingWhenRemoteDeleteFails(t *testing.T) {
 	t.Parallel()
 

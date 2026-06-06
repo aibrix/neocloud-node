@@ -481,7 +481,7 @@ func podPhase(phase core.BindingPhase) corev1.PodPhase {
 	switch phase {
 	case core.BindingRunning:
 		return corev1.PodRunning
-	case core.BindingDeleted:
+	case core.BindingSucceeded, core.BindingDeleted:
 		return corev1.PodSucceeded
 	case core.BindingFailed:
 		return corev1.PodFailed
