@@ -238,6 +238,11 @@ func (p *Provider) upsertPod(ctx context.Context, pod *corev1.Pod) error {
 	}
 	binding, err := p.transformer.TransformPod(pod)
 	if err != nil {
+		cached := podWithErrorStatus(pod, core.ClassifyError(err), err.Error())
+		p.mu.Lock()
+		p.pods[podKey(cached.Namespace, cached.Name)] = cached.DeepCopy()
+		p.mu.Unlock()
+		p.notify(cached)
 		return normalizeProviderError(err)
 	}
 
@@ -277,6 +282,9 @@ func (p *Provider) syncPodStatus(ctx context.Context, pod *corev1.Pod) (*corev1.
 	}
 
 	binding, err := p.lifecycle.SyncStatus(ctx, pod.Namespace, string(pod.UID))
+	if errors.Is(err, core.ErrBindingNotFound) && pod.Status.Phase == corev1.PodFailed {
+		return pod.DeepCopy(), nil
+	}
 	if err != nil && !errors.Is(err, core.ErrRemoteNotFound) {
 		return nil, normalizeProviderError(err)
 	}
@@ -323,6 +331,20 @@ func podWithTerminalStatus(pod *corev1.Pod) *corev1.Pod {
 	out.Status.Phase = corev1.PodSucceeded
 	out.Status.Conditions = podConditions(corev1.PodSucceeded, "RemoteWorkloadDeleted", "remote workload was deleted")
 	out.Status.ContainerStatuses = containerStatuses(out.Spec.Containers, corev1.PodSucceeded, now, "RemoteWorkloadDeleted", "remote workload was deleted")
+	return out
+}
+
+func podWithErrorStatus(pod *corev1.Pod, class core.ErrorClass, message string) *corev1.Pod {
+	out := pod.DeepCopy()
+	now := metav1.Now()
+	reason := string(class)
+	if reason == "" {
+		reason = string(core.ErrorClassUnknown)
+	}
+	out.Status.Phase = corev1.PodFailed
+	out.Status.StartTime = startTime(out, now)
+	out.Status.Conditions = podConditions(corev1.PodFailed, reason, message)
+	out.Status.ContainerStatuses = containerStatuses(out.Spec.Containers, corev1.PodFailed, now, reason, message)
 	return out
 }
 

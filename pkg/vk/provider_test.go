@@ -67,6 +67,10 @@ func TestCreatePodRejectsUnsupportedSpecBeforeLaunchingRemoteWorkload(t *testing
 	provider := newTestProvider(t, adapter)
 	pod := gpuPod("service", "uid-service")
 	pod.Spec.RestartPolicy = corev1.RestartPolicyAlways
+	var notified []*corev1.Pod
+	provider.NotifyPods(ctx, func(pod *corev1.Pod) {
+		notified = append(notified, pod.DeepCopy())
+	})
 
 	err := provider.CreatePod(ctx, pod)
 	if err == nil {
@@ -77,6 +81,22 @@ func TestCreatePodRejectsUnsupportedSpecBeforeLaunchingRemoteWorkload(t *testing
 	}
 	if got := adapter.CreateCount(); got != 0 {
 		t.Fatalf("remote Create count = %d, want 0", got)
+	}
+	cached, err := provider.GetPod(ctx, "default", "service")
+	if err != nil {
+		t.Fatalf("GetPod() error = %v, want cached failed pod", err)
+	}
+	if cached.Status.Phase != corev1.PodFailed {
+		t.Fatalf("cached phase = %s, want Failed", cached.Status.Phase)
+	}
+	if got := podReadyCondition(cached.Status.Conditions).Reason; got != string(core.ErrorClassUnsupportedSpec) {
+		t.Fatalf("PodReady reason = %q, want %q", got, core.ErrorClassUnsupportedSpec)
+	}
+	if got := cached.Status.ContainerStatuses[0].State.Terminated.Reason; got != string(core.ErrorClassUnsupportedSpec) {
+		t.Fatalf("terminated reason = %q, want %q", got, core.ErrorClassUnsupportedSpec)
+	}
+	if len(notified) != 1 || notified[0].Status.Phase != corev1.PodFailed {
+		t.Fatalf("notified = %#v, want one failed pod notification", notified)
 	}
 }
 
