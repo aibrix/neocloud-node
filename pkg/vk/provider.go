@@ -243,6 +243,11 @@ func (p *Provider) upsertPod(ctx context.Context, pod *corev1.Pod) error {
 
 	binding, err = p.lifecycle.EnsureCreated(ctx, binding)
 	if err != nil {
+		cached := podWithBindingStatus(pod, binding)
+		p.mu.Lock()
+		p.pods[podKey(cached.Namespace, cached.Name)] = cached.DeepCopy()
+		p.mu.Unlock()
+		p.notify(cached)
 		return normalizeProviderError(err)
 	}
 

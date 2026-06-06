@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -37,6 +38,7 @@ func TestClientCreateSendsRunPodPayload(t *testing.T) {
 			"id": "runpod-1",
 			"desiredStatus": "RUNNING",
 			"image": "example.com/train:latest",
+			"costPerHr": 0.44,
 			"gpu": {"count": 1, "displayName": "NVIDIA H100"}
 		}`))
 	}))
@@ -78,6 +80,12 @@ func TestClientCreateSendsRunPodPayload(t *testing.T) {
 	}
 	if remote.Provider != "runpod" {
 		t.Fatalf("remote provider = %q, want runpod", remote.Provider)
+	}
+	if math.Abs(remote.HourlyCost-0.44) > 0.000001 {
+		t.Fatalf("remote hourly cost = %.2f, want 0.44", remote.HourlyCost)
+	}
+	if remote.CostSource != "runpod.costPerHr" {
+		t.Fatalf("remote cost source = %q, want runpod.costPerHr", remote.CostSource)
 	}
 
 	assertPayloadString(t, gotPayload, "name", "gpu-burst-node-default-pod-123")
@@ -154,14 +162,16 @@ func TestClientClassifiesProviderErrors(t *testing.T) {
 	tests := []struct {
 		name           string
 		statusCode     int
+		body           string
 		wantClass      core.ErrorClass
 		wantIsNotFound bool
 	}{
-		{name: "auth", statusCode: http.StatusUnauthorized, wantClass: core.ErrorClassAuth},
-		{name: "capacity", statusCode: http.StatusBadRequest, wantClass: core.ErrorClassCapacity},
-		{name: "not found", statusCode: http.StatusNotFound, wantClass: core.ErrorClassRemoteNotFound, wantIsNotFound: true},
-		{name: "rate limited", statusCode: http.StatusTooManyRequests, wantClass: core.ErrorClassRateLimited},
-		{name: "server error", statusCode: http.StatusBadGateway, wantClass: core.ErrorClassTransient},
+		{name: "auth", statusCode: http.StatusUnauthorized, body: `{"error":"unauthorized"}`, wantClass: core.ErrorClassAuth},
+		{name: "capacity", statusCode: http.StatusBadRequest, body: `{"error":"insufficient capacity"}`, wantClass: core.ErrorClassCapacity},
+		{name: "capacity in server error", statusCode: http.StatusInternalServerError, body: `{"error":"create pod: There are no longer any instances available with the request specifications."}`, wantClass: core.ErrorClassCapacity},
+		{name: "not found", statusCode: http.StatusNotFound, body: `{"error":"not found"}`, wantClass: core.ErrorClassRemoteNotFound, wantIsNotFound: true},
+		{name: "rate limited", statusCode: http.StatusTooManyRequests, body: `{"error":"rate limited"}`, wantClass: core.ErrorClassRateLimited},
+		{name: "server error", statusCode: http.StatusBadGateway, body: `{"error":"upstream failed"}`, wantClass: core.ErrorClassTransient},
 	}
 
 	for _, tt := range tests {
@@ -170,7 +180,7 @@ func TestClientClassifiesProviderErrors(t *testing.T) {
 
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(tt.statusCode)
-				_, _ = w.Write([]byte(`{"error":"insufficient capacity"}`))
+				_, _ = w.Write([]byte(tt.body))
 			}))
 			defer server.Close()
 

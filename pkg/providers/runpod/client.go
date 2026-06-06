@@ -244,7 +244,7 @@ type podResponse struct {
 	DesiredStatus     string         `json:"desiredStatus"`
 	Image             string         `json:"image"`
 	TemplateID        string         `json:"templateId"`
-	CostPerHr         string         `json:"costPerHr"`
+	CostPerHr         costValue      `json:"costPerHr"`
 	AdjustedCostPerHr float64        `json:"adjustedCostPerHr"`
 	Ports             []string       `json:"ports"`
 	PublicIP          string         `json:"publicIp"`
@@ -262,6 +262,41 @@ type podResponse struct {
 		Size         int    `json:"size"`
 		DataCenterID string `json:"dataCenterId"`
 	} `json:"networkVolume"`
+}
+
+type costValue struct {
+	value float64
+	set   bool
+}
+
+func (c *costValue) UnmarshalJSON(data []byte) error {
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" || trimmed == "null" {
+		return nil
+	}
+	var raw any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	switch value := raw.(type) {
+	case float64:
+		c.value = value
+		c.set = true
+		return nil
+	case string:
+		if strings.TrimSpace(value) == "" {
+			return nil
+		}
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+		if err != nil {
+			return err
+		}
+		c.value = parsed
+		c.set = true
+		return nil
+	default:
+		return fmt.Errorf("unsupported costPerHr value %T", raw)
+	}
 }
 
 type PodFilter struct {
@@ -302,21 +337,17 @@ func hourlyCost(pod podResponse) float64 {
 	if pod.AdjustedCostPerHr > 0 {
 		return pod.AdjustedCostPerHr
 	}
-	if pod.CostPerHr == "" {
-		return 0
+	if pod.CostPerHr.set {
+		return pod.CostPerHr.value
 	}
-	value, err := strconv.ParseFloat(pod.CostPerHr, 64)
-	if err != nil {
-		return 0
-	}
-	return value
+	return 0
 }
 
 func costSource(pod podResponse) string {
 	if pod.AdjustedCostPerHr > 0 {
 		return "runpod.adjustedCostPerHr"
 	}
-	if pod.CostPerHr != "" {
+	if pod.CostPerHr.set {
 		return "runpod.costPerHr"
 	}
 	return ""
@@ -434,12 +465,12 @@ func classifyHTTPStatus(statusCode int, body string) core.ErrorClass {
 		return core.ErrorClassConflict
 	case statusCode == http.StatusTooManyRequests:
 		return core.ErrorClassRateLimited
-	case statusCode >= 500:
-		return core.ErrorClassTransient
 	case strings.Contains(lowerBody, "capacity") || strings.Contains(lowerBody, "available"):
 		return core.ErrorClassCapacity
 	case strings.Contains(lowerBody, "quota") || strings.Contains(lowerBody, "limit"):
 		return core.ErrorClassQuota
+	case statusCode >= 500:
+		return core.ErrorClassTransient
 	default:
 		return core.ErrorClassUnknown
 	}

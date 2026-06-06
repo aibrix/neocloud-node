@@ -2,6 +2,7 @@ package vk
 
 import (
 	"context"
+	"errors"
 	"io"
 	"testing"
 
@@ -76,6 +77,42 @@ func TestCreatePodRejectsUnsupportedSpecBeforeLaunchingRemoteWorkload(t *testing
 	}
 	if got := adapter.CreateCount(); got != 0 {
 		t.Fatalf("remote Create count = %d, want 0", got)
+	}
+}
+
+func TestCreatePodCachesProviderFailureForDeletion(t *testing.T) {
+	ctx := context.Background()
+	provider := newTestProvider(t, failingProvider{
+		err: &core.ProviderError{
+			Provider:  "runpod",
+			Operation: "post",
+			Class:     core.ErrorClassCapacity,
+			Message:   "no A40 capacity",
+		},
+	})
+	pod := gpuPod("capacity-failed", "uid-capacity-failed")
+
+	err := provider.CreatePod(ctx, pod)
+	if err == nil {
+		t.Fatal("CreatePod() error = nil, want provider failure")
+	}
+
+	cached, err := provider.GetPod(ctx, "default", "capacity-failed")
+	if err != nil {
+		t.Fatalf("GetPod() error = %v, want cached failed pod", err)
+	}
+	if cached.Status.Phase != corev1.PodFailed {
+		t.Fatalf("cached phase = %s, want Failed", cached.Status.Phase)
+	}
+	if got := podReadyCondition(cached.Status.Conditions).Reason; got != string(core.ErrorClassCapacity) {
+		t.Fatalf("PodReady reason = %q, want %q", got, core.ErrorClassCapacity)
+	}
+
+	if err := provider.DeletePod(ctx, pod); err != nil {
+		t.Fatalf("DeletePod() error = %v", err)
+	}
+	if _, err := provider.GetPod(ctx, "default", "capacity-failed"); !errdefs.IsNotFound(err) {
+		t.Fatalf("GetPod() after delete error = %T %[1]v, want not found", err)
 	}
 }
 
@@ -382,6 +419,22 @@ func (nopReadWriteCloser) Close() error {
 
 type phaseProvider struct {
 	phase core.RemotePhase
+}
+
+type failingProvider struct {
+	err error
+}
+
+func (p failingProvider) Create(context.Context, string, core.WorkloadRequest) (core.RemoteResource, error) {
+	return core.RemoteResource{}, p.err
+}
+
+func (p failingProvider) Get(context.Context, string) (core.RemoteResource, error) {
+	return core.RemoteResource{}, errors.New("unexpected get")
+}
+
+func (p failingProvider) Delete(context.Context, string) error {
+	return nil
 }
 
 func (p *phaseProvider) Create(ctx context.Context, idempotencyKey string, request core.WorkloadRequest) (core.RemoteResource, error) {

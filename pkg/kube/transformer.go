@@ -2,6 +2,7 @@ package kube
 
 import (
 	"fmt"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -142,12 +143,34 @@ func volumesFromCoreV1(volumes []corev1.Volume) []core.VolumeSpec {
 	}
 	out := make([]core.VolumeSpec, 0, len(volumes))
 	for _, volume := range volumes {
+		if isDefaultServiceAccountVolume(volume) {
+			continue
+		}
 		out = append(out, core.VolumeSpec{
 			Name: volume.Name,
 			Kind: volumeKind(volume),
 		})
 	}
 	return out
+}
+
+func isDefaultServiceAccountVolume(volume corev1.Volume) bool {
+	if !strings.HasPrefix(volume.Name, "kube-api-access-") || volume.Projected == nil {
+		return false
+	}
+	var hasToken, hasRootCA, hasDownwardAPI bool
+	for _, source := range volume.Projected.Sources {
+		if source.ServiceAccountToken != nil {
+			hasToken = true
+		}
+		if source.ConfigMap != nil && source.ConfigMap.Name == "kube-root-ca.crt" {
+			hasRootCA = true
+		}
+		if source.DownwardAPI != nil {
+			hasDownwardAPI = true
+		}
+	}
+	return hasToken && hasRootCA && hasDownwardAPI
 }
 
 func volumeKind(volume corev1.Volume) string {

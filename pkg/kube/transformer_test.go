@@ -119,3 +119,58 @@ func TestTransformerPreservesUnsupportedCoreV1PodErrors(t *testing.T) {
 		t.Fatalf("unsupported code = %q, want UnsupportedRestartPolicy", unsupported.Code)
 	}
 }
+
+func TestTransformerIgnoresDefaultServiceAccountProjectedVolume(t *testing.T) {
+	t.Parallel()
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "train-job",
+			UID:       types.UID("pod-123"),
+		},
+		Spec: corev1.PodSpec{
+			RestartPolicy: corev1.RestartPolicyNever,
+			Volumes: []corev1.Volume{
+				{
+					Name: "kube-api-access-abcde",
+					VolumeSource: corev1.VolumeSource{
+						Projected: &corev1.ProjectedVolumeSource{
+							Sources: []corev1.VolumeProjection{
+								{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{}},
+								{ConfigMap: &corev1.ConfigMapProjection{LocalObjectReference: corev1.LocalObjectReference{Name: "kube-root-ca.crt"}}},
+								{DownwardAPI: &corev1.DownwardAPIProjection{}},
+							},
+						},
+					},
+				},
+			},
+			Containers: []corev1.Container{
+				{
+					Name:  "main",
+					Image: "example.com/train:latest",
+					VolumeMounts: []corev1.VolumeMount{
+						{
+							Name:      "kube-api-access-abcde",
+							MountPath: "/var/run/secrets/kubernetes.io/serviceaccount",
+							ReadOnly:  true,
+						},
+					},
+					Resources: corev1.ResourceRequirements{
+						Limits: corev1.ResourceList{
+							corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("1"),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	binding, err := (Transformer{}).TransformPod(pod)
+	if err != nil {
+		t.Fatalf("TransformPod returned error: %v", err)
+	}
+	if binding.Request.Image != "example.com/train:latest" {
+		t.Fatalf("request image = %q, want example.com/train:latest", binding.Request.Image)
+	}
+}
