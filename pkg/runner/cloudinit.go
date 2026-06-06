@@ -40,6 +40,7 @@ func BuildCloudInit(config CloudInitConfig) (string, error) {
 		"#cloud-config",
 		"package_update: true",
 		"packages:",
+		"  - curl",
 		"  - docker.io",
 		"runcmd:",
 		"  - " + strconv.Quote(command),
@@ -49,6 +50,8 @@ func BuildCloudInit(config CloudInitConfig) (string, error) {
 
 func runnerCommand(config CloudInitConfig) string {
 	image := shellQuote(config.Request.Image)
+	payloadFormat := shellQuote(`{"workloadID":%s,"exitCode":%s}`)
+	workloadID := shellQuote(strconv.Quote(config.WorkloadID))
 
 	return strings.Join([]string{
 		"set -e",
@@ -56,9 +59,10 @@ func runnerCommand(config CloudInitConfig) string {
 		"set +e",
 		dockerRunCommand(config.Request),
 		"code=$?",
-		"curl -fsS -X POST " + shellQuote(config.CallbackURL) +
+		"payload=$(printf " + payloadFormat + " " + workloadID + ` "$code")`,
+		"curl -fsS --retry 60 --retry-all-errors --retry-delay 10 --max-time 10 -X POST " + shellQuote(config.CallbackURL) +
 			" -H 'Content-Type: application/json'" +
-			" -d " + shellQuote(statusPayload(config.WorkloadID, "$code")),
+			` -d "$payload"`,
 		"exit $code",
 	}, "; ")
 }

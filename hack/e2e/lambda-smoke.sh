@@ -11,8 +11,11 @@ NODE_NAME="${GPU_BURST_E2E_NODE_NAME:-aibrix-gpu-burst-lambda-e2e}"
 NAMESPACE="${GPU_BURST_E2E_NAMESPACE:-default}"
 BINARY="${GPU_BURST_E2E_BINARY:-/tmp/gpu-burst-node-e2e}"
 LISTEN_ADDR="${GPU_BURST_E2E_LISTEN_ADDR:-:11252}"
+CALLBACK_ADDR="${LAMBDA_E2E_CALLBACK_ADDR:-${GPU_BURST_RUNNER_CALLBACK_ADDR:-}}"
+CALLBACK_URL="${LAMBDA_E2E_CALLBACK_URL:-${GPU_BURST_LAMBDA_CALLBACK_URL:-}}"
 POD_NAME="${LAMBDA_E2E_POD:-gpu-burst-lambda-e2e-success}"
 SUCCESS_TIMEOUT_SECONDS="${LAMBDA_E2E_SUCCESS_TIMEOUT_SECONDS:-900}"
+RUNNER_TIMEOUT_SECONDS="${LAMBDA_E2E_RUNNER_TIMEOUT_SECONDS:-1800}"
 LAMBDA_BASE_URL="${LAMBDA_BASE_URL:-${GPU_BURST_LAMBDA_BASE_URL:-https://cloud.lambda.ai/api/v1}}"
 INSTANCE_TYPE="${LAMBDA_E2E_INSTANCE_TYPE:-}"
 REGION="${LAMBDA_E2E_REGION:-}"
@@ -264,29 +267,37 @@ build_binary() {
 }
 
 start_controller() {
-  log "starting local Lambda controller on $NODE_NAME with ${INSTANCE_TYPE}/${REGION}"
-  LAMBDA_API_KEY="${LAMBDA_API_KEY:-${LAMBDA_CLOUD_API_KEY:-}}" \
-  GPU_BURST_LAMBDA_BASE_URL="$LAMBDA_BASE_URL" \
-  "$BINARY" \
-    --kubeconfig="${KUBECONFIG:-$HOME/.kube/config}" \
-    --node-name="$NODE_NAME" \
-    --provider=lambda \
-    --binding-store=kubernetes \
-    --listen-addr="$LISTEN_ADDR" \
-    --lambda-region="$REGION" \
-		--lambda-instance-type="$INSTANCE_TYPE" \
-		--lambda-ssh-key-names="${LAMBDA_E2E_SSH_KEY_NAMES:-${LAMBDA_CLOUD_SSH_KEYS:-}}" \
-		--status-sync-interval="${LAMBDA_E2E_STATUS_SYNC_INTERVAL:-5s}" \
-		--advertise-gpu-count=1 \
-		--advertise-pod-capacity=5 \
-		--max-gpu-count=1 &
-  CONTROLLER_PID=$!
-  local deadline=$((SECONDS + 60))
-  until "$KUBECTL" get "node/${NODE_NAME}" >/dev/null 2>&1; do
-    (( SECONDS < deadline )) || fail "timed out waiting for node/${NODE_NAME} to be created"
-    sleep 1
-  done
-  "$KUBECTL" wait --for=condition=Ready "node/${NODE_NAME}" --timeout=60s
+	log "starting local Lambda controller on $NODE_NAME with ${INSTANCE_TYPE}/${REGION}"
+	local args=(
+		--kubeconfig="${KUBECONFIG:-$HOME/.kube/config}"
+		--node-name="$NODE_NAME"
+		--provider=lambda
+		--binding-store=kubernetes
+		--listen-addr="$LISTEN_ADDR"
+		--lambda-region="$REGION"
+		--lambda-instance-type="$INSTANCE_TYPE"
+		--lambda-ssh-key-names="${LAMBDA_E2E_SSH_KEY_NAMES:-${LAMBDA_CLOUD_SSH_KEYS:-}}"
+		--status-sync-interval="${LAMBDA_E2E_STATUS_SYNC_INTERVAL:-5s}"
+		--advertise-gpu-count=1
+		--advertise-pod-capacity=5
+		--max-gpu-count=1
+	)
+	if [[ -n "$CALLBACK_URL" ]]; then
+		args+=(--lambda-callback-url="$CALLBACK_URL")
+	fi
+	if [[ -n "$CALLBACK_ADDR" ]]; then
+		args+=(--runner-callback-addr="$CALLBACK_ADDR")
+	fi
+	LAMBDA_API_KEY="${LAMBDA_API_KEY:-${LAMBDA_CLOUD_API_KEY:-}}" \
+		GPU_BURST_LAMBDA_BASE_URL="$LAMBDA_BASE_URL" \
+		"$BINARY" "${args[@]}" &
+	CONTROLLER_PID=$!
+	local deadline=$((SECONDS + 60))
+	until "$KUBECTL" get "node/${NODE_NAME}" >/dev/null 2>&1; do
+		((SECONDS < deadline)) || fail "timed out waiting for node/${NODE_NAME} to be created"
+		sleep 1
+	done
+	"$KUBECTL" wait --for=condition=Ready "node/${NODE_NAME}" --timeout=60s
 }
 
 apply_lambda_pod() {
@@ -335,7 +346,7 @@ wait_for_binding_running() {
       -l "gpu-burst-node.aibrix.ai/pod-name=${POD_NAME}" \
       -o jsonpath='{.items[0].status.remoteID}' 2>/dev/null || true)"
     log "binding phase=${phase:-<none>} remoteID=${remote_id:-<none>}"
-    if [[ "$phase" == "Running" && -n "$remote_id" ]]; then
+    if [[ -n "$remote_id" && ( "$phase" == "Running" || "$phase" == "Succeeded" ) ]]; then
       return 0
     fi
     if [[ "$phase" == "Failed" ]]; then
@@ -347,6 +358,28 @@ wait_for_binding_running() {
     sleep 10
   done
   fail "timed out waiting for Lambda binding to run"
+}
+
+wait_for_runner_succeeded() {
+	local deadline=$((SECONDS + RUNNER_TIMEOUT_SECONDS))
+	local phase=""
+	while ((SECONDS < deadline)); do
+		phase="$("$KUBECTL" -n "$NAMESPACE" get cloudpodbindings.gpu-burst-node.aibrix.ai \
+			-l "gpu-burst-node.aibrix.ai/pod-name=${POD_NAME}" \
+			-o jsonpath='{.items[0].status.phase}' 2>/dev/null || true)"
+		log "runner binding phase=${phase:-<none>}"
+		if [[ "$phase" == "Succeeded" ]]; then
+			return 0
+		fi
+		if [[ "$phase" == "Failed" ]]; then
+			"$KUBECTL" -n "$NAMESPACE" describe pod "$POD_NAME" || true
+			"$KUBECTL" -n "$NAMESPACE" get cloudpodbindings.gpu-burst-node.aibrix.ai \
+				-l "gpu-burst-node.aibrix.ai/pod-name=${POD_NAME}" -o yaml || true
+			fail "Lambda runner failed"
+		fi
+		sleep 10
+	done
+	fail "timed out waiting for Lambda runner callback"
 }
 
 delete_pod_and_wait_cleanup() {
@@ -412,6 +445,9 @@ main() {
   log "tracking external name $external_name"
 
   wait_for_binding_running
+	if [[ -n "$CALLBACK_URL" ]]; then
+		wait_for_runner_succeeded
+	fi
   delete_pod_and_wait_cleanup
   final_orphan_check "$external_name"
   log "Lambda e2e smoke passed"

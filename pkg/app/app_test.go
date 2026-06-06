@@ -159,12 +159,17 @@ func TestParseOptionsReadsLambdaOptions(t *testing.T) {
 		"LAMBDA_API_KEY":                 "lambda-key",
 		"GPU_BURST_LAMBDA_BASE_URL":      "https://lambda.example/api/v1",
 		"GPU_BURST_LAMBDA_CALLBACK_URL":  "https://controller.example/status",
+		"GPU_BURST_RUNNER_CALLBACK_ADDR": "127.0.0.1:19090",
 		"GPU_BURST_LAMBDA_REGION":        "us-west-1",
 		"GPU_BURST_LAMBDA_INSTANCE_TYPE": "gpu_1x_a10",
 		"GPU_BURST_LAMBDA_SSH_KEY_NAMES": "key-a,key-b",
 	})
 
-	options, err := ParseOptions([]string{"--provider=lambda", "--binding-store=memory"}, env)
+	options, err := ParseOptions([]string{
+		"--provider=lambda",
+		"--binding-store=memory",
+		"--runner-callback-addr=127.0.0.1:19091",
+	}, env)
 	if err != nil {
 		t.Fatalf("ParseOptions() error = %v", err)
 	}
@@ -176,6 +181,9 @@ func TestParseOptionsReadsLambdaOptions(t *testing.T) {
 	}
 	if got := commaSeparated(options.LambdaSSHKeyNames); len(got) != 2 || got[0] != "key-a" || got[1] != "key-b" {
 		t.Fatalf("lambda ssh key names = %#v, want key-a key-b", got)
+	}
+	if options.RunnerCallbackListenAddr != "127.0.0.1:19091" {
+		t.Fatalf("RunnerCallbackListenAddr = %q, want flag override", options.RunnerCallbackListenAddr)
 	}
 }
 
@@ -274,6 +282,46 @@ func TestRunnerStatusHandlerUpdatesBinding(t *testing.T) {
 		t.Fatalf("status code = %d, want %d; body=%s", recorder.Code, http.StatusNoContent, recorder.Body.String())
 	}
 	binding, err := store.GetByWorkloadUID(ctx, "default", "uid-lambda-runner")
+	if err != nil {
+		t.Fatalf("GetByWorkloadUID() error = %v", err)
+	}
+	if binding.Phase != core.BindingSucceeded {
+		t.Fatalf("phase = %s, want %s", binding.Phase, core.BindingSucceeded)
+	}
+}
+
+func TestStartRunnerCallbackServerUpdatesBinding(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store := core.NewMemoryBindingStore()
+	_, _, err := store.CreateOrGet(ctx, core.Binding{
+		Namespace:   "default",
+		Name:        "lambda-runner",
+		WorkloadUID: "uid-callback-server",
+		RemoteID:    "lambda-1",
+		Phase:       core.BindingRunning,
+		Request:     core.WorkloadRequest{Provider: ProviderLambda},
+	})
+	if err != nil {
+		t.Fatalf("CreateOrGet() error = %v", err)
+	}
+
+	addr, shutdown, err := startRunnerCallbackServer(ctx, "127.0.0.1:0", store)
+	if err != nil {
+		t.Fatalf("startRunnerCallbackServer() error = %v", err)
+	}
+	defer shutdown(context.Background())
+
+	resp, err := http.Post("http://"+addr+"/gpu-burst-node/v1/runner/status", "application/json",
+		bytes.NewBufferString(`{"workloadID":"default/uid-callback-server","exitCode":0,"message":"ok"}`))
+	if err != nil {
+		t.Fatalf("runner callback POST error = %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status code = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+	binding, err := store.GetByWorkloadUID(ctx, "default", "uid-callback-server")
 	if err != nil {
 		t.Fatalf("GetByWorkloadUID() error = %v", err)
 	}

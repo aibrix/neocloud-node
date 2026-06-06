@@ -28,12 +28,32 @@ func TestBuildCloudInit(t *testing.T) {
 
 	assertContains(t, cloudInit, "#cloud-config")
 	assertContains(t, cloudInit, "docker.io")
+	assertContains(t, cloudInit, "curl")
 	assertContains(t, cloudInit, "docker pull 'example.com/train:latest'")
 	assertContains(t, cloudInit, "--gpus all")
 	assertContains(t, cloudInit, "-e 'MODEL=llama'")
 	assertContains(t, cloudInit, "'example.com/train:latest' 'python' 'train.py' '--model' 'llama 3'")
 	assertContains(t, cloudInit, "https://controller.example.com/v1/runner/status")
+	assertContains(t, cloudInit, "--retry 60 --retry-all-errors --retry-delay 10 --max-time 10")
 	assertContains(t, cloudInit, "default/pod-123")
+}
+
+func TestRunnerCommandExpandsExitCodeInStatusPayload(t *testing.T) {
+	t.Parallel()
+
+	command := runnerCommand(CloudInitConfig{
+		WorkloadID:  "default/pod-123",
+		CallbackURL: "https://controller.example.com/v1/runner/status",
+		Request: core.WorkloadRequest{
+			Image: "example.com/train:latest",
+		},
+	})
+
+	assertContains(t, command, `payload=$(printf '{"workloadID":%s,"exitCode":%s}' '"default/pod-123"' "$code")`)
+	assertContains(t, command, `-d "$payload"`)
+	if strings.Contains(command, shellQuote(statusPayload("default/pod-123", "$code"))) {
+		t.Fatalf("runner command keeps exit code in a single-quoted JSON payload:\n%s", command)
+	}
 }
 
 func TestBuildCloudInitValidation(t *testing.T) {

@@ -116,6 +116,43 @@ func TestRecordRunnerStatusMarksBindingSucceeded(t *testing.T) {
 	}
 }
 
+func TestLifecycleServiceDoesNotOverwriteTerminalRunnerStatus(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := NewMemoryBindingStore()
+	provider := NewFakeProvider("lambda")
+	service := NewLifecycleService(store, provider)
+
+	binding, err := service.EnsureCreated(ctx, Binding{
+		Namespace:   "default",
+		Name:        "runner-terminal",
+		WorkloadUID: "uid-runner-terminal",
+		Request: WorkloadRequest{
+			Image:    "example.com/train:latest",
+			GPUCount: 1,
+			Provider: "lambda",
+		},
+	})
+	if err != nil {
+		t.Fatalf("EnsureCreated() error = %v", err)
+	}
+	if binding.Phase != BindingRunning {
+		t.Fatalf("created phase = %s, want Running", binding.Phase)
+	}
+	if _, err := RecordRunnerStatus(ctx, store, "default", "uid-runner-terminal", 0, "completed"); err != nil {
+		t.Fatalf("RecordRunnerStatus() error = %v", err)
+	}
+
+	synced, err := service.SyncStatus(ctx, "default", "uid-runner-terminal")
+	if err != nil {
+		t.Fatalf("SyncStatus() error = %v", err)
+	}
+	if synced.Phase != BindingSucceeded {
+		t.Fatalf("synced phase = %s, want Succeeded", synced.Phase)
+	}
+}
+
 func TestRecordRunnerStatusMarksBindingFailed(t *testing.T) {
 	t.Parallel()
 

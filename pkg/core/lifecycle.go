@@ -83,6 +83,9 @@ func (s *LifecycleService) SyncStatus(ctx context.Context, namespace string, wor
 	if binding.RemoteID == "" {
 		return binding, nil
 	}
+	if isTerminalBindingPhase(binding.Phase) {
+		return binding, nil
+	}
 
 	remote, err := s.provider.Get(ctx, binding.RemoteID)
 	if err != nil {
@@ -251,5 +254,14 @@ func bindingPhaseFromRemote(phase RemotePhase) BindingPhase {
 		return BindingDeleted
 	default:
 		return BindingPending
+	}
+}
+
+func isTerminalBindingPhase(phase BindingPhase) bool {
+	switch phase {
+	case BindingSucceeded, BindingFailed, BindingDeleted:
+		return true
+	default:
+		return false
 	}
 }

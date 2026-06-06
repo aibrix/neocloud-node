@@ -50,14 +50,15 @@ const (
 )
 
 type Options struct {
-	NodeName          string
-	Provider          string
-	BindingStore      string
-	Kubeconfig        string
-	ListenAddr        string
-	KubeletAPIEnabled bool
-	TLSCertFile       string
-	TLSKeyFile        string
+	NodeName                 string
+	Provider                 string
+	BindingStore             string
+	Kubeconfig               string
+	ListenAddr               string
+	KubeletAPIEnabled        bool
+	TLSCertFile              string
+	TLSKeyFile               string
+	RunnerCallbackListenAddr string
 
 	RunPodAPIKey  string
 	RunPodBaseURL string
@@ -97,6 +98,8 @@ func ParseOptions(args []string, getenv func(string) string) (Options, error) {
 		ListenAddr:   envOr(getenv, "GPU_BURST_LISTEN_ADDR", ":10250"),
 		TLSCertFile:  envOr(getenv, "GPU_BURST_TLS_CERT_FILE", ""),
 		TLSKeyFile:   envOr(getenv, "GPU_BURST_TLS_KEY_FILE", ""),
+		RunnerCallbackListenAddr: envOr(getenv,
+			"GPU_BURST_RUNNER_CALLBACK_ADDR", ""),
 
 		RunPodAPIKey:  envOr(getenv, "RUNPOD_API_KEY", ""),
 		RunPodBaseURL: envOr(getenv, "GPU_BURST_RUNPOD_BASE_URL", ""),
@@ -131,6 +134,7 @@ func ParseOptions(args []string, getenv func(string) string) (Options, error) {
 	fs.BoolVar(&options.KubeletAPIEnabled, "enable-kubelet-api", options.KubeletAPIEnabled, "serve kubelet-compatible pod routes")
 	fs.StringVar(&options.TLSCertFile, "tls-cert-file", options.TLSCertFile, "TLS certificate file for kubelet API")
 	fs.StringVar(&options.TLSKeyFile, "tls-key-file", options.TLSKeyFile, "TLS key file for kubelet API")
+	fs.StringVar(&options.RunnerCallbackListenAddr, "runner-callback-addr", options.RunnerCallbackListenAddr, "plain HTTP listen address for VM runner status callbacks; empty disables it")
 	fs.StringVar(&options.RunPodAPIKey, "runpod-api-key", options.RunPodAPIKey, "RunPod API key")
 	fs.StringVar(&options.RunPodBaseURL, "runpod-base-url", options.RunPodBaseURL, "RunPod REST API base URL")
 	fs.StringVar(&options.LambdaAPIKey, "lambda-api-key", options.LambdaAPIKey, "Lambda Cloud API key")
@@ -196,6 +200,9 @@ func NewNode(ctx context.Context, options Options, kubeClient kubernetes.Interfa
 		return nil, err
 	}
 	if err := startOrphanSweeper(ctx, store, adapter, options); err != nil {
+		return nil, err
+	}
+	if _, _, err := startRunnerCallbackServer(ctx, options.RunnerCallbackListenAddr, store); err != nil {
 		return nil, err
 	}
 
@@ -360,6 +367,29 @@ func runnerStatusHandler(store core.BindingStore) http.Handler {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
+}
+
+func startRunnerCallbackServer(ctx context.Context, listenAddr string, store core.BindingStore) (string, func(context.Context) error, error) {
+	if strings.TrimSpace(listenAddr) == "" {
+		return "", func(context.Context) error { return nil }, nil
+	}
+	listener, err := net.Listen("tcp", listenAddr)
+	if err != nil {
+		return "", nil, fmt.Errorf("listen runner callback server: %w", err)
+	}
+	server := &http.Server{Handler: runnerStatusHandler(store)}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownCtx)
+	}()
+	go func() {
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("gpu-burst-node runner callback server failed: addr=%s error=%v", listener.Addr().String(), err)
+		}
+	}()
+	return listener.Addr().String(), server.Shutdown, nil
 }
 
 func startOrphanSweeper(ctx context.Context, store core.BindingStore, adapter core.ProviderAdapter, options Options) error {
