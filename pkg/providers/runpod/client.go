@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -279,6 +280,8 @@ func remoteFromPod(pod podResponse, idempotencyKey string, request core.Workload
 		Provider:       providerName,
 		Phase:          phaseFromDesiredStatus(pod.DesiredStatus),
 		Request:        request,
+		HourlyCost:     hourlyCost(pod),
+		CostSource:     costSource(pod),
 	}
 }
 
@@ -293,6 +296,30 @@ func phaseFromDesiredStatus(status string) core.RemotePhase {
 	default:
 		return core.RemotePending
 	}
+}
+
+func hourlyCost(pod podResponse) float64 {
+	if pod.AdjustedCostPerHr > 0 {
+		return pod.AdjustedCostPerHr
+	}
+	if pod.CostPerHr == "" {
+		return 0
+	}
+	value, err := strconv.ParseFloat(pod.CostPerHr, 64)
+	if err != nil {
+		return 0
+	}
+	return value
+}
+
+func costSource(pod podResponse) string {
+	if pod.AdjustedCostPerHr > 0 {
+		return "runpod.adjustedCostPerHr"
+	}
+	if pod.CostPerHr != "" {
+		return "runpod.costPerHr"
+	}
+	return ""
 }
 
 func externalName(idempotencyKey string) string {

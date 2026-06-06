@@ -353,7 +353,16 @@ func remoteFromInstance(instance instance) core.RemoteResource {
 		ExternalName: instance.Name,
 		Provider:     providerName,
 		Phase:        phaseFromStatus(instance.Status),
+		HourlyCost:   float64(instance.InstanceType.PriceCentsPerHour) / 100.0,
+		CostSource:   costSource(instance),
 	}
+}
+
+func costSource(instance instance) string {
+	if instance.InstanceType.PriceCentsPerHour <= 0 {
+		return ""
+	}
+	return "lambda.instance_type.price_cents_per_hour"
 }
 
 func phaseFromStatus(status string) core.RemotePhase {

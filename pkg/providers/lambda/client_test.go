@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -111,7 +112,7 @@ func TestClientGetMapsLambdaStatus(t *testing.T) {
 				if r.URL.Path != "/instances/lambda-1" {
 					t.Fatalf("path = %s, want /instances/lambda-1", r.URL.Path)
 				}
-				_, _ = w.Write([]byte(`{"data":{"id":"lambda-1","name":"train","status":"` + tt.status + `"}}`))
+				_, _ = w.Write([]byte(`{"data":{"id":"lambda-1","name":"train","status":"` + tt.status + `","instance_type":{"price_cents_per_hour":1592}}}`))
 			}))
 			defer server.Close()
 
@@ -122,6 +123,9 @@ func TestClientGetMapsLambdaStatus(t *testing.T) {
 			}
 			if remote.Phase != tt.wantPhase {
 				t.Fatalf("phase = %s, want %s", remote.Phase, tt.wantPhase)
+			}
+			if math.Abs(remote.HourlyCost-15.92) > 0.000001 || remote.CostSource != "lambda.instance_type.price_cents_per_hour" {
+				t.Fatalf("cost = %.2f/%q, want 15.92 lambda source", remote.HourlyCost, remote.CostSource)
 			}
 		})
 	}

@@ -135,6 +135,14 @@ Burn-rate is a live metric, not just an estimate at launch:
 
 RunPod exposes cost fields in Pod responses and billing history; Lambda exposes instance type price in instance metadata. Use provider-native billing when available and catalog estimate otherwise.
 
+Current code maps:
+
+- RunPod `adjustedCostPerHr` / `costPerHr` into `RemoteResource.HourlyCost`.
+- Lambda `instance_type.price_cents_per_hour` into `RemoteResource.HourlyCost`.
+- `pkg/resource.EstimateBurnRate` into elapsed spend and projected total.
+
+Prometheus export is still a follow-up.
+
 ### 5. Recovery Without Managed Jobs
 
 We do not need a SkyPilot-style managed job feature in MVP. We do need persistent execution lineage:
@@ -195,4 +203,3 @@ Provider adapters own launch/delete/list/status. Strategy components own offer s
 6. Reuse the same planner from AIBrix batch runtime/resource manager.
 7. Add burn-rate metrics and orphan sweeper.
 8. Add real provider integration tests only after API-key setup is ready.
-

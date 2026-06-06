@@ -26,6 +26,8 @@ type RemoteResource struct {
 	Provider       string
 	Phase          RemotePhase
 	Request        WorkloadRequest
+	HourlyCost     float64
+	CostSource     string
 }
 
 type ProviderAdapter interface {

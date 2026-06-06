@@ -218,7 +218,9 @@ func TestClientGetMapsDesiredStatus(t *testing.T) {
 				_, _ = w.Write([]byte(`{
 					"id": "runpod-1",
 					"desiredStatus": "` + tt.desiredStatus + `",
-					"image": "example.com/train:latest"
+					"image": "example.com/train:latest",
+					"costPerHr": "0.74",
+					"adjustedCostPerHr": 0.69
 				}`))
 			}))
 			defer server.Close()
@@ -233,6 +235,9 @@ func TestClientGetMapsDesiredStatus(t *testing.T) {
 			}
 			if remote.Phase != tt.wantPhase {
 				t.Fatalf("remote phase = %q, want %q", remote.Phase, tt.wantPhase)
+			}
+			if remote.HourlyCost != 0.69 || remote.CostSource != "runpod.adjustedCostPerHr" {
+				t.Fatalf("cost = %.2f/%q, want 0.69 adjusted source", remote.HourlyCost, remote.CostSource)
 			}
 		})
 	}
