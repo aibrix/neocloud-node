@@ -58,3 +58,16 @@ Delete treats `RemoteNotFound` as successful cleanup.
 - The controller exposes `POST /gpu-burst-node/v1/runner/status` when the kubelet API server is enabled. The shell runner can report terminal exit code through this endpoint, but heartbeat and logs are not implemented yet.
 - No automatic SSH key creation.
 - No logs collection.
+
+## Gated E2E Smoke
+
+`hack/e2e/lambda-smoke.sh` runs a paid lifecycle smoke against Lambda Cloud:
+
+```bash
+export LAMBDA_E2E=1
+export LAMBDA_API_KEY=...
+export LAMBDA_E2E_SSH_KEY_NAMES=public-key-dev
+hack/e2e/lambda-smoke.sh
+```
+
+The script queries `GET /instance-types`, chooses `gpu_1x_a10` first and `gpu_1x_a100` only if A10 capacity is unavailable, refuses any other instance type, and sets `--max-gpu-count=1`. It creates one Kubernetes Pod, waits for a `CloudPodBinding` with a Lambda instance ID, deletes the Pod, then verifies no matching Lambda instance remains.
