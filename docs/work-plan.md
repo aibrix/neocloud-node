@@ -6,6 +6,8 @@
 
 这份计划把项目拆成可以逐阶段验证的工程路线。当前共识是：MVP 保持简单，不引入定制 scheduler、不引入 Kueue、不引入一组策略 CRD；用户入口仍然是标准 `Pod` / `Job` 加少量 annotations；只新增一个内部状态 CRD `CloudPodBinding`；`BindingStore`、`Transformer`、`ProviderAdapter` 都是代码内部接口，不是 CRD。
 
+2026-06-06 更新：真实联调先不作为阶段门槛。当前优先积累可测代码和清晰策略模型，E2E 等 API-key、账号、清理流程准备好后再做。spot/interruptible、成本、burn-rate、fallback 策略单独见 [Spot Market Strategy](spot-market-strategy.md)。AIBrix batch 和 GPU Burst Node 共享 resource manager 的设计见 [Shared Resource Manager Architecture](resource-manager-architecture.md)。
+
 ## 总体阶段
 
 | 阶段 | 目标 | Done criterion | 正确性评估 | 借鉴对象 |
@@ -15,7 +17,7 @@
 | Phase 2 | RunPod lifecycle thin slice | 一个 Kubernetes Job 可以创建一个 RunPod pod，状态同步，删除清理，无重复创建 | RunPod adapter contract tests、real integration tests、故障注入 | BSVogler RunPod proof、RunPod API |
 | Phase 3 | RunPod production MVP | Helm/RBAC/metrics/orphan sweeper/cost guard/logs/link/docs 完成，可给早期用户试用 | upgrade/restart/soak/leak/RBAC audit/成本保护测试 | SkyPilot cost metrics、provider catalog、RunPod template/network volume |
 | Phase 4 | Lambda Cloud VM runner | 第二 provider 跑通 VM launch + runner + container + terminate | runner contract tests、VM boot timeout、callback loss、real Lambda smoke test | SkyPilot Lambda support、VM provisioning model |
-| Phase 5 | Placement/fallback mechanism | 在 provider 接口稳定后启动可解释的 provider/region/price/capacity fallback，并记录 attempts | deterministic placement tests、capacity failure simulation、fallback lineage check | SkyPilot optimizer、managed jobs recovery |
+| Phase 5 | Placement/fallback/cost mechanism | 在 provider 接口稳定后启动可解释的 provider/region/price/capacity fallback、spot 策略和 burn-rate metrics，并记录 attempts | deterministic placement tests、capacity failure simulation、fallback lineage check、成本估算测试 | SkyPilot optimizer、managed spot、provider catalog |
 
 ## Phase 0: CVK 骨架和正确性底座
 
@@ -118,6 +120,8 @@
 
 - 实现 `RunPodAdapter`。
 - 支持 create/get/delete/list-by-external-name。
+- 支持 RunPod template、datacenter、GPU type/memory hint、ports、network volume、registry auth id、interruptible/spot。
+- 对 429、5xx、create response lost、delete timeout、remote manually deleted 做稳定错误分类。
 - 将 provider 状态映射到 Pod phase、container status、Pod condition 和 `CloudPodBinding.status`。
 - 用 Pod UID 作为 idempotency key 或 external name。
 - 支持 finalizer 驱动的删除。
@@ -133,6 +137,7 @@
 - ambiguous create error 后 reconcile 不会重复创建多个 RunPod pod。
 - 手工删除远端 RunPod pod 后，本地状态能进入明确 Failed/Deleted/Unknown 路径，而不是无限 Pending。
 - `kubectl describe pod` 能看到关键 Events。
+  - 当前代码已先通过 PodStatus condition reason/message 暴露，Event recorder 是后续运维增强。
 
 ### 正确性评估
 
@@ -156,7 +161,7 @@
 
 - Helm chart 和最小 RBAC。
 - controller metrics：create latency、delete latency、provider errors、active remote resources、cost estimate、reconcile retries。
-- orphan sweeper：定期扫描有 CVK external name/label 但没有活跃 binding 的远端资源。
+- orphan sweeper：定期扫描有 GPU Burst Node external name/label 但没有活跃 binding 的远端资源。
 - 成本保护：max runtime、max price、TTL、namespace-level default。
 - 日志策略：如果 RunPod API 支持，接 `kubectl logs`；如果不支持，写 event 和 provider console link。
 - provider capability docs。
@@ -231,10 +236,11 @@ Lambda Cloud 和 RunPod 不同，它更像 VM provider。这个阶段验证 `Pro
 
 - provider-neutral placement request。
 - provider capability cache：GPU type、region、price、quota、unsupported feature。
-- 简单 placement policy：provider order、region order、max price、allow fallback、spot/on-demand preference。
+- placement policy：provider order、region order、max price、allow fallback、spot/on-demand/either preference。
 - 错误分类：capacity、quota、auth、invalid spec、price exceeded、retryable infra error。
 - `CloudPodBinding.status.attempts` 记录每次 provider/region 尝试和失败原因。
 - blocked-offer cache：短时间内避免反复尝试已知无容量组合。
+- cost/burn-rate：估算 hourly cost、当前 burn rate、projected total、fallback cost delta。
 
 ### Done Criterion
 
