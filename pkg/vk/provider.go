@@ -1,0 +1,412 @@
+package vk
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"sort"
+	"sync"
+
+	dto "github.com/prometheus/client_model/go"
+	"github.com/virtual-kubelet/virtual-kubelet/errdefs"
+	"github.com/virtual-kubelet/virtual-kubelet/node"
+	"github.com/virtual-kubelet/virtual-kubelet/node/api"
+	"github.com/virtual-kubelet/virtual-kubelet/node/nodeutil"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	stats "k8s.io/kubelet/pkg/apis/stats/v1alpha1"
+
+	"github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/core"
+	"github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/kube"
+)
+
+const defaultStatsNodeName = "gpu-burst-node"
+
+type PodTransformer interface {
+	TransformPod(pod *corev1.Pod) (core.Binding, error)
+}
+
+type Config struct {
+	Store       core.BindingStore
+	Adapter     core.ProviderAdapter
+	Transformer PodTransformer
+	LaunchGuard *core.LaunchGuard
+	NodeName    string
+}
+
+type Provider struct {
+	transformer PodTransformer
+	lifecycle   *core.LifecycleService
+	nodeName    string
+
+	mu       sync.RWMutex
+	pods     map[string]*corev1.Pod
+	notifier func(*corev1.Pod)
+}
+
+var _ nodeutil.Provider = (*Provider)(nil)
+var _ node.PodNotifier = (*Provider)(nil)
+
+func NewProvider(config Config) (*Provider, error) {
+	if config.Store == nil {
+		return nil, errdefs.InvalidInput("missing binding store")
+	}
+	if config.Adapter == nil {
+		return nil, errdefs.InvalidInput("missing provider adapter")
+	}
+	if config.Transformer == nil {
+		config.Transformer = kube.Transformer{}
+	}
+	if config.NodeName == "" {
+		config.NodeName = defaultStatsNodeName
+	}
+
+	options := []core.LifecycleOption{}
+	if config.LaunchGuard != nil {
+		options = append(options, core.WithLaunchGuard(*config.LaunchGuard))
+	}
+
+	return &Provider{
+		transformer: config.Transformer,
+		lifecycle:   core.NewLifecycleService(config.Store, config.Adapter, options...),
+		nodeName:    config.NodeName,
+		pods:        make(map[string]*corev1.Pod),
+	}, nil
+}
+
+func NewProviderFunc(config Config) nodeutil.NewProviderFunc {
+	return func(providerConfig nodeutil.ProviderConfig) (nodeutil.Provider, node.NodeProvider, error) {
+		resolved := config
+		if resolved.NodeName == "" && providerConfig.Node != nil {
+			resolved.NodeName = providerConfig.Node.Name
+		}
+
+		provider, err := NewProvider(resolved)
+		if err != nil {
+			return nil, nil, err
+		}
+		return provider, nil, nil
+	}
+}
+
+func (p *Provider) CreatePod(ctx context.Context, pod *corev1.Pod) error {
+	return p.upsertPod(ctx, pod)
+}
+
+func (p *Provider) UpdatePod(ctx context.Context, pod *corev1.Pod) error {
+	return p.upsertPod(ctx, pod)
+}
+
+func (p *Provider) DeletePod(ctx context.Context, pod *corev1.Pod) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if pod == nil {
+		return errdefs.InvalidInput("pod is nil")
+	}
+
+	key := podKey(pod.Namespace, pod.Name)
+	cached := p.getCachedPod(key)
+	if err := p.lifecycle.EnsureDeleted(ctx, pod.Namespace, string(pod.UID)); err != nil {
+		return normalizeProviderError(err)
+	}
+
+	p.mu.Lock()
+	delete(p.pods, key)
+	p.mu.Unlock()
+
+	if cached != nil {
+		terminal := podWithTerminalStatus(cached)
+		p.notify(terminal)
+	}
+	return nil
+}
+
+func (p *Provider) GetPod(ctx context.Context, namespace, name string) (*corev1.Pod, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	pod := p.getCachedPod(podKey(namespace, name))
+	if pod == nil {
+		return nil, errdefs.NotFoundf("pod %q is not known to the provider", namespace+"/"+name)
+	}
+	return pod, nil
+}
+
+func (p *Provider) GetPodStatus(ctx context.Context, namespace, name string) (*corev1.PodStatus, error) {
+	pod, err := p.GetPod(ctx, namespace, name)
+	if err != nil {
+		return nil, err
+	}
+	return pod.Status.DeepCopy(), nil
+}
+
+func (p *Provider) GetPods(ctx context.Context) ([]*corev1.Pod, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	p.mu.RLock()
+	keys := make([]string, 0, len(p.pods))
+	for key := range p.pods {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	pods := make([]*corev1.Pod, 0, len(keys))
+	for _, key := range keys {
+		pods = append(pods, p.pods[key].DeepCopy())
+	}
+	p.mu.RUnlock()
+	return pods, nil
+}
+
+func (p *Provider) NotifyPods(ctx context.Context, notifier func(*corev1.Pod)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.notifier = notifier
+}
+
+func (p *Provider) GetContainerLogs(ctx context.Context, namespace, podName, containerName string, opts api.ContainerLogOpts) (io.ReadCloser, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return nil, unsupportedMethod("container logs")
+}
+
+func (p *Provider) RunInContainer(ctx context.Context, namespace, podName, containerName string, cmd []string, attach api.AttachIO) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return unsupportedMethod("exec")
+}
+
+func (p *Provider) AttachToContainer(ctx context.Context, namespace, podName, containerName string, attach api.AttachIO) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return unsupportedMethod("attach")
+}
+
+func (p *Provider) PortForward(ctx context.Context, namespace, pod string, port int32, stream io.ReadWriteCloser) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return unsupportedMethod("port-forward")
+}
+
+func (p *Provider) GetStatsSummary(ctx context.Context) (*stats.Summary, error) {
+	pods, err := p.GetPods(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	summary := &stats.Summary{
+		Node: stats.NodeStats{
+			NodeName: p.nodeName,
+		},
+		Pods: make([]stats.PodStats, 0, len(pods)),
+	}
+	for _, pod := range pods {
+		summary.Pods = append(summary.Pods, podStats(pod))
+	}
+	return summary, nil
+}
+
+func (p *Provider) GetMetricsResource(ctx context.Context) ([]*dto.MetricFamily, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return []*dto.MetricFamily{}, nil
+}
+
+func (p *Provider) upsertPod(ctx context.Context, pod *corev1.Pod) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	binding, err := p.transformer.TransformPod(pod)
+	if err != nil {
+		return normalizeProviderError(err)
+	}
+
+	binding, err = p.lifecycle.EnsureCreated(ctx, binding)
+	if err != nil {
+		return normalizeProviderError(err)
+	}
+
+	cached := podWithBindingStatus(pod, binding)
+	p.mu.Lock()
+	p.pods[podKey(cached.Namespace, cached.Name)] = cached.DeepCopy()
+	p.mu.Unlock()
+
+	p.notify(cached)
+	return nil
+}
+
+func (p *Provider) getCachedPod(key string) *corev1.Pod {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	pod, ok := p.pods[key]
+	if !ok {
+		return nil
+	}
+	return pod.DeepCopy()
+}
+
+func (p *Provider) notify(pod *corev1.Pod) {
+	p.mu.RLock()
+	notifier := p.notifier
+	p.mu.RUnlock()
+
+	if notifier != nil {
+		notifier(pod.DeepCopy())
+	}
+}
+
+func podWithBindingStatus(pod *corev1.Pod, binding core.Binding) *corev1.Pod {
+	out := pod.DeepCopy()
+	now := metav1.Now()
+	phase := podPhase(binding.Phase)
+	out.Status.Phase = phase
+	out.Status.StartTime = startTime(out, now)
+	out.Status.Conditions = podConditions(phase, "")
+	out.Status.ContainerStatuses = containerStatuses(out.Spec.Containers, phase, now, "")
+	return out
+}
+
+func podWithTerminalStatus(pod *corev1.Pod) *corev1.Pod {
+	out := pod.DeepCopy()
+	now := metav1.Now()
+	out.Status.Phase = corev1.PodSucceeded
+	out.Status.Conditions = podConditions(corev1.PodSucceeded, "RemoteWorkloadDeleted")
+	out.Status.ContainerStatuses = containerStatuses(out.Spec.Containers, corev1.PodSucceeded, now, "RemoteWorkloadDeleted")
+	return out
+}
+
+func podStats(pod *corev1.Pod) stats.PodStats {
+	start := pod.CreationTimestamp
+	if pod.Status.StartTime != nil {
+		start = *pod.Status.StartTime
+	}
+
+	podStats := stats.PodStats{
+		PodRef: stats.PodReference{
+			Name:      pod.Name,
+			Namespace: pod.Namespace,
+			UID:       string(pod.UID),
+		},
+		StartTime: start,
+	}
+	for _, container := range pod.Spec.Containers {
+		podStats.Containers = append(podStats.Containers, stats.ContainerStats{
+			Name:      container.Name,
+			StartTime: start,
+		})
+	}
+	return podStats
+}
+
+func podPhase(phase core.BindingPhase) corev1.PodPhase {
+	switch phase {
+	case core.BindingRunning:
+		return corev1.PodRunning
+	case core.BindingDeleted:
+		return corev1.PodSucceeded
+	case core.BindingFailed:
+		return corev1.PodFailed
+	default:
+		return corev1.PodPending
+	}
+}
+
+func podConditions(phase corev1.PodPhase, reason string) []corev1.PodCondition {
+	readyStatus := corev1.ConditionFalse
+	if phase == corev1.PodRunning {
+		readyStatus = corev1.ConditionTrue
+	}
+	return []corev1.PodCondition{
+		{Type: corev1.PodInitialized, Status: corev1.ConditionTrue},
+		{Type: corev1.PodScheduled, Status: corev1.ConditionTrue},
+		{Type: corev1.PodReady, Status: readyStatus, Reason: reason},
+		{Type: corev1.ContainersReady, Status: readyStatus, Reason: reason},
+	}
+}
+
+func containerStatuses(containers []corev1.Container, phase corev1.PodPhase, now metav1.Time, reason string) []corev1.ContainerStatus {
+	statuses := make([]corev1.ContainerStatus, 0, len(containers))
+	for _, container := range containers {
+		status := corev1.ContainerStatus{
+			Name:         container.Name,
+			Image:        container.Image,
+			Ready:        phase == corev1.PodRunning,
+			RestartCount: 0,
+		}
+		switch phase {
+		case corev1.PodRunning:
+			status.State.Running = &corev1.ContainerStateRunning{StartedAt: now}
+		case corev1.PodSucceeded:
+			status.State.Terminated = &corev1.ContainerStateTerminated{
+				ExitCode:   0,
+				Reason:     reasonOrDefault(reason, "RemoteWorkloadSucceeded"),
+				FinishedAt: now,
+			}
+		case corev1.PodFailed:
+			status.State.Terminated = &corev1.ContainerStateTerminated{
+				ExitCode:   1,
+				Reason:     reasonOrDefault(reason, "RemoteWorkloadFailed"),
+				FinishedAt: now,
+			}
+		default:
+			status.State.Waiting = &corev1.ContainerStateWaiting{
+				Reason: reasonOrDefault(reason, "RemoteWorkloadPending"),
+			}
+		}
+		statuses = append(statuses, status)
+	}
+	return statuses
+}
+
+func startTime(pod *corev1.Pod, fallback metav1.Time) *metav1.Time {
+	if pod.Status.StartTime != nil {
+		return pod.Status.StartTime.DeepCopy()
+	}
+	return &fallback
+}
+
+func reasonOrDefault(reason string, fallback string) string {
+	if reason != "" {
+		return reason
+	}
+	return fallback
+}
+
+func podKey(namespace string, name string) string {
+	return namespace + "/" + name
+}
+
+func unsupportedMethod(method string) error {
+	return errdefs.InvalidInput(fmt.Sprintf("%s is not supported by GPU Burst Node provider yet", method))
+}
+
+func normalizeProviderError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	var unsupported *core.UnsupportedSpecError
+	if errors.As(err, &unsupported) {
+		return errdefs.AsInvalidInput(err)
+	}
+	var policyViolation *core.PolicyViolationError
+	if errors.As(err, &policyViolation) {
+		return errdefs.AsInvalidInput(err)
+	}
+	if errors.Is(err, core.ErrBindingNotFound) {
+		return errdefs.AsNotFound(err)
+	}
+	return err
+}
