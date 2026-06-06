@@ -54,7 +54,7 @@ Delete treats `RemoteNotFound` as successful cleanup.
 
 ## Current Limitations
 
-- No real Lambda integration test yet.
+- A gated real Lambda smoke test exists, but the current development environment has not completed it successfully yet.
 - The controller exposes `POST /gpu-burst-node/v1/runner/status` when the kubelet API server is enabled. The shell runner can report terminal exit code through this endpoint, but heartbeat and logs are not implemented yet.
 - No automatic SSH key creation.
 - No logs collection.
@@ -69,5 +69,7 @@ export LAMBDA_API_KEY=...
 export LAMBDA_E2E_SSH_KEY_NAMES=public-key-dev
 hack/e2e/lambda-smoke.sh
 ```
+
+The script also accepts `LAMBDA_CLOUD_API_KEY` and `LAMBDA_CLOUD_SSH_KEYS` for compatibility with existing Lambda Cloud environment variable names.
 
 The script queries `GET /instance-types`, chooses `gpu_1x_a10` first and `gpu_1x_a100` only if A10 capacity is unavailable, refuses any other instance type, and sets `--max-gpu-count=1`. It creates one Kubernetes Pod, waits for a `CloudPodBinding` with a Lambda instance ID, deletes the Pod, then verifies no matching Lambda instance remains.
