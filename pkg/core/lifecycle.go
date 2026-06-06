@@ -67,6 +67,7 @@ func (s *LifecycleService) EnsureCreated(ctx context.Context, desired Binding) (
 	if binding.Placement.Provider == "" {
 		binding.Placement.Provider = binding.Request.Provider
 	}
+	recordRemoteCost(&binding, remote)
 	if err := s.store.Update(ctx, binding); err != nil {
 		return Binding{}, err
 	}
@@ -99,6 +100,7 @@ func (s *LifecycleService) SyncStatus(ctx context.Context, namespace string, wor
 	}
 
 	binding.Phase = bindingPhaseFromRemote(remote.Phase)
+	recordRemoteCost(&binding, remote)
 	if err := s.store.Update(ctx, binding); err != nil {
 		return Binding{}, err
 	}
@@ -171,6 +173,20 @@ func conditionTypeForErrorClass(class ErrorClass) ConditionType {
 		return ConditionAuth
 	default:
 		return ConditionProviderError
+	}
+}
+
+func recordRemoteCost(binding *Binding, remote RemoteResource) {
+	if binding == nil {
+		return
+	}
+	if remote.HourlyCost <= 0 && remote.CostSource == "" {
+		return
+	}
+	binding.Cost = CostStatus{
+		HourlyUSD:  remote.HourlyCost,
+		Source:     remote.CostSource,
+		ObservedAt: time.Now().UTC(),
 	}
 }
 

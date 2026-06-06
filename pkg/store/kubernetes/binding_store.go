@@ -234,6 +234,7 @@ func statusFromBinding(binding core.Binding) map[string]interface{} {
 		"remoteID":    binding.RemoteID,
 		"request":     requestToMap(binding.Request),
 		"placement":   placementToMap(binding.Placement),
+		"cost":        costToMap(binding.Cost),
 		"attempts":    attemptsToSlice(binding.Attempts),
 		"conditions":  conditionsToSlice(binding.Conditions),
 		"deleting":    binding.Deleting,
@@ -263,6 +264,7 @@ func bindingFromObject(object *unstructured.Unstructured) (core.Binding, error) 
 		RemoteID:    stringValue(status["remoteID"]),
 		Phase:       core.BindingPhase(stringValue(status["phase"])),
 		Placement:   placementFromMap(asMap(status["placement"])),
+		Cost:        costFromMap(asMap(status["cost"])),
 		Attempts:    attemptsFromSlice(asSlice(status["attempts"])),
 		Conditions:  conditionsFromSlice(asSlice(status["conditions"])),
 		Deleting:    boolValue(status["deleting"]),
@@ -358,6 +360,31 @@ func placementFromMap(values map[string]interface{}) core.Placement {
 		Provider: stringValue(values["provider"]),
 		Region:   stringValue(values["region"]),
 		GPUType:  stringValue(values["gpuType"]),
+	}
+}
+
+func costToMap(cost core.CostStatus) map[string]interface{} {
+	if cost.HourlyUSD <= 0 && cost.Source == "" && cost.ObservedAt.IsZero() {
+		return nil
+	}
+	out := map[string]interface{}{
+		"hourlyUSD": cost.HourlyUSD,
+		"source":    cost.Source,
+	}
+	if observedAt := timeToString(cost.ObservedAt); observedAt != "" {
+		out["observedAt"] = observedAt
+	}
+	return out
+}
+
+func costFromMap(values map[string]interface{}) core.CostStatus {
+	if len(values) == 0 {
+		return core.CostStatus{}
+	}
+	return core.CostStatus{
+		HourlyUSD:  floatValue(values["hourlyUSD"]),
+		Source:     stringValue(values["source"]),
+		ObservedAt: timeFromString(stringValue(values["observedAt"])),
 	}
 }
 
@@ -558,6 +585,23 @@ func intValue(value interface{}) int {
 		return int(typed)
 	case float64:
 		return int(typed)
+	default:
+		return 0
+	}
+}
+
+func floatValue(value interface{}) float64 {
+	switch typed := value.(type) {
+	case float64:
+		return typed
+	case float32:
+		return float64(typed)
+	case int:
+		return float64(typed)
+	case int32:
+		return float64(typed)
+	case int64:
+		return float64(typed)
 	default:
 		return 0
 	}

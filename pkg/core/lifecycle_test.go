@@ -53,6 +53,40 @@ func TestLifecycleServiceEnsureCreatedIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestLifecycleServiceRecordsRemoteCostOnCreate(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := NewMemoryBindingStore()
+	provider := &costProvider{}
+	service := NewLifecycleService(store, provider)
+
+	binding, err := service.EnsureCreated(ctx, Binding{
+		Namespace:   "default",
+		Name:        "train-job",
+		WorkloadUID: "pod-123",
+		Request: WorkloadRequest{
+			Image:    "example.com/train:latest",
+			GPUCount: 1,
+			Provider: "runpod",
+		},
+	})
+	if err != nil {
+		t.Fatalf("EnsureCreated returned error: %v", err)
+	}
+	if binding.Cost.HourlyUSD != 0.44 || binding.Cost.Source != "runpod.costPerHr" || binding.Cost.ObservedAt.IsZero() {
+		t.Fatalf("binding cost = %#v, want 0.44 runpod cost with observation time", binding.Cost)
+	}
+
+	stored, err := store.GetByWorkloadUID(ctx, "default", "pod-123")
+	if err != nil {
+		t.Fatalf("GetByWorkloadUID returned error: %v", err)
+	}
+	if stored.Cost.HourlyUSD != 0.44 || stored.Cost.Source != "runpod.costPerHr" || stored.Cost.ObservedAt.IsZero() {
+		t.Fatalf("stored cost = %#v, want persisted provider cost", stored.Cost)
+	}
+}
+
 func TestLifecycleServiceEnsureDeletedKeepsBindingWhenRemoteDeleteFails(t *testing.T) {
 	t.Parallel()
 
@@ -103,6 +137,34 @@ func TestLifecycleServiceEnsureDeletedKeepsBindingWhenRemoteDeleteFails(t *testi
 type deleteOnceProvider struct {
 	ProviderAdapter
 	deleteErr error
+}
+
+type costProvider struct{}
+
+func (p *costProvider) Create(ctx context.Context, idempotencyKey string, request WorkloadRequest) (RemoteResource, error) {
+	return RemoteResource{
+		ID:             "remote-cost",
+		IdempotencyKey: idempotencyKey,
+		Provider:       "runpod",
+		Phase:          RemoteRunning,
+		Request:        request,
+		HourlyCost:     0.44,
+		CostSource:     "runpod.costPerHr",
+	}, nil
+}
+
+func (p *costProvider) Get(context.Context, string) (RemoteResource, error) {
+	return RemoteResource{
+		ID:         "remote-cost",
+		Provider:   "runpod",
+		Phase:      RemoteRunning,
+		HourlyCost: 0.50,
+		CostSource: "runpod.adjustedCostPerHr",
+	}, nil
+}
+
+func (p *costProvider) Delete(context.Context, string) error {
+	return nil
 }
 
 func (p *deleteOnceProvider) Delete(ctx context.Context, remoteID string) error {

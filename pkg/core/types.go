@@ -47,6 +47,12 @@ type Placement struct {
 	GPUType  string
 }
 
+type CostStatus struct {
+	HourlyUSD  float64
+	Source     string
+	ObservedAt time.Time
+}
+
 type Attempt struct {
 	Provider        string
 	Region          string
@@ -94,6 +100,7 @@ type Binding struct {
 	RemoteID    string
 	Phase       BindingPhase
 	Placement   Placement
+	Cost        CostStatus
 	Attempts    []Attempt
 	Conditions  []BindingCondition
 	Deleting    bool

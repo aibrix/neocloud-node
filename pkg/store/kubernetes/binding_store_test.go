@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -95,6 +96,11 @@ func TestUpdatePersistsRemoteStatus(t *testing.T) {
 	binding.RemoteID = "rp-123"
 	binding.Phase = core.BindingRunning
 	binding.LastError = ""
+	binding.Cost = core.CostStatus{
+		HourlyUSD:  0.44,
+		Source:     "runpod.costPerHr",
+		ObservedAt: time.Date(2026, 6, 6, 8, 0, 0, 0, time.UTC),
+	}
 	binding.Attempts = []core.Attempt{
 		{
 			Provider:        "runpod",
@@ -124,6 +130,9 @@ func TestUpdatePersistsRemoteStatus(t *testing.T) {
 	}
 	if got.RemoteID != "rp-123" || got.Phase != core.BindingRunning {
 		t.Fatalf("binding = %#v, want remote running state", got)
+	}
+	if got.Cost.HourlyUSD != 0.44 || got.Cost.Source != "runpod.costPerHr" || !got.Cost.ObservedAt.Equal(binding.Cost.ObservedAt) {
+		t.Fatalf("cost = %#v, want %#v", got.Cost, binding.Cost)
 	}
 	if len(got.Attempts) != 1 || got.Attempts[0].Region != "US-TX-3" {
 		t.Fatalf("attempts = %#v, want one RunPod attempt", got.Attempts)

@@ -80,6 +80,16 @@ spec:
                       type: string
                     gpuType:
                       type: string
+                cost:
+                  type: object
+                  properties:
+                    hourlyUSD:
+                      type: number
+                    source:
+                      type: string
+                    observedAt:
+                      type: string
+                      format: date-time
                 attempts:
                   type: array
                   items:
