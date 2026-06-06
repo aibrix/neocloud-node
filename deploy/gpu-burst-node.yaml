@@ -212,6 +212,20 @@ spec:
                   name: gpu-burst-node-runpod
                   key: apiKey
                   optional: true
+            - name: LAMBDA_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: gpu-burst-node-lambda
+                  key: apiKey
+                  optional: true
+            - name: GPU_BURST_LAMBDA_CALLBACK_URL
+              value: ""
+            - name: GPU_BURST_LAMBDA_REGION
+              value: ""
+            - name: GPU_BURST_LAMBDA_INSTANCE_TYPE
+              value: ""
+            - name: GPU_BURST_LAMBDA_SSH_KEY_NAMES
+              value: ""
           resources:
             requests:
               cpu: 100m

@@ -21,6 +21,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/core"
+	lambdacloud "github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/providers/lambda"
 	"github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/providers/runpod"
 	kstore "github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/store/kubernetes"
 	"github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/vk"
@@ -31,6 +32,7 @@ const (
 
 	ProviderFake   = "fake"
 	ProviderRunPod = "runpod"
+	ProviderLambda = "lambda"
 
 	BindingStoreMemory     = "memory"
 	BindingStoreKubernetes = "kubernetes"
@@ -52,6 +54,13 @@ type Options struct {
 
 	RunPodAPIKey  string
 	RunPodBaseURL string
+
+	LambdaAPIKey        string
+	LambdaBaseURL       string
+	LambdaCallbackURL   string
+	LambdaDefaultRegion string
+	LambdaInstanceType  string
+	LambdaSSHKeyNames   string
 
 	RequireMaxPrice bool
 	MaxGPUCount     int
@@ -80,6 +89,13 @@ func ParseOptions(args []string, getenv func(string) string) (Options, error) {
 		RunPodAPIKey:  envOr(getenv, "RUNPOD_API_KEY", ""),
 		RunPodBaseURL: envOr(getenv, "GPU_BURST_RUNPOD_BASE_URL", ""),
 
+		LambdaAPIKey:        envOr(getenv, "LAMBDA_API_KEY", ""),
+		LambdaBaseURL:       envOr(getenv, "GPU_BURST_LAMBDA_BASE_URL", ""),
+		LambdaCallbackURL:   envOr(getenv, "GPU_BURST_LAMBDA_CALLBACK_URL", ""),
+		LambdaDefaultRegion: envOr(getenv, "GPU_BURST_LAMBDA_REGION", ""),
+		LambdaInstanceType:  envOr(getenv, "GPU_BURST_LAMBDA_INSTANCE_TYPE", ""),
+		LambdaSSHKeyNames:   envOr(getenv, "GPU_BURST_LAMBDA_SSH_KEY_NAMES", ""),
+
 		KubeletAPIEnabled: boolEnv(getenv, "GPU_BURST_ENABLE_KUBELET_API", false),
 		RequireMaxPrice:   boolEnv(getenv, "GPU_BURST_REQUIRE_MAX_PRICE", false),
 		AdvertiseGPUCount: intEnv(getenv, "GPU_BURST_ADVERTISE_GPU_COUNT", 100),
@@ -92,7 +108,7 @@ func ParseOptions(args []string, getenv func(string) string) (Options, error) {
 	fs := flag.NewFlagSet("gpu-burst-node", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.StringVar(&options.NodeName, "node-name", options.NodeName, "virtual node name")
-	fs.StringVar(&options.Provider, "provider", options.Provider, "provider adapter: fake or runpod")
+	fs.StringVar(&options.Provider, "provider", options.Provider, "provider adapter: fake, runpod or lambda")
 	fs.StringVar(&options.BindingStore, "binding-store", options.BindingStore, "binding store backend: kubernetes or memory")
 	fs.StringVar(&options.Kubeconfig, "kubeconfig", options.Kubeconfig, "path to kubeconfig")
 	fs.StringVar(&options.ListenAddr, "listen-addr", options.ListenAddr, "kubelet API listen address")
@@ -101,6 +117,12 @@ func ParseOptions(args []string, getenv func(string) string) (Options, error) {
 	fs.StringVar(&options.TLSKeyFile, "tls-key-file", options.TLSKeyFile, "TLS key file for kubelet API")
 	fs.StringVar(&options.RunPodAPIKey, "runpod-api-key", options.RunPodAPIKey, "RunPod API key")
 	fs.StringVar(&options.RunPodBaseURL, "runpod-base-url", options.RunPodBaseURL, "RunPod REST API base URL")
+	fs.StringVar(&options.LambdaAPIKey, "lambda-api-key", options.LambdaAPIKey, "Lambda Cloud API key")
+	fs.StringVar(&options.LambdaBaseURL, "lambda-base-url", options.LambdaBaseURL, "Lambda Cloud API base URL")
+	fs.StringVar(&options.LambdaCallbackURL, "lambda-callback-url", options.LambdaCallbackURL, "runner callback URL for Lambda Cloud cloud-init")
+	fs.StringVar(&options.LambdaDefaultRegion, "lambda-region", options.LambdaDefaultRegion, "default Lambda Cloud region")
+	fs.StringVar(&options.LambdaInstanceType, "lambda-instance-type", options.LambdaInstanceType, "default Lambda Cloud instance type")
+	fs.StringVar(&options.LambdaSSHKeyNames, "lambda-ssh-key-names", options.LambdaSSHKeyNames, "comma-separated default Lambda Cloud SSH key names")
 	fs.BoolVar(&options.RequireMaxPrice, "require-max-price", options.RequireMaxPrice, "reject pods without max price annotation")
 	fs.IntVar(&options.MaxGPUCount, "max-gpu-count", intEnv(getenv, "GPU_BURST_MAX_GPU_COUNT", 0), "maximum GPUs per pod; 0 disables the guard")
 	fs.IntVar(&options.MaxPorts, "max-ports", intEnv(getenv, "GPU_BURST_MAX_PORTS", 0), "maximum exposed container ports per pod; 0 disables the guard")
@@ -249,6 +271,15 @@ func newProviderAdapter(options Options) (core.ProviderAdapter, error) {
 			APIKey:  options.RunPodAPIKey,
 			BaseURL: options.RunPodBaseURL,
 		}), nil
+	case ProviderLambda:
+		return lambdacloud.NewClient(lambdacloud.Config{
+			APIKey:              options.LambdaAPIKey,
+			BaseURL:             options.LambdaBaseURL,
+			CallbackURL:         options.LambdaCallbackURL,
+			DefaultRegion:       options.LambdaDefaultRegion,
+			DefaultInstanceType: options.LambdaInstanceType,
+			DefaultSSHKeyNames:  commaSeparated(options.LambdaSSHKeyNames),
+		}), nil
 	default:
 		return nil, fmt.Errorf("unsupported provider %q", options.Provider)
 	}
@@ -290,6 +321,10 @@ func validateOptions(options Options) error {
 		if strings.TrimSpace(options.RunPodAPIKey) == "" {
 			return errors.New("runpod provider requires --runpod-api-key or RUNPOD_API_KEY")
 		}
+	case ProviderLambda:
+		if strings.TrimSpace(options.LambdaAPIKey) == "" {
+			return errors.New("lambda provider requires --lambda-api-key or LAMBDA_API_KEY")
+		}
 	default:
 		return fmt.Errorf("unsupported provider %q", options.Provider)
 	}
@@ -308,6 +343,21 @@ func validateOptions(options Options) error {
 		return errors.New("advertise pod capacity must be greater than zero")
 	}
 	return nil
+}
+
+func commaSeparated(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		value := strings.TrimSpace(part)
+		if value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func configureNodeSpec(config *nodeutil.NodeConfig, options Options) error {

@@ -116,6 +116,38 @@ func TestParseOptionsRequiresRunPodAPIKey(t *testing.T) {
 	}
 }
 
+func TestParseOptionsReadsLambdaOptions(t *testing.T) {
+	env := mapEnv(map[string]string{
+		"LAMBDA_API_KEY":                 "lambda-key",
+		"GPU_BURST_LAMBDA_BASE_URL":      "https://lambda.example/api/v1",
+		"GPU_BURST_LAMBDA_CALLBACK_URL":  "https://controller.example/status",
+		"GPU_BURST_LAMBDA_REGION":        "us-west-1",
+		"GPU_BURST_LAMBDA_INSTANCE_TYPE": "gpu_1x_a10",
+		"GPU_BURST_LAMBDA_SSH_KEY_NAMES": "key-a,key-b",
+	})
+
+	options, err := ParseOptions([]string{"--provider=lambda", "--binding-store=memory"}, env)
+	if err != nil {
+		t.Fatalf("ParseOptions() error = %v", err)
+	}
+	if options.Provider != ProviderLambda || options.LambdaAPIKey != "lambda-key" {
+		t.Fatalf("provider/key = %q/%q, want lambda/lambda-key", options.Provider, options.LambdaAPIKey)
+	}
+	if options.LambdaBaseURL != "https://lambda.example/api/v1" {
+		t.Fatalf("LambdaBaseURL = %q", options.LambdaBaseURL)
+	}
+	if got := commaSeparated(options.LambdaSSHKeyNames); len(got) != 2 || got[0] != "key-a" || got[1] != "key-b" {
+		t.Fatalf("lambda ssh key names = %#v, want key-a key-b", got)
+	}
+}
+
+func TestParseOptionsRequiresLambdaAPIKey(t *testing.T) {
+	_, err := ParseOptions([]string{"--provider=lambda"}, emptyEnv)
+	if err == nil {
+		t.Fatal("ParseOptions() error = nil, want missing Lambda API key error")
+	}
+}
+
 func TestParseOptionsRequiresTLSFilesWhenKubeletAPIEnabled(t *testing.T) {
 	_, err := ParseOptions([]string{"--enable-kubelet-api"}, emptyEnv)
 	if err == nil {
