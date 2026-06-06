@@ -207,6 +207,8 @@ spec:
             - --listen-addr=:10250
             - --advertise-gpu-count=$(GPU_BURST_ADVERTISE_GPU_COUNT)
             - --advertise-pod-capacity=$(GPU_BURST_ADVERTISE_POD_CAPACITY)
+            - --orphan-sweeper-interval=$(GPU_BURST_ORPHAN_SWEEPER_INTERVAL)
+            - --orphan-sweeper-dry-run=$(GPU_BURST_ORPHAN_SWEEPER_DRY_RUN)
           env:
             - name: GPU_BURST_NODE_NAME
               value: aibrix-gpu-burst
@@ -216,6 +218,10 @@ spec:
               value: "100"
             - name: GPU_BURST_ADVERTISE_POD_CAPACITY
               value: "1000"
+            - name: GPU_BURST_ORPHAN_SWEEPER_INTERVAL
+              value: "0"
+            - name: GPU_BURST_ORPHAN_SWEEPER_DRY_RUN
+              value: "true"
             - name: RUNPOD_API_KEY
               valueFrom:
                 secretKeyRef:

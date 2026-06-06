@@ -7,10 +7,12 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/virtual-kubelet/virtual-kubelet/node/nodeutil"
 	corev1 "k8s.io/api/core/v1"
@@ -70,6 +72,9 @@ type Options struct {
 	AdvertisePodCapacity int
 	AdvertiseCPU         string
 	AdvertiseMemory      string
+
+	OrphanSweeperInterval time.Duration
+	OrphanSweeperDryRun   bool
 }
 
 func ParseOptions(args []string, getenv func(string) string) (Options, error) {
@@ -103,6 +108,9 @@ func ParseOptions(args []string, getenv func(string) string) (Options, error) {
 			"GPU_BURST_ADVERTISE_POD_CAPACITY", 1000),
 		AdvertiseCPU:    envOr(getenv, "GPU_BURST_ADVERTISE_CPU", "1000"),
 		AdvertiseMemory: envOr(getenv, "GPU_BURST_ADVERTISE_MEMORY", "1Ti"),
+
+		OrphanSweeperInterval: durationEnv(getenv, "GPU_BURST_ORPHAN_SWEEPER_INTERVAL", 0),
+		OrphanSweeperDryRun:   boolEnv(getenv, "GPU_BURST_ORPHAN_SWEEPER_DRY_RUN", true),
 	}
 
 	fs := flag.NewFlagSet("gpu-burst-node", flag.ContinueOnError)
@@ -130,6 +138,8 @@ func ParseOptions(args []string, getenv func(string) string) (Options, error) {
 	fs.IntVar(&options.AdvertisePodCapacity, "advertise-pod-capacity", options.AdvertisePodCapacity, "virtual node pod capacity advertised to the scheduler")
 	fs.StringVar(&options.AdvertiseCPU, "advertise-cpu", options.AdvertiseCPU, "virtual node CPU capacity advertised to the scheduler")
 	fs.StringVar(&options.AdvertiseMemory, "advertise-memory", options.AdvertiseMemory, "virtual node memory capacity advertised to the scheduler")
+	fs.DurationVar(&options.OrphanSweeperInterval, "orphan-sweeper-interval", options.OrphanSweeperInterval, "periodic orphan sweeper interval; 0 disables it")
+	fs.BoolVar(&options.OrphanSweeperDryRun, "orphan-sweeper-dry-run", options.OrphanSweeperDryRun, "report orphaned provider resources without deleting them")
 
 	if err := fs.Parse(args); err != nil {
 		return Options{}, err
@@ -174,6 +184,9 @@ func NewNode(ctx context.Context, options Options, kubeClient kubernetes.Interfa
 	}
 	adapter, err := newProviderAdapter(options)
 	if err != nil {
+		return nil, err
+	}
+	if err := startOrphanSweeper(ctx, store, adapter, options); err != nil {
 		return nil, err
 	}
 
@@ -297,6 +310,59 @@ func launchGuard(options Options) *core.LaunchGuard {
 	return &guard
 }
 
+func startOrphanSweeper(ctx context.Context, store core.BindingStore, adapter core.ProviderAdapter, options Options) error {
+	if options.OrphanSweeperInterval <= 0 {
+		return nil
+	}
+	cleaner, ok := adapter.(core.RemoteResourceCleaner)
+	if !ok {
+		return fmt.Errorf("orphan sweeper requires provider %q to support remote resource listing", options.Provider)
+	}
+
+	sweeper := core.OrphanSweeper{
+		Store:    store,
+		Provider: cleaner,
+		DryRun:   options.OrphanSweeperDryRun,
+	}
+	go runOrphanSweeper(ctx, options.OrphanSweeperInterval, sweeper)
+	return nil
+}
+
+func runOrphanSweeper(ctx context.Context, interval time.Duration, sweeper core.OrphanSweeper) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			report, err := sweeper.Sweep(ctx)
+			logOrphanSweepReport(report, sweeper.DryRun, err)
+		}
+	}
+}
+
+func logOrphanSweepReport(report core.OrphanSweepReport, dryRun bool, err error) {
+	if err != nil {
+		log.Printf("gpu-burst-node orphan sweeper failed: dryRun=%t remote=%d activeBindings=%d orphans=%d deleted=%d deleteErrors=%d error=%v",
+			dryRun,
+			report.ObservedRemoteResources,
+			report.ActiveBindings,
+			len(report.Orphans),
+			len(report.Deleted),
+			len(report.DeleteErrors),
+			err)
+		return
+	}
+	log.Printf("gpu-burst-node orphan sweeper completed: dryRun=%t remote=%d activeBindings=%d orphans=%d deleted=%d",
+		dryRun,
+		report.ObservedRemoteResources,
+		report.ActiveBindings,
+		len(report.Orphans),
+		len(report.Deleted))
+}
+
 func tlsConfig(options Options) (*tls.Config, error) {
 	certificate, err := tls.LoadX509KeyPair(options.TLSCertFile, options.TLSKeyFile)
 	if err != nil {
@@ -341,6 +407,9 @@ func validateOptions(options Options) error {
 	}
 	if options.AdvertisePodCapacity <= 0 {
 		return errors.New("advertise pod capacity must be greater than zero")
+	}
+	if options.OrphanSweeperInterval < 0 {
+		return errors.New("orphan sweeper interval cannot be negative")
 	}
 	return nil
 }
@@ -430,6 +499,18 @@ func intEnv(getenv func(string) string, key string, fallback int) int {
 		return fallback
 	}
 	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func durationEnv(getenv func(string) string, key string, fallback time.Duration) time.Duration {
+	value := strings.TrimSpace(getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(value)
 	if err != nil {
 		return fallback
 	}

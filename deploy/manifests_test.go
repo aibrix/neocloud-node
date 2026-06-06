@@ -23,6 +23,8 @@ func TestBaseManifestContainsRunnableControlPlaneResources(t *testing.T) {
 	requireContains(t, args, "--provider=$(GPU_BURST_PROVIDER)")
 	requireContains(t, args, "--binding-store=kubernetes")
 	requireContains(t, args, "--node-name=$(GPU_BURST_NODE_NAME)")
+	requireContains(t, args, "--orphan-sweeper-interval=$(GPU_BURST_ORPHAN_SWEEPER_INTERVAL)")
+	requireContains(t, args, "--orphan-sweeper-dry-run=$(GPU_BURST_ORPHAN_SWEEPER_DRY_RUN)")
 }
 
 func TestCRDHasStatusSubresourceAndPrinterColumns(t *testing.T) {

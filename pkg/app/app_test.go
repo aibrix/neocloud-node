@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/virtual-kubelet/virtual-kubelet/node/nodeutil"
 	corev1 "k8s.io/api/core/v1"
@@ -70,6 +71,27 @@ func TestParseOptionsReadsFlagsAndEnvironment(t *testing.T) {
 	}
 }
 
+func TestParseOptionsReadsOrphanSweeperOptions(t *testing.T) {
+	env := mapEnv(map[string]string{
+		"GPU_BURST_ORPHAN_SWEEPER_INTERVAL": "5m",
+		"GPU_BURST_ORPHAN_SWEEPER_DRY_RUN":  "false",
+	})
+
+	options, err := ParseOptions([]string{
+		"--orphan-sweeper-interval=30s",
+		"--orphan-sweeper-dry-run=true",
+	}, env)
+	if err != nil {
+		t.Fatalf("ParseOptions() error = %v", err)
+	}
+	if options.OrphanSweeperInterval != 30*time.Second {
+		t.Fatalf("OrphanSweeperInterval = %s, want 30s", options.OrphanSweeperInterval)
+	}
+	if !options.OrphanSweeperDryRun {
+		t.Fatal("OrphanSweeperDryRun = false, want true flag override")
+	}
+}
+
 func TestConfigureNodeSpecAdvertisesProviderTaintAndCapacity(t *testing.T) {
 	options, err := ParseOptions([]string{
 		"--provider=fake",
@@ -106,6 +128,12 @@ func TestParseOptionsRejectsInvalidProviderAndStore(t *testing.T) {
 	}
 	if _, err := ParseOptions([]string{"--binding-store=unknown"}, emptyEnv); err == nil {
 		t.Fatal("ParseOptions() error = nil for unknown binding store")
+	}
+}
+
+func TestParseOptionsRejectsNegativeOrphanSweeperInterval(t *testing.T) {
+	if _, err := ParseOptions([]string{"--orphan-sweeper-interval=-1s"}, emptyEnv); err == nil {
+		t.Fatal("ParseOptions() error = nil for negative orphan sweeper interval")
 	}
 }
 
@@ -166,6 +194,43 @@ func TestNewNodeBuildsVirtualKubeletNodeWithFakeProvider(t *testing.T) {
 	}
 
 	node, err := NewNode(context.Background(), options, kubefake.NewSimpleClientset(), dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()))
+	if err != nil {
+		t.Fatalf("NewNode() error = %v", err)
+	}
+	if node == nil {
+		t.Fatal("NewNode() = nil, want node")
+	}
+}
+
+func TestNewNodeRejectsOrphanSweeperWithoutProviderCleaner(t *testing.T) {
+	options, err := ParseOptions([]string{
+		"--provider=fake",
+		"--binding-store=memory",
+		"--orphan-sweeper-interval=1h",
+	}, emptyEnv)
+	if err != nil {
+		t.Fatalf("ParseOptions() error = %v", err)
+	}
+
+	_, err = NewNode(context.Background(), options, kubefake.NewSimpleClientset(), dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()))
+	if err == nil {
+		t.Fatal("NewNode() error = nil, want unsupported orphan sweeper provider error")
+	}
+}
+
+func TestNewNodeStartsOrphanSweeperForRunPodCleaner(t *testing.T) {
+	options, err := ParseOptions([]string{
+		"--provider=runpod",
+		"--binding-store=memory",
+		"--orphan-sweeper-interval=1h",
+	}, mapEnv(map[string]string{"RUNPOD_API_KEY": "test-key"}))
+	if err != nil {
+		t.Fatalf("ParseOptions() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	node, err := NewNode(ctx, options, kubefake.NewSimpleClientset(), dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()))
 	if err != nil {
 		t.Fatalf("NewNode() error = %v", err)
 	}
