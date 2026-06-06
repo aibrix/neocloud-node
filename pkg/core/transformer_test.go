@@ -14,10 +14,18 @@ func TestTransformerAcceptsSingleGPUContainer(t *testing.T) {
 		Name:        "train-job",
 		WorkloadUID: "pod-123",
 		Annotations: map[string]string{
-			"gpu-burst-node.aibrix.ai/provider":  "runpod",
-			"gpu-burst-node.aibrix.ai/gpu-type":  "H100",
-			"gpu-burst-node.aibrix.ai/max-price": "4.50",
-			"gpu-burst-node.aibrix.ai/region":    "us",
+			AnnotationProvider:                 "runpod",
+			AnnotationGPUType:                  "H100",
+			AnnotationGPUMemory:                "80Gi",
+			AnnotationMaxPrice:                 "4.50",
+			AnnotationRegion:                   "us",
+			AnnotationMarketType:               MarketTypeSpot,
+			AnnotationRunPodTemplateID:         "template-1",
+			AnnotationRunPodDataCenterIDs:      "US-TX-3,EU-RO-1",
+			AnnotationRunPodDataCenterPriority: "custom",
+			AnnotationRunPodNetworkVolumeID:    "volume-1",
+			AnnotationRunPodRegistryAuthID:     "registry-1",
+			AnnotationRunPodVolumeMountPath:    "/workspace",
 		},
 		Containers: []ContainerSpec{
 			{
@@ -49,6 +57,18 @@ func TestTransformerAcceptsSingleGPUContainer(t *testing.T) {
 	}
 	if request.GPUType != "H100" {
 		t.Fatalf("request GPU type = %q, want H100", request.GPUType)
+	}
+	if request.GPUMemory != "80Gi" {
+		t.Fatalf("request GPU memory = %q, want 80Gi", request.GPUMemory)
+	}
+	if request.MarketType != MarketTypeSpot {
+		t.Fatalf("request market type = %q, want %q", request.MarketType, MarketTypeSpot)
+	}
+	if request.ProviderHints[AnnotationRunPodTemplateID] != "template-1" {
+		t.Fatalf("template hint = %q, want template-1", request.ProviderHints[AnnotationRunPodTemplateID])
+	}
+	if request.ProviderHints[AnnotationRunPodDataCenterIDs] != "US-TX-3,EU-RO-1" {
+		t.Fatalf("data center hint = %q, want US-TX-3,EU-RO-1", request.ProviderHints[AnnotationRunPodDataCenterIDs])
 	}
 	if request.Env["MODEL"] != "llama" {
 		t.Fatalf("request env MODEL = %q, want llama", request.Env["MODEL"])

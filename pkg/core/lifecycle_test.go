@@ -147,3 +147,147 @@ func TestLifecycleServiceRejectsPolicyViolationBeforeProviderCreate(t *testing.T
 		t.Fatalf("provider CreateCount = %d, want 0", provider.CreateCount())
 	}
 }
+
+func TestLifecycleServiceRecordsProviderCreateFailure(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := NewMemoryBindingStore()
+	provider := &createFailureProvider{
+		err: &ProviderError{
+			Provider:  "runpod",
+			Operation: "create",
+			Class:     ErrorClassRateLimited,
+			Message:   "rate limited",
+		},
+	}
+	service := NewLifecycleService(store, provider)
+
+	_, err := service.EnsureCreated(ctx, Binding{
+		Namespace:   "default",
+		Name:        "train-job",
+		WorkloadUID: "pod-123",
+		Request: WorkloadRequest{
+			Image:    "example.com/train:latest",
+			GPUCount: 1,
+			Provider: "runpod",
+		},
+	})
+	if err == nil {
+		t.Fatal("EnsureCreated() error = nil, want provider error")
+	}
+
+	stored, getErr := store.GetByWorkloadUID(ctx, "default", "pod-123")
+	if getErr != nil {
+		t.Fatalf("GetByWorkloadUID() error = %v", getErr)
+	}
+	if stored.Phase != BindingFailed {
+		t.Fatalf("phase = %s, want Failed", stored.Phase)
+	}
+	if len(stored.Attempts) != 1 {
+		t.Fatalf("attempts = %#v, want one attempt", stored.Attempts)
+	}
+	if stored.Attempts[0].Class != ErrorClassRateLimited || !stored.Attempts[0].Retryable || !stored.Attempts[0].FallbackAllowed {
+		t.Fatalf("attempt = %#v, want rate-limited retryable fallback attempt", stored.Attempts[0])
+	}
+	condition := FindCondition(stored.Conditions, ConditionProviderError)
+	if condition == nil || condition.Status != ConditionTrue || condition.Reason != string(ErrorClassRateLimited) {
+		t.Fatalf("provider condition = %#v, want rate-limited true condition", condition)
+	}
+}
+
+func TestLifecycleServiceRecordsRemoteDeletedOnSync(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := NewMemoryBindingStore()
+	provider := NewFakeProvider("runpod")
+	service := NewLifecycleService(store, provider)
+
+	binding, err := service.EnsureCreated(ctx, Binding{
+		Namespace:   "default",
+		Name:        "train-job",
+		WorkloadUID: "pod-123",
+		Request: WorkloadRequest{
+			Image:    "example.com/train:latest",
+			GPUCount: 1,
+			Provider: "runpod",
+		},
+	})
+	if err != nil {
+		t.Fatalf("EnsureCreated() error = %v", err)
+	}
+	if err := provider.Delete(ctx, binding.RemoteID); err != nil {
+		t.Fatalf("fake Delete() setup error = %v", err)
+	}
+
+	_, err = service.SyncStatus(ctx, "default", "pod-123")
+	if !errors.Is(err, ErrRemoteNotFound) {
+		t.Fatalf("SyncStatus() error = %v, want ErrRemoteNotFound", err)
+	}
+
+	stored, getErr := store.GetByWorkloadUID(ctx, "default", "pod-123")
+	if getErr != nil {
+		t.Fatalf("GetByWorkloadUID() error = %v", getErr)
+	}
+	if stored.Phase != BindingFailed {
+		t.Fatalf("phase = %s, want Failed", stored.Phase)
+	}
+	condition := FindCondition(stored.Conditions, ConditionRemoteDeleted)
+	if condition == nil || condition.Status != ConditionTrue {
+		t.Fatalf("remote deleted condition = %#v, want true condition", condition)
+	}
+}
+
+func TestLifecycleServiceRecordsDeleteFailure(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := NewMemoryBindingStore()
+	provider := &deleteOnceProvider{ProviderAdapter: NewFakeProvider("runpod")}
+	service := NewLifecycleService(store, provider)
+
+	_, err := service.EnsureCreated(ctx, Binding{
+		Namespace:   "default",
+		Name:        "train-job",
+		WorkloadUID: "pod-123",
+		Request: WorkloadRequest{
+			Image:    "example.com/train:latest",
+			GPUCount: 1,
+			Provider: "runpod",
+		},
+	})
+	if err != nil {
+		t.Fatalf("EnsureCreated() error = %v", err)
+	}
+
+	provider.deleteErr = context.DeadlineExceeded
+	if err := service.EnsureDeleted(ctx, "default", "pod-123"); err == nil {
+		t.Fatal("EnsureDeleted() error = nil, want delete error")
+	}
+
+	stored, getErr := store.GetByWorkloadUID(ctx, "default", "pod-123")
+	if getErr != nil {
+		t.Fatalf("GetByWorkloadUID() error = %v", getErr)
+	}
+	condition := FindCondition(stored.Conditions, ConditionDeleteFailure)
+	if condition == nil || condition.Status != ConditionTrue || condition.Reason != string(ErrorClassTimeout) {
+		t.Fatalf("delete failure condition = %#v, want timeout true condition", condition)
+	}
+}
+
+type createFailureProvider struct {
+	err error
+}
+
+func (p *createFailureProvider) Create(ctx context.Context, idempotencyKey string, request WorkloadRequest) (RemoteResource, error) {
+	return RemoteResource{}, p.err
+}
+
+func (p *createFailureProvider) Get(ctx context.Context, remoteID string) (RemoteResource, error) {
+	return RemoteResource{}, ErrRemoteNotFound
+}
+
+func (p *createFailureProvider) Delete(ctx context.Context, remoteID string) error {
+	return nil
+}

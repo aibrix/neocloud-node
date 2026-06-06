@@ -93,6 +93,31 @@ spec:
                         type: string
                       message:
                         type: string
+                      class:
+                        type: string
+                      retryable:
+                        type: boolean
+                      fallbackAllowed:
+                        type: boolean
+                      timestamp:
+                        type: string
+                        format: date-time
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
 ---
 apiVersion: v1
 kind: ServiceAccount

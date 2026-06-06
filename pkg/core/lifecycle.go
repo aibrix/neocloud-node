@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"errors"
+	"time"
 )
 
 type LifecycleService struct {
@@ -42,6 +43,12 @@ func (s *LifecycleService) EnsureCreated(ctx context.Context, desired Binding) (
 		if err := s.guard.Validate(binding.Request); err != nil {
 			binding.Phase = BindingFailed
 			binding.LastError = err.Error()
+			SetCondition(&binding, BindingCondition{
+				Type:    ConditionUnsupportedSpec,
+				Status:  ConditionTrue,
+				Reason:  ClassifyError(err).String(),
+				Message: err.Error(),
+			})
 			_ = s.store.Update(ctx, binding)
 			return binding, err
 		}
@@ -49,8 +56,7 @@ func (s *LifecycleService) EnsureCreated(ctx context.Context, desired Binding) (
 
 	remote, err := s.provider.Create(ctx, idempotencyKey(binding), binding.Request)
 	if err != nil {
-		binding.Phase = BindingFailed
-		binding.LastError = err.Error()
+		recordProviderFailure(&binding, binding.Request.Provider, binding.Request.RegionHint, "CreateFailed", err)
 		_ = s.store.Update(ctx, binding)
 		return binding, err
 	}
@@ -81,6 +87,12 @@ func (s *LifecycleService) SyncStatus(ctx context.Context, namespace string, wor
 		if errors.Is(err, ErrRemoteNotFound) {
 			binding.Phase = BindingFailed
 			binding.LastError = ErrRemoteNotFound.Error()
+			SetCondition(&binding, BindingCondition{
+				Type:    ConditionRemoteDeleted,
+				Status:  ConditionTrue,
+				Reason:  string(ErrorClassRemoteNotFound),
+				Message: "remote resource is missing; it may have been deleted outside the controller",
+			})
 			_ = s.store.Update(ctx, binding)
 		}
 		return binding, err
@@ -104,10 +116,69 @@ func (s *LifecycleService) EnsureDeleted(ctx context.Context, namespace string, 
 
 	if binding.RemoteID != "" {
 		if err := s.provider.Delete(ctx, binding.RemoteID); err != nil && !errors.Is(err, ErrRemoteNotFound) {
+			recordDeleteFailure(&binding, err)
+			_ = s.store.Update(ctx, binding)
 			return err
 		}
 	}
 	return s.store.CompleteDelete(ctx, namespace, workloadUID)
+}
+
+func recordProviderFailure(binding *Binding, provider string, region string, reason string, err error) {
+	if binding == nil {
+		return
+	}
+	class := ClassifyError(err)
+	binding.Phase = BindingFailed
+	binding.LastError = err.Error()
+	binding.Attempts = append(binding.Attempts, Attempt{
+		Provider:        provider,
+		Region:          region,
+		Class:           class,
+		Reason:          reason,
+		Message:         err.Error(),
+		Retryable:       IsRetryableClass(class),
+		FallbackAllowed: AllowsFallbackClass(class),
+		Timestamp:       time.Now().UTC(),
+	})
+	SetCondition(binding, BindingCondition{
+		Type:    conditionTypeForErrorClass(class),
+		Status:  ConditionTrue,
+		Reason:  string(class),
+		Message: err.Error(),
+	})
+}
+
+func recordDeleteFailure(binding *Binding, err error) {
+	if binding == nil {
+		return
+	}
+	class := ClassifyError(err)
+	binding.LastError = err.Error()
+	SetCondition(binding, BindingCondition{
+		Type:    ConditionDeleteFailure,
+		Status:  ConditionTrue,
+		Reason:  string(class),
+		Message: err.Error(),
+	})
+}
+
+func conditionTypeForErrorClass(class ErrorClass) ConditionType {
+	switch class {
+	case ErrorClassCapacity:
+		return ConditionCapacity
+	case ErrorClassAuth:
+		return ConditionAuth
+	default:
+		return ConditionProviderError
+	}
+}
+
+func (class ErrorClass) String() string {
+	if class == "" {
+		return string(ErrorClassUnknown)
+	}
+	return string(class)
 }
 
 func idempotencyKey(binding Binding) string {

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"time"
 	"unicode"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -214,6 +215,7 @@ func statusFromBinding(binding core.Binding) map[string]interface{} {
 		"request":     requestToMap(binding.Request),
 		"placement":   placementToMap(binding.Placement),
 		"attempts":    attemptsToSlice(binding.Attempts),
+		"conditions":  conditionsToSlice(binding.Conditions),
 		"deleting":    binding.Deleting,
 		"lastError":   binding.LastError,
 	}
@@ -242,6 +244,7 @@ func bindingFromObject(object *unstructured.Unstructured) (core.Binding, error) 
 		Phase:       core.BindingPhase(stringValue(status["phase"])),
 		Placement:   placementFromMap(asMap(status["placement"])),
 		Attempts:    attemptsFromSlice(asSlice(status["attempts"])),
+		Conditions:  conditionsFromSlice(asSlice(status["conditions"])),
 		Deleting:    boolValue(status["deleting"]),
 		LastError:   stringValue(status["lastError"]),
 	}, nil
@@ -290,12 +293,15 @@ func requestToMap(request core.WorkloadRequest) map[string]interface{} {
 		"env":              stringMapToInterface(request.Env),
 		"gpuCount":         int64(request.GPUCount),
 		"gpuType":          request.GPUType,
+		"gpuMemory":        request.GPUMemory,
 		"maxPrice":         request.MaxPrice,
+		"marketType":       request.MarketType,
 		"provider":         request.Provider,
 		"regionHint":       request.RegionHint,
 		"restartPolicy":    request.RestartPolicy,
 		"imagePullSecrets": stringSliceToInterface(request.ImagePullSecrets),
 		"ports":            portsToSlice(request.Ports),
+		"providerHints":    stringMapToInterface(request.ProviderHints),
 	}
 }
 
@@ -307,12 +313,15 @@ func requestFromMap(values map[string]interface{}) core.WorkloadRequest {
 		Env:              stringMapFromInterface(asMap(values["env"])),
 		GPUCount:         intValue(values["gpuCount"]),
 		GPUType:          stringValue(values["gpuType"]),
+		GPUMemory:        stringValue(values["gpuMemory"]),
 		MaxPrice:         stringValue(values["maxPrice"]),
+		MarketType:       stringValue(values["marketType"]),
 		Provider:         stringValue(values["provider"]),
 		RegionHint:       stringValue(values["regionHint"]),
 		RestartPolicy:    stringValue(values["restartPolicy"]),
 		ImagePullSecrets: stringSliceFromInterface(asSlice(values["imagePullSecrets"])),
 		Ports:            portsFromSlice(asSlice(values["ports"])),
+		ProviderHints:    stringMapFromInterface(asMap(values["providerHints"])),
 	}
 }
 
@@ -338,12 +347,19 @@ func attemptsToSlice(attempts []core.Attempt) []interface{} {
 	}
 	out := make([]interface{}, 0, len(attempts))
 	for _, attempt := range attempts {
-		out = append(out, map[string]interface{}{
-			"provider": attempt.Provider,
-			"region":   attempt.Region,
-			"reason":   attempt.Reason,
-			"message":  attempt.Message,
-		})
+		item := map[string]interface{}{
+			"provider":        attempt.Provider,
+			"region":          attempt.Region,
+			"class":           string(attempt.Class),
+			"reason":          attempt.Reason,
+			"message":         attempt.Message,
+			"retryable":       attempt.Retryable,
+			"fallbackAllowed": attempt.FallbackAllowed,
+		}
+		if timestamp := timeToString(attempt.Timestamp); timestamp != "" {
+			item["timestamp"] = timestamp
+		}
+		out = append(out, item)
 	}
 	return out
 }
@@ -356,10 +372,52 @@ func attemptsFromSlice(values []interface{}) []core.Attempt {
 	for _, value := range values {
 		item := asMap(value)
 		out = append(out, core.Attempt{
-			Provider: stringValue(item["provider"]),
-			Region:   stringValue(item["region"]),
-			Reason:   stringValue(item["reason"]),
-			Message:  stringValue(item["message"]),
+			Provider:        stringValue(item["provider"]),
+			Region:          stringValue(item["region"]),
+			Class:           core.ErrorClass(stringValue(item["class"])),
+			Reason:          stringValue(item["reason"]),
+			Message:         stringValue(item["message"]),
+			Retryable:       boolValue(item["retryable"]),
+			FallbackAllowed: boolValue(item["fallbackAllowed"]),
+			Timestamp:       timeFromString(stringValue(item["timestamp"])),
+		})
+	}
+	return out
+}
+
+func conditionsToSlice(conditions []core.BindingCondition) []interface{} {
+	if len(conditions) == 0 {
+		return nil
+	}
+	out := make([]interface{}, 0, len(conditions))
+	for _, condition := range conditions {
+		item := map[string]interface{}{
+			"type":    string(condition.Type),
+			"status":  string(condition.Status),
+			"reason":  condition.Reason,
+			"message": condition.Message,
+		}
+		if transitionTime := timeToString(condition.LastTransitionTime); transitionTime != "" {
+			item["lastTransitionTime"] = transitionTime
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func conditionsFromSlice(values []interface{}) []core.BindingCondition {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]core.BindingCondition, 0, len(values))
+	for _, value := range values {
+		item := asMap(value)
+		out = append(out, core.BindingCondition{
+			Type:               core.ConditionType(stringValue(item["type"])),
+			Status:             core.ConditionStatus(stringValue(item["status"])),
+			Reason:             stringValue(item["reason"]),
+			Message:            stringValue(item["message"]),
+			LastTransitionTime: timeFromString(stringValue(item["lastTransitionTime"])),
 		})
 	}
 	return out
@@ -490,6 +548,24 @@ func boolValue(value interface{}) bool {
 		return out
 	}
 	return false
+}
+
+func timeToString(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339Nano)
+}
+
+func timeFromString(value string) time.Time {
+	if value == "" {
+		return time.Time{}
+	}
+	out, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return time.Time{}
+	}
+	return out
 }
 
 func removeString(values []string, remove string) []string {

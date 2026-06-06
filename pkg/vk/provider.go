@@ -304,10 +304,11 @@ func podWithBindingStatus(pod *corev1.Pod, binding core.Binding) *corev1.Pod {
 	out := pod.DeepCopy()
 	now := metav1.Now()
 	phase := podPhase(binding.Phase)
+	reason, message := podReasonMessage(binding)
 	out.Status.Phase = phase
 	out.Status.StartTime = startTime(out, now)
-	out.Status.Conditions = podConditions(phase, "")
-	out.Status.ContainerStatuses = containerStatuses(out.Spec.Containers, phase, now, "")
+	out.Status.Conditions = podConditions(phase, reason, message)
+	out.Status.ContainerStatuses = containerStatuses(out.Spec.Containers, phase, now, reason, message)
 	return out
 }
 
@@ -315,8 +316,8 @@ func podWithTerminalStatus(pod *corev1.Pod) *corev1.Pod {
 	out := pod.DeepCopy()
 	now := metav1.Now()
 	out.Status.Phase = corev1.PodSucceeded
-	out.Status.Conditions = podConditions(corev1.PodSucceeded, "RemoteWorkloadDeleted")
-	out.Status.ContainerStatuses = containerStatuses(out.Spec.Containers, corev1.PodSucceeded, now, "RemoteWorkloadDeleted")
+	out.Status.Conditions = podConditions(corev1.PodSucceeded, "RemoteWorkloadDeleted", "remote workload was deleted")
+	out.Status.ContainerStatuses = containerStatuses(out.Spec.Containers, corev1.PodSucceeded, now, "RemoteWorkloadDeleted", "remote workload was deleted")
 	return out
 }
 
@@ -356,7 +357,7 @@ func podPhase(phase core.BindingPhase) corev1.PodPhase {
 	}
 }
 
-func podConditions(phase corev1.PodPhase, reason string) []corev1.PodCondition {
+func podConditions(phase corev1.PodPhase, reason string, message string) []corev1.PodCondition {
 	readyStatus := corev1.ConditionFalse
 	if phase == corev1.PodRunning {
 		readyStatus = corev1.ConditionTrue
@@ -364,12 +365,12 @@ func podConditions(phase corev1.PodPhase, reason string) []corev1.PodCondition {
 	return []corev1.PodCondition{
 		{Type: corev1.PodInitialized, Status: corev1.ConditionTrue},
 		{Type: corev1.PodScheduled, Status: corev1.ConditionTrue},
-		{Type: corev1.PodReady, Status: readyStatus, Reason: reason},
-		{Type: corev1.ContainersReady, Status: readyStatus, Reason: reason},
+		{Type: corev1.PodReady, Status: readyStatus, Reason: reason, Message: message},
+		{Type: corev1.ContainersReady, Status: readyStatus, Reason: reason, Message: message},
 	}
 }
 
-func containerStatuses(containers []corev1.Container, phase corev1.PodPhase, now metav1.Time, reason string) []corev1.ContainerStatus {
+func containerStatuses(containers []corev1.Container, phase corev1.PodPhase, now metav1.Time, reason string, message string) []corev1.ContainerStatus {
 	statuses := make([]corev1.ContainerStatus, 0, len(containers))
 	for _, container := range containers {
 		status := corev1.ContainerStatus{
@@ -385,22 +386,45 @@ func containerStatuses(containers []corev1.Container, phase corev1.PodPhase, now
 			status.State.Terminated = &corev1.ContainerStateTerminated{
 				ExitCode:   0,
 				Reason:     reasonOrDefault(reason, "RemoteWorkloadSucceeded"),
+				Message:    message,
 				FinishedAt: now,
 			}
 		case corev1.PodFailed:
 			status.State.Terminated = &corev1.ContainerStateTerminated{
 				ExitCode:   1,
 				Reason:     reasonOrDefault(reason, "RemoteWorkloadFailed"),
+				Message:    message,
 				FinishedAt: now,
 			}
 		default:
 			status.State.Waiting = &corev1.ContainerStateWaiting{
-				Reason: reasonOrDefault(reason, "RemoteWorkloadPending"),
+				Reason:  reasonOrDefault(reason, "RemoteWorkloadPending"),
+				Message: message,
 			}
 		}
 		statuses = append(statuses, status)
 	}
 	return statuses
+}
+
+func podReasonMessage(binding core.Binding) (string, string) {
+	for _, conditionType := range []core.ConditionType{
+		core.ConditionUnsupportedSpec,
+		core.ConditionAuth,
+		core.ConditionCapacity,
+		core.ConditionDeleteFailure,
+		core.ConditionRemoteDeleted,
+		core.ConditionProviderError,
+	} {
+		condition := core.FindCondition(binding.Conditions, conditionType)
+		if condition != nil && condition.Status == core.ConditionTrue {
+			return condition.Reason, condition.Message
+		}
+	}
+	if binding.LastError != "" {
+		return "RemoteWorkloadError", binding.LastError
+	}
+	return "", ""
 }
 
 func startTime(pod *corev1.Pod, fallback metav1.Time) *metav1.Time {

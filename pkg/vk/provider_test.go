@@ -208,6 +208,43 @@ func TestGetPodStatusSyncsRemoteProviderPhase(t *testing.T) {
 	}
 }
 
+func TestGetPodStatusSurfacesRemoteDeletedCondition(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	adapter := core.NewFakeProvider("runpod")
+	provider := newTestProvider(t, adapter)
+	pod := gpuPod("remote-deleted", "uid-remote-deleted")
+
+	if err := provider.CreatePod(ctx, pod); err != nil {
+		t.Fatalf("CreatePod() error = %v", err)
+	}
+	binding, err := provider.lifecycle.SyncStatus(ctx, "default", "uid-remote-deleted")
+	if err != nil {
+		t.Fatalf("SyncStatus() setup error = %v", err)
+	}
+	if err := adapter.Delete(ctx, binding.RemoteID); err != nil {
+		t.Fatalf("fake Delete() setup error = %v", err)
+	}
+
+	status, err := provider.GetPodStatus(ctx, "default", "remote-deleted")
+	if err != nil {
+		t.Fatalf("GetPodStatus() error = %v", err)
+	}
+	if status.Phase != corev1.PodFailed {
+		t.Fatalf("phase = %s, want Failed", status.Phase)
+	}
+	if len(status.ContainerStatuses) != 1 || status.ContainerStatuses[0].State.Terminated == nil {
+		t.Fatalf("container statuses = %#v, want terminated", status.ContainerStatuses)
+	}
+	if got := status.ContainerStatuses[0].State.Terminated.Reason; got != string(core.ErrorClassRemoteNotFound) {
+		t.Fatalf("terminated reason = %q, want %q", got, core.ErrorClassRemoteNotFound)
+	}
+	if got := podReadyCondition(status.Conditions).Message; got == "" {
+		t.Fatal("PodReady message is empty, want provider error message")
+	}
+}
+
 func TestNewProviderFuncBuildsNodeutilProvider(t *testing.T) {
 	ctx := context.Background()
 	factory := NewProviderFunc(Config{
@@ -307,6 +344,15 @@ func assertRunningPod(t *testing.T, pod *corev1.Pod) {
 	if status.State.Running == nil {
 		t.Fatalf("container state = %#v, want running", status.State)
 	}
+}
+
+func podReadyCondition(conditions []corev1.PodCondition) corev1.PodCondition {
+	for _, condition := range conditions {
+		if condition.Type == corev1.PodReady {
+			return condition
+		}
+	}
+	return corev1.PodCondition{}
 }
 
 func assertInvalidInput(t *testing.T, method string, err error) {

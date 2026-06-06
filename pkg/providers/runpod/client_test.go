@@ -3,6 +3,7 @@ package runpod
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -55,6 +56,16 @@ func TestClientCreateSendsRunPodPayload(t *testing.T) {
 		Ports: []core.Port{
 			{Name: "metrics", ContainerPort: 9090, Protocol: "TCP"},
 		},
+		MarketType: core.MarketTypeSpot,
+		ProviderHints: map[string]string{
+			core.AnnotationRunPodTemplateID:         "template-1",
+			core.AnnotationRunPodDataCenterIDs:      "US-TX-3,EU-RO-1",
+			core.AnnotationRunPodDataCenterPriority: "custom",
+			core.AnnotationRunPodNetworkVolumeID:    "volume-1",
+			core.AnnotationRunPodRegistryAuthID:     "registry-1",
+			core.AnnotationRunPodVolumeMountPath:    "/workspace",
+			core.AnnotationRunPodCloudType:          "COMMUNITY",
+		},
 	})
 	if err != nil {
 		t.Fatalf("Create returned error: %v", err)
@@ -76,9 +87,19 @@ func TestClientCreateSendsRunPodPayload(t *testing.T) {
 	assertPayloadStringSlice(t, gotPayload, "dockerStartCmd", []string{"train.py"})
 	assertPayloadStringSlice(t, gotPayload, "gpuTypeIds", []string{"NVIDIA H100"})
 	assertPayloadStringSlice(t, gotPayload, "ports", []string{"9090/tcp"})
+	assertPayloadStringSlice(t, gotPayload, "dataCenterIds", []string{"US-TX-3", "EU-RO-1"})
+	assertPayloadString(t, gotPayload, "dataCenterPriority", "custom")
+	assertPayloadString(t, gotPayload, "templateId", "template-1")
+	assertPayloadString(t, gotPayload, "networkVolumeId", "volume-1")
+	assertPayloadString(t, gotPayload, "containerRegistryAuthId", "registry-1")
+	assertPayloadString(t, gotPayload, "volumeMountPath", "/workspace")
+	assertPayloadString(t, gotPayload, "cloudType", "COMMUNITY")
 
 	if gotPayload["gpuCount"] != float64(1) {
 		t.Fatalf("gpuCount = %#v, want 1", gotPayload["gpuCount"])
+	}
+	if gotPayload["interruptible"] != true {
+		t.Fatalf("interruptible = %#v, want true", gotPayload["interruptible"])
 	}
 	env, ok := gotPayload["env"].(map[string]any)
 	if !ok {
@@ -86,6 +107,86 @@ func TestClientCreateSendsRunPodPayload(t *testing.T) {
 	}
 	if env["MODEL"] != "llama" {
 		t.Fatalf("env MODEL = %#v, want llama", env["MODEL"])
+	}
+}
+
+func TestClientCreateRecoversLostCreateResponseByExternalName(t *testing.T) {
+	t.Parallel()
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		switch {
+		case requests == 1 && r.Method == http.MethodPost && r.URL.Path == "/pods":
+			http.Error(w, "gateway timeout", http.StatusGatewayTimeout)
+		case requests == 2 && r.Method == http.MethodGet && r.URL.Path == "/pods":
+			if got := r.URL.Query().Get("name"); got != "gpu-burst-node-default-pod-123" {
+				t.Fatalf("name query = %q, want external name", got)
+			}
+			_, _ = w.Write([]byte(`[{
+				"id": "runpod-existing",
+				"name": "gpu-burst-node-default-pod-123",
+				"desiredStatus": "RUNNING",
+				"image": "example.com/train:latest"
+			}]`))
+		default:
+			t.Fatalf("unexpected request %d %s %s", requests, r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{BaseURL: server.URL, APIKey: "test-token"})
+	remote, err := client.Create(context.Background(), "default/pod-123", core.WorkloadRequest{
+		Image:    "example.com/train:latest",
+		GPUCount: 1,
+	})
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if remote.ID != "runpod-existing" {
+		t.Fatalf("remote ID = %q, want runpod-existing", remote.ID)
+	}
+}
+
+func TestClientClassifiesProviderErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		statusCode     int
+		wantClass      core.ErrorClass
+		wantIsNotFound bool
+	}{
+		{name: "auth", statusCode: http.StatusUnauthorized, wantClass: core.ErrorClassAuth},
+		{name: "capacity", statusCode: http.StatusBadRequest, wantClass: core.ErrorClassCapacity},
+		{name: "not found", statusCode: http.StatusNotFound, wantClass: core.ErrorClassRemoteNotFound, wantIsNotFound: true},
+		{name: "rate limited", statusCode: http.StatusTooManyRequests, wantClass: core.ErrorClassRateLimited},
+		{name: "server error", statusCode: http.StatusBadGateway, wantClass: core.ErrorClassTransient},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.statusCode)
+				_, _ = w.Write([]byte(`{"error":"insufficient capacity"}`))
+			}))
+			defer server.Close()
+
+			client := NewClient(Config{BaseURL: server.URL, APIKey: "test-token"})
+			_, err := client.Get(context.Background(), "runpod-1")
+			var providerErr *core.ProviderError
+			if !errors.As(err, &providerErr) {
+				t.Fatalf("Get error = %T %[1]v, want ProviderError", err)
+			}
+			if providerErr.Class != tt.wantClass {
+				t.Fatalf("error class = %s, want %s", providerErr.Class, tt.wantClass)
+			}
+			if errors.Is(err, core.ErrRemoteNotFound) != tt.wantIsNotFound {
+				t.Fatalf("errors.Is(ErrRemoteNotFound) = %t, want %t", errors.Is(err, core.ErrRemoteNotFound), tt.wantIsNotFound)
+			}
+		})
 	}
 }
 

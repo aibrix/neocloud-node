@@ -95,7 +95,23 @@ func TestUpdatePersistsRemoteStatus(t *testing.T) {
 	binding.Phase = core.BindingRunning
 	binding.LastError = ""
 	binding.Attempts = []core.Attempt{
-		{Provider: "runpod", Region: "US-TX-3", Reason: "Selected", Message: "first offer"},
+		{
+			Provider:        "runpod",
+			Region:          "US-TX-3",
+			Class:           core.ErrorClassCapacity,
+			Reason:          "Selected",
+			Message:         "first offer",
+			Retryable:       false,
+			FallbackAllowed: true,
+		},
+	}
+	binding.Conditions = []core.BindingCondition{
+		{
+			Type:    core.ConditionCapacity,
+			Status:  core.ConditionTrue,
+			Reason:  string(core.ErrorClassCapacity),
+			Message: "runpod had no capacity in US-TX-3",
+		},
 	}
 	if err := store.Update(ctx, binding); err != nil {
 		t.Fatalf("Update() error = %v", err)
@@ -110,6 +126,13 @@ func TestUpdatePersistsRemoteStatus(t *testing.T) {
 	}
 	if len(got.Attempts) != 1 || got.Attempts[0].Region != "US-TX-3" {
 		t.Fatalf("attempts = %#v, want one RunPod attempt", got.Attempts)
+	}
+	if got.Attempts[0].Class != core.ErrorClassCapacity || !got.Attempts[0].FallbackAllowed {
+		t.Fatalf("attempt = %#v, want capacity fallback attempt", got.Attempts[0])
+	}
+	condition := core.FindCondition(got.Conditions, core.ConditionCapacity)
+	if condition == nil || condition.Status != core.ConditionTrue {
+		t.Fatalf("conditions = %#v, want capacity condition", got.Conditions)
 	}
 }
 
@@ -161,11 +184,16 @@ func testBinding() core.Binding {
 			Env:           map[string]string{"MODEL": "llama"},
 			GPUCount:      1,
 			GPUType:       "NVIDIA A100",
+			GPUMemory:     "80Gi",
+			MarketType:    core.MarketTypeSpot,
 			Provider:      "runpod",
 			RegionHint:    "US-TX-3",
 			RestartPolicy: string(corev1.RestartPolicyNever),
 			Ports: []core.Port{
 				{Name: "http", ContainerPort: 8080, Protocol: "TCP"},
+			},
+			ProviderHints: map[string]string{
+				core.AnnotationRunPodTemplateID: "template-1",
 			},
 		},
 	}

@@ -6,10 +6,32 @@ import (
 )
 
 const (
-	AnnotationProvider = "gpu-burst-node.aibrix.ai/provider"
-	AnnotationGPUType  = "gpu-burst-node.aibrix.ai/gpu-type"
-	AnnotationMaxPrice = "gpu-burst-node.aibrix.ai/max-price"
-	AnnotationRegion   = "gpu-burst-node.aibrix.ai/region"
+	AnnotationProvider   = "gpu-burst-node.aibrix.ai/provider"
+	AnnotationGPUType    = "gpu-burst-node.aibrix.ai/gpu-type"
+	AnnotationGPUMemory  = "gpu-burst-node.aibrix.ai/gpu-memory"
+	AnnotationMaxPrice   = "gpu-burst-node.aibrix.ai/max-price"
+	AnnotationMarketType = "gpu-burst-node.aibrix.ai/market-type"
+	AnnotationRegion     = "gpu-burst-node.aibrix.ai/region"
+
+	AnnotationRunPodCloudType          = "gpu-burst-node.aibrix.ai/runpod-cloud-type"
+	AnnotationRunPodTemplateID         = "gpu-burst-node.aibrix.ai/runpod-template-id"
+	AnnotationRunPodDataCenterIDs      = "gpu-burst-node.aibrix.ai/runpod-datacenter-ids"
+	AnnotationRunPodDataCenterPriority = "gpu-burst-node.aibrix.ai/runpod-datacenter-priority"
+	AnnotationRunPodNetworkVolumeID    = "gpu-burst-node.aibrix.ai/runpod-network-volume-id"
+	AnnotationRunPodRegistryAuthID     = "gpu-burst-node.aibrix.ai/runpod-registry-auth-id"
+	AnnotationRunPodVolumeMountPath    = "gpu-burst-node.aibrix.ai/runpod-volume-mount-path"
+
+	AnnotationLambdaInstanceType   = "gpu-burst-node.aibrix.ai/lambda-instance-type"
+	AnnotationLambdaSSHKeyNames    = "gpu-burst-node.aibrix.ai/lambda-ssh-key-names"
+	AnnotationLambdaFileSystemIDs  = "gpu-burst-node.aibrix.ai/lambda-file-system-ids"
+	AnnotationLambdaImageID        = "gpu-burst-node.aibrix.ai/lambda-image-id"
+	AnnotationLambdaFirewallIDs    = "gpu-burst-node.aibrix.ai/lambda-firewall-ids"
+	AnnotationLambdaCallbackSecret = "gpu-burst-node.aibrix.ai/lambda-callback-secret"
+)
+
+const (
+	MarketTypeOnDemand = "on-demand"
+	MarketTypeSpot     = "spot"
 )
 
 type PodSpec struct {
@@ -145,12 +167,15 @@ func (DefaultTransformer) Transform(pod PodSpec) (WorkloadRequest, error) {
 		Env:              cloneStringMap(container.Env),
 		GPUCount:         container.Resources.GPUCount,
 		GPUType:          pod.Annotations[AnnotationGPUType],
+		GPUMemory:        pod.Annotations[AnnotationGPUMemory],
 		MaxPrice:         pod.Annotations[AnnotationMaxPrice],
+		MarketType:       marketTypeOrDefault(pod.Annotations[AnnotationMarketType]),
 		Provider:         pod.Annotations[AnnotationProvider],
 		RegionHint:       pod.Annotations[AnnotationRegion],
 		RestartPolicy:    restartPolicyOrDefault(pod.RestartPolicy),
 		ImagePullSecrets: append([]string(nil), pod.ImagePullSecrets...),
 		Ports:            portsFromSpecs(container.Ports),
+		ProviderHints:    providerHints(pod.Annotations),
 	}, nil
 }
 
@@ -170,6 +195,43 @@ func restartPolicyOrDefault(policy RestartPolicy) string {
 		return string(RestartPolicyNever)
 	}
 	return string(policy)
+}
+
+func marketTypeOrDefault(marketType string) string {
+	if strings.TrimSpace(marketType) == "" {
+		return MarketTypeOnDemand
+	}
+	return marketType
+}
+
+func providerHints(annotations map[string]string) map[string]string {
+	if len(annotations) == 0 {
+		return nil
+	}
+	hints := make(map[string]string)
+	for _, key := range []string{
+		AnnotationRunPodCloudType,
+		AnnotationRunPodTemplateID,
+		AnnotationRunPodDataCenterIDs,
+		AnnotationRunPodDataCenterPriority,
+		AnnotationRunPodNetworkVolumeID,
+		AnnotationRunPodRegistryAuthID,
+		AnnotationRunPodVolumeMountPath,
+		AnnotationLambdaInstanceType,
+		AnnotationLambdaSSHKeyNames,
+		AnnotationLambdaFileSystemIDs,
+		AnnotationLambdaImageID,
+		AnnotationLambdaFirewallIDs,
+		AnnotationLambdaCallbackSecret,
+	} {
+		if value := strings.TrimSpace(annotations[key]); value != "" {
+			hints[key] = value
+		}
+	}
+	if len(hints) == 0 {
+		return nil
+	}
+	return hints
 }
 
 func portsFromSpecs(specs []PortSpec) []Port {
