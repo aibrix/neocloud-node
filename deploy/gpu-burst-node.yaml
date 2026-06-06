@@ -1,0 +1,203 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gpu-burst-node-system
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: cloudpodbindings.gpu-burst-node.aibrix.ai
+spec:
+  group: gpu-burst-node.aibrix.ai
+  scope: Namespaced
+  names:
+    plural: cloudpodbindings
+    singular: cloudpodbinding
+    kind: CloudPodBinding
+    shortNames:
+      - cpb
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Provider
+          type: string
+          jsonPath: .status.request.provider
+        - name: RemoteID
+          type: string
+          jsonPath: .status.remoteID
+        - name: Deleting
+          type: boolean
+          jsonPath: .status.deleting
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+          properties:
+            spec:
+              type: object
+              required:
+                - workloadUID
+              properties:
+                podName:
+                  type: string
+                workloadUID:
+                  type: string
+            status:
+              type: object
+              properties:
+                podName:
+                  type: string
+                workloadUID:
+                  type: string
+                phase:
+                  type: string
+                remoteID:
+                  type: string
+                deleting:
+                  type: boolean
+                lastError:
+                  type: string
+                request:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                placement:
+                  type: object
+                  properties:
+                    provider:
+                      type: string
+                    region:
+                      type: string
+                    gpuType:
+                      type: string
+                attempts:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      provider:
+                        type: string
+                      region:
+                        type: string
+                      reason:
+                        type: string
+                      message:
+                        type: string
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gpu-burst-node
+  namespace: gpu-burst-node-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gpu-burst-node
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "secrets", "configmaps"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/status"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch", "create", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["nodes/status"]
+    verbs: ["patch", "update"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  - apiGroups: ["gpu-burst-node.aibrix.ai"]
+    resources: ["cloudpodbindings"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  - apiGroups: ["gpu-burst-node.aibrix.ai"]
+    resources: ["cloudpodbindings/status"]
+    verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gpu-burst-node
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gpu-burst-node
+subjects:
+  - kind: ServiceAccount
+    name: gpu-burst-node
+    namespace: gpu-burst-node-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gpu-burst-node
+  namespace: gpu-burst-node-system
+  labels:
+    app.kubernetes.io/name: gpu-burst-node
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gpu-burst-node
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gpu-burst-node
+    spec:
+      serviceAccountName: gpu-burst-node
+      containers:
+        - name: gpu-burst-node
+          image: ghcr.io/vllm-project/aibrix/gpu-burst-node:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - --node-name=$(GPU_BURST_NODE_NAME)
+            - --provider=$(GPU_BURST_PROVIDER)
+            - --binding-store=kubernetes
+            - --listen-addr=:10250
+            - --advertise-gpu-count=$(GPU_BURST_ADVERTISE_GPU_COUNT)
+            - --advertise-pod-capacity=$(GPU_BURST_ADVERTISE_POD_CAPACITY)
+          env:
+            - name: GPU_BURST_NODE_NAME
+              value: aibrix-gpu-burst
+            - name: GPU_BURST_PROVIDER
+              value: fake
+            - name: GPU_BURST_ADVERTISE_GPU_COUNT
+              value: "100"
+            - name: GPU_BURST_ADVERTISE_POD_CAPACITY
+              value: "1000"
+            - name: RUNPOD_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: gpu-burst-node-runpod
+                  key: apiKey
+                  optional: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities:
+              drop: ["ALL"]

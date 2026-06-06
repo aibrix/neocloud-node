@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gpu-burst-fake-smoke
+  annotations:
+    gpu-burst-node.aibrix.ai/provider: fake
+    gpu-burst-node.aibrix.ai/gpu-type: NVIDIA A100
+spec:
+  restartPolicy: Never
+  nodeSelector:
+    gpu-burst-node.aibrix.ai/provider: fake
+  tolerations:
+    - key: gpu-burst-node.aibrix.ai/provider
+      operator: Equal
+      value: fake
+      effect: NoSchedule
+  containers:
+    - name: smoke
+      image: busybox:1.36
+      command: ["sh", "-c"]
+      args: ["echo gpu-burst-node-smoke"]
+      resources:
+        limits:
+          nvidia.com/gpu: "1"
