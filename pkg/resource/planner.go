@@ -37,6 +37,8 @@ type Intent struct {
 	Recoverable    bool
 	MaxHourlyPrice float64
 	Capabilities   []Capability
+	Deadline       time.Time
+	RemainingRun   time.Duration
 }
 
 type Offer struct {
@@ -50,6 +52,9 @@ type Offer struct {
 	HourlyPrice         float64
 	Available           bool
 	Capabilities        map[Capability]bool
+	MigrationCost       float64
+	ColdStart           time.Duration
+	ExpectedLifetime    time.Duration
 	StartupPenalty      float64
 	FailurePenalty      float64
 	InterruptionPenalty float64
@@ -59,6 +64,9 @@ type Policy struct {
 	ProviderOrder            []string
 	LocationOrder            []string
 	AllowSpotWithoutRecovery bool
+	AllowSpotOnTightDeadline bool
+	AllowShortSpotLifetime   bool
+	DeadlineFallbackBuffer   time.Duration
 	BlockedOffers            []BlockedOffer
 }
 
@@ -98,6 +106,9 @@ const (
 	ReasonUnsupportedCapability RejectionReason = "UnsupportedCapability"
 	ReasonRecentlyBlocked       RejectionReason = "RecentlyBlocked"
 	ReasonSpotRequiresRecovery  RejectionReason = "SpotRequiresRecovery"
+	ReasonDeadlineCannotMeet    RejectionReason = "DeadlineCannotMeet"
+	ReasonDeadlineRequiresOD    RejectionReason = "DeadlineRequiresOnDemand"
+	ReasonSpotLifetimeTooShort  RejectionReason = "SpotLifetimeTooShort"
 )
 
 type UnavailableError struct {
@@ -138,7 +149,7 @@ func (p Planner) Plan(intent Intent, offers []Offer, policy Policy) (Decision, e
 		if locationRank(left.Location, policy.LocationOrder) != locationRank(right.Location, policy.LocationOrder) {
 			return locationRank(left.Location, policy.LocationOrder) < locationRank(right.Location, policy.LocationOrder)
 		}
-		return riskAdjustedCost(left) < riskAdjustedCost(right)
+		return riskAdjustedCost(left, intent) < riskAdjustedCost(right, intent)
 	})
 
 	selected := matches[0]
@@ -147,7 +158,7 @@ func (p Planner) Plan(intent Intent, offers []Offer, policy Policy) (Decision, e
 		Fallback:               append([]Offer(nil), matches[1:]...),
 		Rejected:               rejected,
 		EstimatedHourlyCost:    selected.HourlyPrice,
-		RiskAdjustedHourlyCost: riskAdjustedCost(selected),
+		RiskAdjustedHourlyCost: riskAdjustedCost(selected, intent),
 	}, nil
 }
 
@@ -197,6 +208,27 @@ func rejectOffer(intent Intent, offer Offer, policy Policy, now time.Time) (Reje
 			}, true
 		}
 	}
+	if deadlineCannotMeet(intent, offer, now) {
+		return RejectedOffer{
+			Offer:   offer,
+			Reason:  ReasonDeadlineCannotMeet,
+			Message: "offer cannot finish the remaining runtime before the deadline",
+		}, true
+	}
+	if offer.Market == MarketSpot && deadlineRequiresOnDemand(intent, offer, policy, now) {
+		return RejectedOffer{
+			Offer:   offer,
+			Reason:  ReasonDeadlineRequiresOD,
+			Message: "deadline slack is below fallback buffer, so spot is not admitted",
+		}, true
+	}
+	if offer.Market == MarketSpot && !policy.AllowShortSpotLifetime && spotLifetimeTooShort(offer) {
+		return RejectedOffer{
+			Offer:   offer,
+			Reason:  ReasonSpotLifetimeTooShort,
+			Message: "expected spot lifetime does not amortize cold start",
+		}, true
+	}
 	return RejectedOffer{}, false
 }
 
@@ -231,8 +263,38 @@ func marketMatches(intent Market, offer Market) bool {
 	return intent == offer
 }
 
-func riskAdjustedCost(offer Offer) float64 {
-	return offer.HourlyPrice + offer.StartupPenalty + offer.FailurePenalty + offer.InterruptionPenalty
+func riskAdjustedCost(offer Offer, intent Intent) float64 {
+	return offer.HourlyPrice +
+		offer.StartupPenalty +
+		offer.FailurePenalty +
+		offer.InterruptionPenalty +
+		amortizedMigrationCost(offer, intent)
+}
+
+func amortizedMigrationCost(offer Offer, intent Intent) float64 {
+	if offer.MigrationCost <= 0 || intent.RemainingRun <= 0 {
+		return 0
+	}
+	return offer.MigrationCost / intent.RemainingRun.Hours()
+}
+
+func deadlineCannotMeet(intent Intent, offer Offer, now time.Time) bool {
+	if intent.Deadline.IsZero() || intent.RemainingRun <= 0 {
+		return false
+	}
+	return now.Add(offer.ColdStart).Add(intent.RemainingRun).After(intent.Deadline)
+}
+
+func deadlineRequiresOnDemand(intent Intent, offer Offer, policy Policy, now time.Time) bool {
+	if policy.AllowSpotOnTightDeadline || intent.Deadline.IsZero() || intent.RemainingRun <= 0 {
+		return false
+	}
+	slack := intent.Deadline.Sub(now) - intent.RemainingRun - offer.ColdStart
+	return slack <= policy.DeadlineFallbackBuffer
+}
+
+func spotLifetimeTooShort(offer Offer) bool {
+	return offer.ExpectedLifetime > 0 && offer.ColdStart > 0 && offer.ExpectedLifetime <= offer.ColdStart
 }
 
 func providerRank(provider string, order []string) int {

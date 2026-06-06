@@ -6,7 +6,7 @@
 
 这份计划把项目拆成可以逐阶段验证的工程路线。当前共识是：MVP 保持简单，不引入定制 scheduler、不引入 Kueue、不引入一组策略 CRD；用户入口仍然是标准 `Pod` / `Job` 加少量 annotations；只新增一个内部状态 CRD `CloudPodBinding`；`BindingStore`、`Transformer`、`ProviderAdapter` 都是代码内部接口，不是 CRD。
 
-2026-06-06 更新：真实联调先不作为阶段门槛。当前优先积累可测代码和清晰策略模型，E2E 等 API-key、账号、清理流程准备好后再做。spot/interruptible、成本、burn-rate、fallback 策略单独见 [Spot Market Strategy](spot-market-strategy.md)。AIBrix batch 和 GPU Burst Node 共享 resource manager 的设计见 [Shared Resource Manager Architecture](resource-manager-architecture.md)。orphan sweeper 机制见 [Orphan Sweeper](orphan-sweeper.md)。
+2026-06-06 更新：真实联调先不作为阶段门槛。当前优先积累可测代码和清晰策略模型，E2E 等 API-key、账号、清理流程准备好后再做。spot/interruptible、成本、burn-rate、fallback 策略单独见 [Spot Market Strategy](spot-market-strategy.md)。AIBrix batch 和 GPU Burst Node 共享 resource manager 的设计见 [Shared Resource Manager Architecture](resource-manager-architecture.md)。orphan sweeper 机制见 [Orphan Sweeper](orphan-sweeper.md)。SkyNomad 论文中的 deadline slack、cold start、spot lifetime、checkpoint migration cost 进入 resource planner 的策略输入，但 wait/pause/probe/survival-analysis 不进入 MVP hot path。
 
 ## 总体阶段
 
@@ -17,7 +17,7 @@
 | Phase 2 | RunPod lifecycle thin slice | 一个 Kubernetes Job 可以创建一个 RunPod pod，状态同步，删除清理，无重复创建 | RunPod adapter contract tests、real integration tests、故障注入 | BSVogler RunPod proof、RunPod API |
 | Phase 3 | RunPod production MVP | Helm/RBAC/metrics/orphan sweeper/cost guard/logs/link/docs 完成，可给早期用户试用 | upgrade/restart/soak/leak/RBAC audit/成本保护测试 | SkyPilot cost metrics、provider catalog、RunPod template/network volume |
 | Phase 4 | Lambda Cloud VM runner | 第二 provider 跑通 VM launch + runner + container + terminate | runner contract tests、VM boot timeout、callback loss、real Lambda smoke test | SkyPilot Lambda support、VM provisioning model |
-| Phase 5 | Placement/fallback/cost mechanism | 在 provider 接口稳定后启动可解释的 provider/region/price/capacity fallback、spot 策略和 burn-rate metrics，并记录 attempts | deterministic placement tests、capacity failure simulation、fallback lineage check、成本估算测试 | SkyPilot optimizer、managed spot、provider catalog |
+| Phase 5 | Placement/fallback/cost mechanism | 在 provider 接口稳定后启动可解释的 provider/region/price/capacity fallback、spot 策略和 burn-rate metrics，并记录 attempts | deterministic placement tests、capacity failure simulation、fallback lineage check、成本估算测试 | SkyPilot optimizer、managed spot、provider catalog、SkyNomad deadline-aware spot |
 
 ## Phase 0: CVK 骨架和正确性底座
 
@@ -241,6 +241,9 @@ Lambda Cloud 和 RunPod 不同，它更像 VM provider。这个阶段验证 `Pro
 - `CloudPodBinding.status.attempts` 记录每次 provider/region 尝试和失败原因。
 - blocked-offer cache：短时间内避免反复尝试已知无容量组合。
 - cost/burn-rate：估算 hourly cost、当前 burn rate、projected total、fallback cost delta。
+- deadline-aware spot：如果剩余运行时间、cold start 和 fallback buffer 已经吃掉 slack，就不再选择 spot。
+- migration-aware ranking：checkpoint/data migration cost 按剩余运行时间摊销后进入 risk-adjusted cost。
+- volatile spot rejection：expected spot lifetime 小于等于 cold start 时拒绝该 offer。
 
 ### Done Criterion
 
@@ -258,6 +261,8 @@ Lambda Cloud 和 RunPod 不同，它更像 VM provider。这个阶段验证 `Pro
 - simulated capacity failure E2E：第一个 provider 返回 capacity exhausted，第二 provider 成功。
 - no-silent-downgrade tests：不能把需要 volume/port/security 特性的 Pod 悄悄降级到不支持的 provider。
 - blocked-offer cache tests：cache 有 TTL，不能永久拉黑某个 GPU/region。
+- deadline safety tests：tight deadline 下 spot 被拒绝并选择 on-demand safety net。
+- migration cost tests：便宜但远的 region 不会在 transfer cost 后被错误选中。
 
 ### 借鉴点
 

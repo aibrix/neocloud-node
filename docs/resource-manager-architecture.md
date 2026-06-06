@@ -43,6 +43,7 @@ Pod Transformer           Batch Runtime Builder
        - placement planner
        - catalog/cache
        - price/burn-rate
+       - deadline/spot safety net
        - fallback policy
        - failure classifier
                  |
@@ -70,6 +71,7 @@ The common intent should be provider-neutral:
 - cost constraints.
 - recovery/checkpointability.
 - placement constraints.
+- deadline, remaining runtime and checkpoint location when the caller knows them.
 
 Kubernetes annotations and AIBrix batch specs are just two frontends for this intent.
 
@@ -83,6 +85,7 @@ Provider adapters return allocation state:
 - phase.
 - endpoint/ports/public IP when available.
 - current cost and billing source when available.
+- cold-start estimate, expected spot lifetime and migration cost when available.
 - provider-native diagnostic fields.
 
 ### Attempt
@@ -137,6 +140,8 @@ GPU Burst Node maps:
 
 The VK provider should stay thin. It should not implement pricing, spot policy or cross-provider fallback directly.
 
+For plain Pods, deadline and remaining runtime may be unknown. In that case the planner must skip deadline-specific checks and rely on recovery hints, max price, market preference and provider availability. For AIBrix batch jobs, those fields should usually be available and should drive the SkyNomad-style spot safety net.
+
 ## AIBrix Batch Integration
 
 AIBrix batch maps:
@@ -148,6 +153,8 @@ AIBrix batch maps:
 - `JobStore` -> persistence sink for decisions, attempts and costs.
 
 This lets batch use the same RunPod/Lambda/Vast strategy without depending on Kubernetes virtual-node semantics.
+
+Batch is the right first caller for advanced SkyNomad-style behavior: wait/pause decisions, checkpoint-aware migration, deadline pressure and on-demand safety-net fallback. GPU Burst Node should consume the same planner decisions only when the Pod annotations or owning workload provide those facts explicitly.
 
 ## Provider Adapter Responsibilities
 
@@ -166,6 +173,7 @@ Adapters do not own:
 - global fallback policy.
 - cross-provider scoring.
 - budget policy.
+- deadline/slack interpretation.
 - Kubernetes conditions/events.
 - AIBrix job state transitions.
 
@@ -178,6 +186,7 @@ Implement now:
 - RunPod advanced create/list/status fields.
 - Lambda API adapter skeleton with launch/get/list/terminate.
 - `pkg/resource` package with pure planner types and deterministic tests.
+- planner fields for deadline, remaining runtime, cold start, expected spot lifetime and migration cost.
 - spot strategy document and metrics names.
 
 Defer:

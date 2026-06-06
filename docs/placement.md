@@ -11,29 +11,38 @@ The Phase 5 placement planner is a provider-neutral mechanism. It does not repla
 - `WorkloadRequest.MaxPrice`
 - `WorkloadRequest.MarketType`
 - `WorkloadRequest.GPUMemory`
+- remaining runtime and deadline when the caller can estimate them
 - provider offers
 - provider error classes from prior attempts
 - optional provider order
 - optional region order
+- cold start, expected spot lifetime and migration cost when known
 
 ## Selection Order
 
 The planner first rejects offers that cannot satisfy the request:
 
 1. GPU type mismatch.
-2. Insufficient GPU count.
-3. Offer unavailable.
-4. Price above `WorkloadRequest.MaxPrice`.
+2. GPU memory mismatch.
+3. Insufficient GPU count.
+4. Market mismatch.
+5. Spot without recovery/checkpoint support.
+6. Offer unavailable.
+7. Price above max price.
+8. Unsupported provider capability.
+9. Deadline cannot be met.
+10. Deadline slack requires on-demand safety net.
+11. Spot expected lifetime is too short to amortize cold start.
 
 It then sorts matching offers by:
 
 1. Provider order.
 2. Region order.
-3. Lower hourly price.
+3. Lower risk-adjusted hourly cost.
 
-This keeps the first implementation deterministic and explainable.
+This keeps the first implementation deterministic and explainable. The risk-adjusted cost currently includes hourly price, startup penalty, provider failure penalty, interruption penalty and migration cost amortized over remaining runtime.
 
-The next implementation must rank by risk-adjusted cost rather than raw hourly price. See [Spot Market Strategy](spot-market-strategy.md).
+The deadline/cold-start/migration inputs are inspired by SkyNomad, but the planner remains a pure mechanism. It does not probe providers, predict lifetimes or pause workloads by itself. See [Spot Market Strategy](spot-market-strategy.md).
 
 ## Rejected Reasons
 
@@ -45,6 +54,10 @@ The next implementation must rank by risk-adjusted cost rather than raw hourly p
 | `PriceExceeded` | Offer price is above the workload max price. |
 | `UnsupportedCapability` | Offer/provider cannot satisfy required ports, registry auth, storage or runner capability. |
 | `RecentlyBlocked` | Offer is temporarily blocked by recent capacity/rate-limit failure. |
+| `SpotRequiresRecovery` | Spot was requested but the workload does not declare restartability or checkpointing. |
+| `DeadlineCannotMeet` | Offer cannot finish remaining runtime before deadline after cold start. |
+| `DeadlineRequiresOnDemand` | Deadline slack is below fallback buffer, so spot is no longer admitted. |
+| `SpotLifetimeTooShort` | Expected spot lifetime is not long enough to amortize cold start. |
 
 ## Outputs
 
@@ -65,5 +78,6 @@ Every provider create/get/delete failure must be reduced to a stable error class
 - No provider catalog refresh in the current code.
 - No historical provider scorecard in the current code.
 - No automatic retry/backoff cache in the current code.
+- No survival-analysis lifetime predictor in the current code.
 
 Those are later layers. Phase 5 only establishes the clean selection mechanism.

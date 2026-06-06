@@ -10,6 +10,7 @@ This document defines the spot/interruptible, fallback, cost-estimation and burn
 - SkyPilot managed jobs support retry, failure recovery, spot preemption recovery and cleanup. Source: [SkyPilot Managed Jobs](https://docs.skypilot.co/en/latest/examples/managed-jobs.html).
 - SkyPilot managed spot jobs can use spot and optionally fall back to on-demand/reserved resources through candidate resources. Source: [SkyPilot Spot Jobs](https://docs.skypilot.co/en/latest/examples/spot-jobs.html).
 - SkyPilot catalogs separate instance inventory, GPU metadata, region/zone, price and spot price; the public catalog repo refreshes several providers periodically. Source: [skypilot-catalog](https://github.com/skypilot-org/skypilot-catalog).
+- SkyNomad targets deadline-bound AI batch jobs on multi-region spot instances. It combines lightweight availability probing, spot lifetime prediction, migration cost and deadline pressure, and reports 1.25-3.96x cost savings in real deployments while meeting deadlines. Source: [SkyNomad: On Using Multi-Region Spot Instances to Minimize AI Batch Job Cost](https://arxiv.org/abs/2601.06520).
 - RunPod REST Pod creation exposes native fields for `interruptible`, `cloudType`, `gpuTypeIds`, `dataCenterIds`, `templateId`, `networkVolumeId`, `containerRegistryAuthId` and `ports`. Source: [RunPod Create Pod API](https://docs.runpod.io/api-reference/pods/POST/pods).
 - Lambda Cloud launch requires `region_name`, `instance_type_name`, `ssh_key_names` and supports cloud-init `user_data`, images, file systems and firewall rulesets. It reports capacity/quota/auth errors and instance states including `preempted`. Source: [Lambda Cloud API](https://docs-api.lambda.ai/api/cloud).
 
@@ -25,6 +26,25 @@ Do not implement "SkyPilot inside Kubernetes". The stronger architecture is:
 
 The differentiator is not "cheapest GPU search". It is production-grade, Kubernetes-native cloud GPU acquisition with transparent state, fallback lineage, and reusable strategy logic for both online serving and batch.
 
+## SkyNomad Takeaways
+
+SkyNomad is the more relevant paper for our spot policy than generic cloud cost optimization because it models exactly the failure mode we care about: a GPU batch job can wait, migrate, checkpoint, and fall back to on-demand before missing a deadline.
+
+The parts to adopt:
+
+- Treat provider/location/market as the optimization unit. RunPod datacenters, Lambda regions and future cloud VM zones should all be ranked the same way.
+- Use deadline slack as an admission signal. When remaining runtime plus cold start leaves too little slack, stop admitting spot and use the cheapest feasible on-demand fallback.
+- Account for checkpoint or data migration as real cost. A cheaper remote region is only cheaper after transfer cost is amortized over remaining runtime.
+- Avoid volatile spot locations where expected lifetime is too close to cold start time. Short-lived spot capacity can produce negative goodput.
+- Maintain region-level freshness signals from probes, list calls, capacity errors and preemptions. Static catalogs are useful but insufficient for spot.
+
+The parts not to copy into MVP:
+
+- Do not put online probing loops inside the hot `CreatePod` path.
+- Do not implement survival analysis until we have enough provider observations.
+- Do not let VK pause arbitrary Kubernetes Pods waiting for future spot capacity. That belongs in AIBrix batch where deadlines, checkpoints and lineage are explicit.
+- Do not assume all workloads can migrate. Standard Pods need explicit recovery hints before spot migration is allowed.
+
 ## Core Model
 
 ### Workload Intent
@@ -38,6 +58,7 @@ The differentiator is not "cheapest GPU search". It is production-grade, Kuberne
 - `recovery`: restartable, checkpointed, stateless, or non-recoverable.
 - `budget`: max hourly price, max total cost, namespace/account budget.
 - `constraints`: provider allow/deny list, region/datacenter policy, data gravity constraints.
+- `progress`: remaining runtime estimate, checkpoint size, current checkpoint location.
 
 ### Market Offer
 
@@ -49,6 +70,7 @@ The differentiator is not "cheapest GPU search". It is production-grade, Kuberne
 - price: on-demand, spot, adjusted hourly cost, storage add-ons.
 - capacity: available, scarce, unknown, blocked, stale.
 - risk: interruption class, observed failure rate, startup uncertainty.
+- progress cost: expected lifetime, cold start, migration cost from current checkpoint location.
 - capabilities: ports, registry auth, network volume, file system, public IP, cloud-init, callback.
 - freshness: when the offer was observed and how it was probed.
 
@@ -87,6 +109,7 @@ risk_adjusted_cost =
   hourly_price
   + expected_restart_cost
   + expected_startup_delay_cost
+  + amortized_migration_cost
   + storage_attach_cost
   + provider_failure_penalty
 ```
@@ -107,6 +130,14 @@ Default policy:
 - batch/offline: spot allowed if `market-type=spot` or namespace default enables it.
 - online serving: spot allowed only with more than one replica or an explicit availability policy.
 - non-checkpointed long training: require max total cost and retry limit.
+- deadline-bound batch: spot allowed while slack exceeds the fallback buffer; otherwise select on-demand.
+
+SkyNomad-style inputs map into current code as:
+
+- `Intent.Deadline` and `Intent.RemainingRun` decide whether spot is still admissible.
+- `Policy.DeadlineFallbackBuffer` encodes the safety-net window for fallback.
+- `Offer.ColdStart` and `Offer.ExpectedLifetime` reject spot offers that are unlikely to make useful progress.
+- `Offer.MigrationCost` is amortized over remaining runtime and added to risk-adjusted cost.
 
 ### 3. Fallback
 
@@ -199,7 +230,9 @@ Provider adapters own launch/delete/list/status. Strategy components own offer s
 2. Normalize provider catalog and offer model.
 3. Add RunPod price/cost extraction and Lambda instance type price extraction.
 4. Implement deterministic placement/fallback planner using fake catalogs.
-5. Wire planner into VK lifecycle after provider adapter interface stabilizes.
-6. Reuse the same planner from AIBrix batch runtime/resource manager.
-7. Add burn-rate metrics and orphan sweeper.
-8. Add real provider integration tests only after API-key setup is ready.
+5. Add SkyNomad-inspired deadline, cold-start, expected-lifetime and migration-cost inputs to the planner.
+6. Wire planner into VK lifecycle after provider adapter interface stabilizes.
+7. Reuse the same planner from AIBrix batch runtime/resource manager.
+8. Add burn-rate metrics and orphan sweeper.
+9. Add provider probing and lifetime prediction after enough observations exist.
+10. Add real provider integration tests only after API-key setup is ready.

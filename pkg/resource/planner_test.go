@@ -59,6 +59,50 @@ func TestPlannerChoosesRiskAdjustedSpotOffer(t *testing.T) {
 	}
 }
 
+func TestPlannerAmortizesMigrationCost(t *testing.T) {
+	t.Parallel()
+
+	planner := Planner{}
+	decision, err := planner.Plan(Intent{
+		GPUCount:     1,
+		GPUType:      "H100",
+		Market:       MarketSpot,
+		Recoverable:  true,
+		RemainingRun: 10 * time.Hour,
+	}, []Offer{
+		{
+			ID:            "cheap-far",
+			Provider:      "runpod",
+			Location:      "asia-south2",
+			GPUType:       "H100",
+			GPUCount:      1,
+			Market:        MarketSpot,
+			HourlyPrice:   1.0,
+			Available:     true,
+			MigrationCost: 30,
+		},
+		{
+			ID:          "local",
+			Provider:    "runpod",
+			Location:    "us-west1",
+			GPUType:     "H100",
+			GPUCount:    1,
+			Market:      MarketSpot,
+			HourlyPrice: 2.0,
+			Available:   true,
+		},
+	}, Policy{})
+	if err != nil {
+		t.Fatalf("Plan returned error: %v", err)
+	}
+	if decision.Selected.ID != "local" {
+		t.Fatalf("selected = %s, want local", decision.Selected.ID)
+	}
+	if math.Abs(decision.RiskAdjustedHourlyCost-2.0) > 0.000001 {
+		t.Fatalf("risk-adjusted cost = %.2f, want 2.00", decision.RiskAdjustedHourlyCost)
+	}
+}
+
 func TestPlannerRejectsUnsupportedAndBlockedOffers(t *testing.T) {
 	t.Parallel()
 
@@ -137,6 +181,108 @@ func TestPlannerRequiresRecoverableWorkloadForSpot(t *testing.T) {
 	}
 	unavailable := err.(*UnavailableError)
 	assertRejected(t, unavailable.Rejected, "spot", ReasonSpotRequiresRecovery)
+}
+
+func TestPlannerSwitchesToOnDemandWhenDeadlineIsTight(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC)
+	planner := Planner{Now: func() time.Time { return now }}
+	decision, err := planner.Plan(Intent{
+		GPUCount:     1,
+		GPUType:      "H100",
+		Market:       MarketEither,
+		Recoverable:  true,
+		Deadline:     now.Add(2 * time.Hour),
+		RemainingRun: 90 * time.Minute,
+	}, []Offer{
+		{
+			ID:          "cheap-spot",
+			Provider:    "lambda",
+			GPUType:     "H100",
+			GPUCount:    1,
+			Market:      MarketSpot,
+			HourlyPrice: 1,
+			Available:   true,
+			ColdStart:   10 * time.Minute,
+		},
+		{
+			ID:          "od-safety-net",
+			Provider:    "lambda",
+			GPUType:     "H100",
+			GPUCount:    1,
+			Market:      MarketOnDemand,
+			HourlyPrice: 4,
+			Available:   true,
+			ColdStart:   10 * time.Minute,
+		},
+	}, Policy{DeadlineFallbackBuffer: 30 * time.Minute})
+	if err != nil {
+		t.Fatalf("Plan returned error: %v", err)
+	}
+	if decision.Selected.ID != "od-safety-net" {
+		t.Fatalf("selected = %s, want od-safety-net", decision.Selected.ID)
+	}
+	assertRejected(t, decision.Rejected, "cheap-spot", ReasonDeadlineRequiresOD)
+}
+
+func TestPlannerRejectsOfferThatCannotMeetDeadline(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC)
+	planner := Planner{Now: func() time.Time { return now }}
+	_, err := planner.Plan(Intent{
+		GPUCount:     1,
+		GPUType:      "H100",
+		Market:       MarketOnDemand,
+		Deadline:     now.Add(1 * time.Hour),
+		RemainingRun: 70 * time.Minute,
+	}, []Offer{
+		{
+			ID:          "too-late",
+			Provider:    "lambda",
+			GPUType:     "H100",
+			GPUCount:    1,
+			Market:      MarketOnDemand,
+			HourlyPrice: 4,
+			Available:   true,
+			ColdStart:   5 * time.Minute,
+		},
+	}, Policy{})
+	if err == nil {
+		t.Fatal("Plan returned nil error, want unavailable")
+	}
+	unavailable := err.(*UnavailableError)
+	assertRejected(t, unavailable.Rejected, "too-late", ReasonDeadlineCannotMeet)
+}
+
+func TestPlannerRejectsShortExpectedSpotLifetime(t *testing.T) {
+	t.Parallel()
+
+	planner := Planner{}
+	_, err := planner.Plan(Intent{
+		GPUCount:    1,
+		GPUType:     "H100",
+		Market:      MarketSpot,
+		Recoverable: true,
+	}, []Offer{
+		{
+			ID:               "volatile",
+			Provider:         "runpod",
+			GPUType:          "H100",
+			GPUCount:         1,
+			Market:           MarketSpot,
+			HourlyPrice:      1,
+			Available:        true,
+			ColdStart:        10 * time.Minute,
+			ExpectedLifetime: 10 * time.Minute,
+		},
+	}, Policy{})
+	if err == nil {
+		t.Fatal("Plan returned nil error, want unavailable")
+	}
+	unavailable := err.(*UnavailableError)
+	assertRejected(t, unavailable.Rejected, "volatile", ReasonSpotLifetimeTooShort)
 }
 
 func TestPlannerHonorsProviderOrderBeforeCost(t *testing.T) {
