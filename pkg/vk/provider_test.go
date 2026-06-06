@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/virtual-kubelet/virtual-kubelet/errdefs"
@@ -13,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 
 	"github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/core"
 )
@@ -64,7 +66,8 @@ func TestCreatePodLaunchesRemoteWorkloadAndCachesRunningStatus(t *testing.T) {
 func TestCreatePodRejectsUnsupportedSpecBeforeLaunchingRemoteWorkload(t *testing.T) {
 	ctx := context.Background()
 	adapter := core.NewFakeProvider("runpod")
-	provider := newTestProvider(t, adapter)
+	recorder := record.NewFakeRecorder(10)
+	provider := newTestProviderWithConfig(t, Config{Adapter: adapter, EventRecorder: recorder})
 	pod := gpuPod("service", "uid-service")
 	pod.Spec.RestartPolicy = corev1.RestartPolicyAlways
 	var notified []*corev1.Pod
@@ -98,18 +101,20 @@ func TestCreatePodRejectsUnsupportedSpecBeforeLaunchingRemoteWorkload(t *testing
 	if len(notified) != 1 || notified[0].Status.Phase != corev1.PodFailed {
 		t.Fatalf("notified = %#v, want one failed pod notification", notified)
 	}
+	assertEventContains(t, recorder, "Warning", string(core.ErrorClassUnsupportedSpec))
 }
 
 func TestCreatePodCachesProviderFailureForDeletion(t *testing.T) {
 	ctx := context.Background()
-	provider := newTestProvider(t, failingProvider{
+	recorder := record.NewFakeRecorder(10)
+	provider := newTestProviderWithConfig(t, Config{Adapter: failingProvider{
 		err: &core.ProviderError{
 			Provider:  "runpod",
 			Operation: "post",
 			Class:     core.ErrorClassCapacity,
 			Message:   "no A40 capacity",
 		},
-	})
+	}, EventRecorder: recorder})
 	pod := gpuPod("capacity-failed", "uid-capacity-failed")
 
 	err := provider.CreatePod(ctx, pod)
@@ -127,6 +132,7 @@ func TestCreatePodCachesProviderFailureForDeletion(t *testing.T) {
 	if got := podReadyCondition(cached.Status.Conditions).Reason; got != string(core.ErrorClassCapacity) {
 		t.Fatalf("PodReady reason = %q, want %q", got, core.ErrorClassCapacity)
 	}
+	assertEventContains(t, recorder, "Warning", string(core.ErrorClassCapacity))
 
 	if err := provider.DeletePod(ctx, pod); err != nil {
 		t.Fatalf("DeletePod() error = %v", err)
@@ -338,10 +344,17 @@ func TestNewProviderFuncBuildsNodeutilProvider(t *testing.T) {
 func newTestProvider(t *testing.T, adapter core.ProviderAdapter) *Provider {
 	t.Helper()
 
-	provider, err := NewProvider(Config{
-		Store:   core.NewMemoryBindingStore(),
-		Adapter: adapter,
-	})
+	provider := newTestProviderWithConfig(t, Config{Adapter: adapter})
+	return provider
+}
+
+func newTestProviderWithConfig(t *testing.T, config Config) *Provider {
+	t.Helper()
+
+	if config.Store == nil {
+		config.Store = core.NewMemoryBindingStore()
+	}
+	provider, err := NewProvider(config)
 	if err != nil {
 		t.Fatalf("NewProvider() error = %v", err)
 	}
@@ -420,6 +433,19 @@ func assertInvalidInput(t *testing.T, method string, err error) {
 	}
 	if !errdefs.IsInvalidInput(err) {
 		t.Fatalf("%s() error = %T %[2]v, want errdefs.InvalidInput", method, err)
+	}
+}
+
+func assertEventContains(t *testing.T, recorder *record.FakeRecorder, eventType string, reason string) {
+	t.Helper()
+
+	select {
+	case event := <-recorder.Events:
+		if !strings.Contains(event, eventType+" "+reason) {
+			t.Fatalf("event = %q, want %s %s", event, eventType, reason)
+		}
+	default:
+		t.Fatalf("no event recorded, want %s %s", eventType, reason)
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"github.com/virtual-kubelet/virtual-kubelet/node/nodeutil"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	stats "k8s.io/kubelet/pkg/apis/stats/v1alpha1"
 
 	"github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/core"
@@ -27,18 +28,24 @@ type PodTransformer interface {
 	TransformPod(pod *corev1.Pod) (core.Binding, error)
 }
 
+type EventRecorder interface {
+	Eventf(object runtime.Object, eventtype, reason, messageFmt string, args ...interface{})
+}
+
 type Config struct {
-	Store       core.BindingStore
-	Adapter     core.ProviderAdapter
-	Transformer PodTransformer
-	LaunchGuard *core.LaunchGuard
-	NodeName    string
+	Store         core.BindingStore
+	Adapter       core.ProviderAdapter
+	Transformer   PodTransformer
+	LaunchGuard   *core.LaunchGuard
+	NodeName      string
+	EventRecorder EventRecorder
 }
 
 type Provider struct {
 	transformer PodTransformer
 	lifecycle   *core.LifecycleService
 	nodeName    string
+	recorder    EventRecorder
 
 	mu       sync.RWMutex
 	pods     map[string]*corev1.Pod
@@ -71,6 +78,7 @@ func NewProvider(config Config) (*Provider, error) {
 		transformer: config.Transformer,
 		lifecycle:   core.NewLifecycleService(config.Store, config.Adapter, options...),
 		nodeName:    config.NodeName,
+		recorder:    config.EventRecorder,
 		pods:        make(map[string]*corev1.Pod),
 	}, nil
 }
@@ -109,6 +117,11 @@ func (p *Provider) DeletePod(ctx context.Context, pod *corev1.Pod) error {
 	key := podKey(pod.Namespace, pod.Name)
 	cached := p.getCachedPod(key)
 	if err := p.lifecycle.EnsureDeleted(ctx, pod.Namespace, string(pod.UID)); err != nil {
+		if cached != nil {
+			p.recordPodEvent(cached, corev1.EventTypeWarning, "DeleteFailure", err.Error())
+		} else {
+			p.recordPodEvent(pod, corev1.EventTypeWarning, "DeleteFailure", err.Error())
+		}
 		return normalizeProviderError(err)
 	}
 
@@ -243,6 +256,7 @@ func (p *Provider) upsertPod(ctx context.Context, pod *corev1.Pod) error {
 		p.pods[podKey(cached.Namespace, cached.Name)] = cached.DeepCopy()
 		p.mu.Unlock()
 		p.notify(cached)
+		p.recordPodEvent(cached, corev1.EventTypeWarning, string(core.ClassifyError(err)), err.Error())
 		return normalizeProviderError(err)
 	}
 
@@ -253,6 +267,14 @@ func (p *Provider) upsertPod(ctx context.Context, pod *corev1.Pod) error {
 		p.pods[podKey(cached.Namespace, cached.Name)] = cached.DeepCopy()
 		p.mu.Unlock()
 		p.notify(cached)
+		reason, message := podReasonMessage(binding)
+		if reason == "" {
+			reason = string(core.ClassifyError(err))
+		}
+		if message == "" {
+			message = err.Error()
+		}
+		p.recordPodEvent(cached, corev1.EventTypeWarning, reason, message)
 		return normalizeProviderError(err)
 	}
 
@@ -311,6 +333,16 @@ func (p *Provider) notify(pod *corev1.Pod) {
 	if notifier != nil {
 		notifier(pod.DeepCopy())
 	}
+}
+
+func (p *Provider) recordPodEvent(pod *corev1.Pod, eventType string, reason string, message string) {
+	if p.recorder == nil || pod == nil {
+		return
+	}
+	if reason == "" {
+		reason = string(core.ErrorClassUnknown)
+	}
+	p.recorder.Eventf(pod, eventType, reason, "%s", message)
 }
 
 func podWithBindingStatus(pod *corev1.Pod, binding core.Binding) *corev1.Pod {

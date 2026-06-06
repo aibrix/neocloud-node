@@ -19,8 +19,11 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
+	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/tools/record"
 
 	"github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/core"
 	lambdacloud "github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/providers/lambda"
@@ -195,6 +198,8 @@ func NewNode(ctx context.Context, options Options, kubeClient kubernetes.Interfa
 		Adapter:     adapter,
 		LaunchGuard: launchGuard(options),
 		NodeName:    options.NodeName,
+		EventRecorder: newEventRecorder(kubeClient,
+			"gpu-burst-node/"+options.Provider),
 	}
 
 	nodeOptions := []nodeutil.NodeOpt{
@@ -308,6 +313,15 @@ func launchGuard(options Options) *core.LaunchGuard {
 		MaxPorts:        options.MaxPorts,
 	})
 	return &guard
+}
+
+func newEventRecorder(kubeClient kubernetes.Interface, component string) record.EventRecorder {
+	if kubeClient == nil {
+		return nil
+	}
+	broadcaster := record.NewBroadcaster()
+	broadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: kubeClient.CoreV1().Events("")})
+	return broadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: component})
 }
 
 func startOrphanSweeper(ctx context.Context, store core.BindingStore, adapter core.ProviderAdapter, options Options) error {

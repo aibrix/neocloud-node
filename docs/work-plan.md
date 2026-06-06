@@ -137,7 +137,7 @@
 - ambiguous create error 后 reconcile 不会重复创建多个 RunPod pod。
 - 手工删除远端 RunPod pod 后，本地状态能进入明确 Failed/Deleted/Unknown 路径，而不是无限 Pending。
 - `kubectl describe pod` 能看到关键 Events。
-  - 当前代码已先通过 PodStatus condition reason/message 暴露，Event recorder 是后续运维增强。
+  - 当前代码已通过 PodStatus condition reason/message 暴露，并对 unsupported spec、provider create failure、delete failure 写入 Kubernetes warning Events。
 
 ### 正确性评估
 
