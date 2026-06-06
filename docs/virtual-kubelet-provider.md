@@ -6,7 +6,7 @@
 
 - `CreatePod` and `UpdatePod` transform a `corev1.Pod` through `pkg/kube.Transformer`, then delegate idempotent remote creation to `core.LifecycleService`.
 - `DeletePod` delegates remote cleanup to `core.LifecycleService`, removes the cached Kubernetes pod, and emits a terminal pod notification when the pod was known locally.
-- `GetPod`, `GetPodStatus`, and `GetPods` return `DeepCopy` objects so callers cannot mutate provider cache state.
+- `GetPod`, `GetPodStatus`, and `GetPods` sync remote provider status before returning and return `DeepCopy` objects so callers cannot mutate provider cache state.
 - `NotifyPods` supports the Virtual Kubelet async pod status callback.
 - `NewProviderFunc` returns an upstream `nodeutil.NewProviderFunc`, so the provider can be embedded directly in `nodeutil.NewNode` while letting upstream create the default node status provider.
 - `GetStatsSummary` returns a stable kubelet stats summary containing known pod references and container names.

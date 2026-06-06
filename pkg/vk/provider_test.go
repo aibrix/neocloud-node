@@ -180,6 +180,34 @@ func TestStatsSummaryIncludesKnownPods(t *testing.T) {
 	}
 }
 
+func TestGetPodStatusSyncsRemoteProviderPhase(t *testing.T) {
+	ctx := context.Background()
+	adapter := &phaseProvider{phase: core.RemoteRunning}
+	provider := newTestProvider(t, adapter)
+	pod := gpuPod("sync", "uid-sync")
+
+	if err := provider.CreatePod(ctx, pod); err != nil {
+		t.Fatalf("CreatePod() error = %v", err)
+	}
+	adapter.phase = core.RemoteSucceeded
+
+	status, err := provider.GetPodStatus(ctx, "default", "sync")
+	if err != nil {
+		t.Fatalf("GetPodStatus() error = %v", err)
+	}
+	if status.Phase != corev1.PodSucceeded {
+		t.Fatalf("GetPodStatus().Phase = %s, want %s", status.Phase, corev1.PodSucceeded)
+	}
+
+	cached, err := provider.GetPod(ctx, "default", "sync")
+	if err != nil {
+		t.Fatalf("GetPod() error = %v", err)
+	}
+	if cached.Status.Phase != corev1.PodSucceeded {
+		t.Fatalf("cached phase = %s, want %s", cached.Status.Phase, corev1.PodSucceeded)
+	}
+}
+
 func TestNewProviderFuncBuildsNodeutilProvider(t *testing.T) {
 	ctx := context.Background()
 	factory := NewProviderFunc(Config{
@@ -303,5 +331,31 @@ func (nopReadWriteCloser) Write(p []byte) (int, error) {
 }
 
 func (nopReadWriteCloser) Close() error {
+	return nil
+}
+
+type phaseProvider struct {
+	phase core.RemotePhase
+}
+
+func (p *phaseProvider) Create(ctx context.Context, idempotencyKey string, request core.WorkloadRequest) (core.RemoteResource, error) {
+	return core.RemoteResource{
+		ID:             "remote-sync",
+		IdempotencyKey: idempotencyKey,
+		Provider:       "runpod",
+		Phase:          p.phase,
+		Request:        request,
+	}, nil
+}
+
+func (p *phaseProvider) Get(ctx context.Context, remoteID string) (core.RemoteResource, error) {
+	return core.RemoteResource{
+		ID:       remoteID,
+		Provider: "runpod",
+		Phase:    p.phase,
+	}, nil
+}
+
+func (p *phaseProvider) Delete(ctx context.Context, remoteID string) error {
 	return nil
 }

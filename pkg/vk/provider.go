@@ -132,7 +132,7 @@ func (p *Provider) GetPod(ctx context.Context, namespace, name string) (*corev1.
 	if pod == nil {
 		return nil, errdefs.NotFoundf("pod %q is not known to the provider", namespace+"/"+name)
 	}
-	return pod, nil
+	return p.syncPodStatus(ctx, pod)
 }
 
 func (p *Provider) GetPodStatus(ctx context.Context, namespace, name string) (*corev1.PodStatus, error) {
@@ -160,7 +160,16 @@ func (p *Provider) GetPods(ctx context.Context) ([]*corev1.Pod, error) {
 		pods = append(pods, p.pods[key].DeepCopy())
 	}
 	p.mu.RUnlock()
-	return pods, nil
+
+	synced := make([]*corev1.Pod, 0, len(pods))
+	for _, pod := range pods {
+		out, err := p.syncPodStatus(ctx, pod)
+		if err != nil {
+			return nil, err
+		}
+		synced = append(synced, out)
+	}
+	return synced, nil
 }
 
 func (p *Provider) NotifyPods(ctx context.Context, notifier func(*corev1.Pod)) {
@@ -255,6 +264,30 @@ func (p *Provider) getCachedPod(key string) *corev1.Pod {
 		return nil
 	}
 	return pod.DeepCopy()
+}
+
+func (p *Provider) syncPodStatus(ctx context.Context, pod *corev1.Pod) (*corev1.Pod, error) {
+	if pod == nil || pod.UID == "" {
+		return pod, nil
+	}
+
+	binding, err := p.lifecycle.SyncStatus(ctx, pod.Namespace, string(pod.UID))
+	if err != nil && !errors.Is(err, core.ErrRemoteNotFound) {
+		return nil, normalizeProviderError(err)
+	}
+
+	synced := podWithBindingStatus(pod, binding)
+	p.mu.Lock()
+	key := podKey(synced.Namespace, synced.Name)
+	if current, ok := p.pods[key]; ok && current.UID == synced.UID {
+		p.pods[key] = synced.DeepCopy()
+	}
+	p.mu.Unlock()
+
+	if pod.Status.Phase != synced.Status.Phase {
+		p.notify(synced)
+	}
+	return synced, nil
 }
 
 func (p *Provider) notify(pod *corev1.Pod) {
