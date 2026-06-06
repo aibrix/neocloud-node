@@ -156,6 +156,49 @@ func TestClientCreateRecoversLostCreateResponseByExternalName(t *testing.T) {
 	}
 }
 
+func TestClientCreateRecoversDecodeFailureByExternalName(t *testing.T) {
+	t.Parallel()
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		switch {
+		case requests == 1 && r.Method == http.MethodPost && r.URL.Path == "/pods":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":`))
+		case requests == 2 && r.Method == http.MethodGet && r.URL.Path == "/pods":
+			if got := r.URL.Query().Get("name"); got != "gpu-burst-node-default-pod-123" {
+				t.Fatalf("name query = %q, want external name", got)
+			}
+			_, _ = w.Write([]byte(`[{
+				"id": "runpod-created",
+				"name": "gpu-burst-node-default-pod-123",
+				"desiredStatus": "RUNNING",
+				"image": "example.com/train:latest",
+				"costPerHr": 0.44
+			}]`))
+		default:
+			t.Fatalf("unexpected request %d %s %s", requests, r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{BaseURL: server.URL, APIKey: "test-token"})
+	remote, err := client.Create(context.Background(), "default/pod-123", core.WorkloadRequest{
+		Image:    "example.com/train:latest",
+		GPUCount: 1,
+	})
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if remote.ID != "runpod-created" {
+		t.Fatalf("remote ID = %q, want runpod-created", remote.ID)
+	}
+	if remote.HourlyCost != 0.44 {
+		t.Fatalf("hourly cost = %.2f, want 0.44", remote.HourlyCost)
+	}
+}
+
 func TestClientClassifiesProviderErrors(t *testing.T) {
 	t.Parallel()
 
