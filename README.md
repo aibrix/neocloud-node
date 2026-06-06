@@ -38,3 +38,27 @@ kubectl get cloudpodbindings
 ```
 
 To switch the deployment to RunPod, set `GPU_BURST_PROVIDER=runpod` and provide `RUNPOD_API_KEY` through the `gpu-burst-node-runpod` Secret referenced by the deployment.
+
+## RunPod E2E Smoke Test
+
+The real RunPod smoke test is gated so it never creates cloud resources by accident. It builds the local binary, runs the controller against the current Kubernetes context, creates one A40 RunPod pod, verifies Kubernetes `Pod` / `CloudPodBinding` state, deletes the pod, and checks RunPod for leftovers by external name.
+
+```bash
+export RUNPOD_API_KEY=...
+RUNPOD_E2E=1 hack/e2e/runpod-smoke.sh
+```
+
+Defaults:
+
+- GPU type: `NVIDIA A40`
+- GPU count: `1`
+- virtual node: `aibrix-gpu-burst-runpod-e2e`
+- binary: `/tmp/gpu-burst-node-e2e`
+
+Optional capacity-classification check:
+
+```bash
+RUNPOD_E2E=1 RUNPOD_E2E_CAPACITY_CHECK=1 hack/e2e/runpod-smoke.sh
+```
+
+The capacity check requests `NVIDIA A40` with `COMMUNITY` + spot. If capacity is unavailable, the binding condition must be `Capacity`; if capacity is available, the script deletes the created pod.
