@@ -13,8 +13,10 @@ LISTEN_ADDR="${GPU_BURST_E2E_LISTEN_ADDR:-:11251}"
 GPU_TYPE="${RUNPOD_E2E_GPU_TYPE:-NVIDIA A40}"
 SUCCESS_POD="${RUNPOD_E2E_SUCCESS_POD:-gpu-burst-runpod-e2e-success}"
 CAPACITY_POD="${RUNPOD_E2E_CAPACITY_POD:-gpu-burst-runpod-e2e-capacity}"
-SUCCESS_TIMEOUT_SECONDS="${RUNPOD_E2E_SUCCESS_TIMEOUT_SECONDS:-180}"
+SUCCESS_TIMEOUT_SECONDS="${RUNPOD_E2E_SUCCESS_TIMEOUT_SECONDS:-600}"
+COMPLETION_TIMEOUT_SECONDS="${RUNPOD_E2E_COMPLETION_TIMEOUT_SECONDS:-900}"
 CAPACITY_TIMEOUT_SECONDS="${RUNPOD_E2E_CAPACITY_TIMEOUT_SECONDS:-90}"
+WAIT_FOR_COMPLETION="${RUNPOD_E2E_WAIT_FOR_COMPLETION:-0}"
 RUN_CAPACITY_CHECK="${RUNPOD_E2E_CAPACITY_CHECK:-0}"
 EXTERNAL_NAMES=()
 CONTROLLER_PID=""
@@ -173,6 +175,7 @@ start_controller() {
     --provider=runpod \
     --binding-store=kubernetes \
     --listen-addr="$LISTEN_ADDR" \
+    --status-sync-interval="${RUNPOD_E2E_STATUS_SYNC_INTERVAL:-5s}" \
     --advertise-gpu-count=3 \
     --advertise-pod-capacity=10 \
     --max-gpu-count=1 &
@@ -223,7 +226,7 @@ spec:
     - name: smoke
       image: busybox:1.36
       command: ["sh", "-c"]
-      args: ["echo ${pod_name}; sleep 120"]
+      args: ["echo ${pod_name}; sleep 5"]
       resources:
         limits:
           nvidia.com/gpu: "1"
@@ -258,7 +261,7 @@ binding_condition_reason_for_pod() {
     -o jsonpath='{range .items[*]}{.status.conditions[0].reason}{end}' 2>/dev/null || true
 }
 
-wait_for_running_remote() {
+wait_for_started_remote() {
   local pod_name="$1"
   local timeout="$2"
   local deadline=$((SECONDS + timeout))
@@ -272,7 +275,7 @@ wait_for_running_remote() {
     reason="$(pod_reason "$pod_name")"
     remote_id="$(binding_remote_id_for_pod "$pod_name")"
     log "pod=${pod_name} phase=${phase:-unknown} reason=${reason:-none} remote=${remote_id:-none}"
-    if [[ "$phase" == "Running" && -n "$remote_id" ]]; then
+    if [[ -n "$remote_id" && ( "$phase" == "Running" || "$phase" == "Succeeded" ) ]]; then
       printf '%s\n' "$remote_id"
       return 0
     fi
@@ -285,7 +288,34 @@ wait_for_running_remote() {
     sleep 3
   done
   "$KUBECTL" -n "$NAMESPACE" describe pod "$pod_name" >&2 || true
-  fail "timed out waiting for ${pod_name} to become Running with remoteID"
+  fail "timed out waiting for ${pod_name} to start with remoteID"
+}
+
+wait_for_succeeded() {
+  local pod_name="$1"
+  local timeout="$2"
+  local deadline=$((SECONDS + timeout))
+  local phase reason
+
+  while (( SECONDS < deadline )); do
+    phase="$(pod_phase "$pod_name")"
+    reason="$(pod_reason "$pod_name")"
+    log "pod=${pod_name} phase=${phase:-unknown} reason=${reason:-none}"
+    if [[ "$phase" == "Succeeded" ]]; then
+      return 0
+    fi
+    if [[ "$phase" == "Failed" ]]; then
+      "$KUBECTL" -n "$NAMESPACE" describe pod "$pod_name" >&2 || true
+      "$KUBECTL" -n "$NAMESPACE" get cloudpodbindings.gpu-burst-node.aibrix.ai \
+        -l "gpu-burst-node.aibrix.ai/pod-name=${pod_name}" -o yaml >&2 || true
+      fail "${pod_name} failed while waiting for completion"
+    fi
+    sleep 5
+  done
+  "$KUBECTL" -n "$NAMESPACE" describe pod "$pod_name" >&2 || true
+  "$KUBECTL" -n "$NAMESPACE" get cloudpodbindings.gpu-burst-node.aibrix.ai \
+    -l "gpu-burst-node.aibrix.ai/pod-name=${pod_name}" -o yaml >&2 || true
+  fail "timed out waiting for ${pod_name} to Succeed"
 }
 
 wait_for_failed_class() {
@@ -341,8 +371,12 @@ run_success_smoke() {
   apply_runpod_pod "$SUCCESS_POD" "" ""
   remember_external_name "$SUCCESS_POD"
   local remote_id
-  remote_id="$(wait_for_running_remote "$SUCCESS_POD" "$SUCCESS_TIMEOUT_SECONDS")"
+  remote_id="$(wait_for_started_remote "$SUCCESS_POD" "$SUCCESS_TIMEOUT_SECONDS")"
   log "created RunPod pod remoteID=${remote_id}"
+  if [[ "$WAIT_FOR_COMPLETION" == "1" ]]; then
+    log "waiting for RunPod completion; this requires provider status or runner callback support"
+    wait_for_succeeded "$SUCCESS_POD" "$COMPLETION_TIMEOUT_SECONDS"
+  fi
   delete_pod_and_verify_cleanup "$SUCCESS_POD" "$remote_id"
 }
 
