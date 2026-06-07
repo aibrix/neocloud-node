@@ -222,7 +222,7 @@ func (s *LifecycleService) EnsureDeleted(ctx context.Context, namespace string, 
 	return s.store.CompleteDelete(ctx, namespace, workloadUID)
 }
 
-func RecordRunnerStatus(ctx context.Context, store BindingStore, namespace string, workloadUID string, exitCode int, message string) (Binding, error) {
+func RecordRunnerStatus(ctx context.Context, store BindingStore, namespace string, workloadUID string, status RunnerStatus) (Binding, error) {
 	if err := ctx.Err(); err != nil {
 		return Binding{}, err
 	}
@@ -233,18 +233,46 @@ func RecordRunnerStatus(ctx context.Context, store BindingStore, namespace strin
 	if err != nil {
 		return Binding{}, err
 	}
-	if exitCode == 0 {
+	phase := status.Phase
+	if phase == "" {
+		phase = runnerPhaseFromExitCode(status.ExitCode)
+	}
+	switch phase {
+	case RunnerPhaseRunning:
+		binding.Phase = BindingRunning
+		binding.LastError = ""
+		SetCondition(&binding, BindingCondition{
+			Type:    ConditionReady,
+			Status:  ConditionTrue,
+			Reason:  defaultString(status.Reason, "RunnerRunning"),
+			Message: defaultString(status.Message, "runner is running"),
+		})
+	case RunnerPhaseSucceeded:
 		binding.Phase = BindingSucceeded
 		binding.LastError = ""
-	} else {
+		SetCondition(&binding, BindingCondition{
+			Type:    ConditionReady,
+			Status:  ConditionTrue,
+			Reason:  defaultString(status.Reason, "RunnerSucceeded"),
+			Message: defaultString(status.Message, "runner completed successfully"),
+		})
+		clearCreateFailureCondition(&binding, ConditionProviderError)
+	case RunnerPhaseFailed:
 		binding.Phase = BindingFailed
-		binding.LastError = runnerFailureMessage(exitCode, message)
+		binding.LastError = runnerFailureMessage(status.ExitCode, status.Message)
 		SetCondition(&binding, BindingCondition{
 			Type:    ConditionProviderError,
 			Status:  ConditionTrue,
-			Reason:  "RunnerExitCode",
+			Reason:  defaultString(status.Reason, "RunnerExitCode"),
 			Message: binding.LastError,
 		})
+	default:
+		return Binding{}, &ProviderError{
+			Provider:  binding.Request.Provider,
+			Operation: "runner-status",
+			Class:     ErrorClassUnsupportedSpec,
+			Message:   "unsupported runner phase " + string(phase),
+		}
 	}
 	if err := store.Update(ctx, binding); err != nil {
 		return Binding{}, err
@@ -252,11 +280,25 @@ func RecordRunnerStatus(ctx context.Context, store BindingStore, namespace strin
 	return binding, nil
 }
 
+func runnerPhaseFromExitCode(exitCode int) RunnerPhase {
+	if exitCode == 0 {
+		return RunnerPhaseSucceeded
+	}
+	return RunnerPhaseFailed
+}
+
 func runnerFailureMessage(exitCode int, message string) string {
 	if message != "" {
 		return message
 	}
 	return "runner exited with code " + strconv.Itoa(exitCode)
+}
+
+func defaultString(value string, fallback string) string {
+	if value != "" {
+		return value
+	}
+	return fallback
 }
 
 func recordProviderFailure(binding *Binding, provider string, region string, reason string, err error) {

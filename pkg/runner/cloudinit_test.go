@@ -49,7 +49,9 @@ func TestRunnerCommandExpandsExitCodeInStatusPayload(t *testing.T) {
 		},
 	})
 
-	assertContains(t, command, `payload=$(printf '{"workloadID":%s,"exitCode":%s}' '"default/pod-123"' "$code")`)
+	assertContains(t, command, `payload=$(printf '{"workloadID":%s,"phase":"Running","message":"runner started"}' '"default/pod-123"')`)
+	assertContains(t, command, `if [ "$code" -eq 0 ]; then phase=Succeeded; else phase=Failed; fi`)
+	assertContains(t, command, `payload=$(printf '{"workloadID":%s,"phase":"%s","exitCode":%s}' '"default/pod-123"' "$phase" "$code")`)
 	assertContains(t, command, `-d "$payload"`)
 	if strings.Contains(command, shellQuote(statusPayload("default/pod-123", "$code"))) {
 		t.Fatalf("runner command keeps exit code in a single-quoted JSON payload:\n%s", command)

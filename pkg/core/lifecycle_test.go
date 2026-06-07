@@ -418,7 +418,10 @@ func TestRecordRunnerStatusMarksBindingSucceeded(t *testing.T) {
 		t.Fatalf("CreateOrGet() error = %v", err)
 	}
 
-	binding, err := RecordRunnerStatus(ctx, store, "default", "uid-runner-success", 0, "completed")
+	binding, err := RecordRunnerStatus(ctx, store, "default", "uid-runner-success", RunnerStatus{
+		Phase:   RunnerPhaseSucceeded,
+		Message: "completed",
+	})
 	if err != nil {
 		t.Fatalf("RecordRunnerStatus() error = %v", err)
 	}
@@ -427,6 +430,39 @@ func TestRecordRunnerStatusMarksBindingSucceeded(t *testing.T) {
 	}
 	if binding.LastError != "" {
 		t.Fatalf("last error = %q, want empty", binding.LastError)
+	}
+}
+
+func TestRecordRunnerStatusMarksBindingRunning(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := NewMemoryBindingStore()
+	_, _, err := store.CreateOrGet(ctx, Binding{
+		Namespace:   "default",
+		Name:        "runner-running",
+		WorkloadUID: "uid-runner-running",
+		RemoteID:    "lambda-1",
+		Phase:       BindingPending,
+		Request:     WorkloadRequest{Provider: "lambda"},
+	})
+	if err != nil {
+		t.Fatalf("CreateOrGet() error = %v", err)
+	}
+
+	binding, err := RecordRunnerStatus(ctx, store, "default", "uid-runner-running", RunnerStatus{
+		Phase:   RunnerPhaseRunning,
+		Message: "runner started",
+	})
+	if err != nil {
+		t.Fatalf("RecordRunnerStatus() error = %v", err)
+	}
+	if binding.Phase != BindingRunning {
+		t.Fatalf("phase = %s, want %s", binding.Phase, BindingRunning)
+	}
+	condition := FindCondition(binding.Conditions, ConditionReady)
+	if condition == nil || condition.Status != ConditionTrue || condition.Reason != "RunnerRunning" {
+		t.Fatalf("ready condition = %#v, want RunnerRunning true", condition)
 	}
 }
 
@@ -454,7 +490,10 @@ func TestLifecycleServiceDoesNotOverwriteTerminalRunnerStatus(t *testing.T) {
 	if binding.Phase != BindingRunning {
 		t.Fatalf("created phase = %s, want Running", binding.Phase)
 	}
-	if _, err := RecordRunnerStatus(ctx, store, "default", "uid-runner-terminal", 0, "completed"); err != nil {
+	if _, err := RecordRunnerStatus(ctx, store, "default", "uid-runner-terminal", RunnerStatus{
+		Phase:   RunnerPhaseSucceeded,
+		Message: "completed",
+	}); err != nil {
 		t.Fatalf("RecordRunnerStatus() error = %v", err)
 	}
 
@@ -484,7 +523,11 @@ func TestRecordRunnerStatusMarksBindingFailed(t *testing.T) {
 		t.Fatalf("CreateOrGet() error = %v", err)
 	}
 
-	binding, err := RecordRunnerStatus(ctx, store, "default", "uid-runner-failed", 137, "killed")
+	binding, err := RecordRunnerStatus(ctx, store, "default", "uid-runner-failed", RunnerStatus{
+		Phase:    RunnerPhaseFailed,
+		ExitCode: 137,
+		Message:  "killed",
+	})
 	if err != nil {
 		t.Fatalf("RecordRunnerStatus() error = %v", err)
 	}

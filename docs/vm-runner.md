@@ -13,7 +13,7 @@ Lambda Cloud's public documentation states that API-launched instances can use c
 3. cloud-init installs Docker.
 4. cloud-init pulls the requested image.
 5. cloud-init runs the container with `--gpus all`.
-6. cloud-init posts a completion payload to the controller callback URL.
+6. cloud-init posts a `Running` payload when the bootstrap starts, then posts a terminal payload when the container exits.
 7. Provider adapter terminates the VM when the workload completes or the Kubernetes workload is deleted.
 
 ## Generated Cloud-Init
@@ -26,7 +26,7 @@ Phase 4 cloud-init contains:
 - `docker run --rm --gpus all`
 - literal env var propagation
 - command and args
-- callback `curl` with workload ID and exit code
+- callback `curl` with workload ID, runner phase and exit code
 
 ## Callback Contract
 
@@ -39,6 +39,17 @@ Payload:
 ```json
 {
   "workloadID": "default/pod-uid",
+  "phase": "Running",
+  "message": "runner started"
+}
+```
+
+Terminal payload:
+
+```json
+{
+  "workloadID": "default/pod-uid",
+  "phase": "Succeeded",
   "exitCode": 0,
   "message": "optional detail"
 }
@@ -46,8 +57,11 @@ Payload:
 
 The controller resolves `workloadID` as `<namespace>/<podUID>` and updates the durable binding:
 
-- `exitCode == 0` -> `CloudPodBinding.status.phase=Succeeded`
-- `exitCode != 0` -> `CloudPodBinding.status.phase=Failed` with a `RunnerExitCode` condition
+- `phase=Running` -> `CloudPodBinding.status.phase=Running` with `Ready=True/RunnerRunning`
+- `phase=Succeeded` -> `CloudPodBinding.status.phase=Succeeded`
+- `phase=Failed` -> `CloudPodBinding.status.phase=Failed` with a `RunnerExitCode` condition unless the payload supplies a more specific `reason`
+
+For backward compatibility, payloads without `phase` are still interpreted from `exitCode`: `0` means `Succeeded`, non-zero means `Failed`.
 
 ### Authentication
 
@@ -91,5 +105,5 @@ The HMAC key is the configured callback secret. The controller rejects missing s
 - Callback signing is supported, but secret delivery is still operator-managed env/flag configuration.
 - No checkpoint hook.
 - No retry or timeout supervisor on the VM.
-- No heartbeat protocol yet.
+- Phase-aware callback exists for `Running`, `Succeeded` and `Failed`; periodic heartbeat timestamps and timeout policy are still not implemented.
 - No structured runner binary yet; Phase 4 uses shell/cloud-init only.

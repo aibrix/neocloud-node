@@ -697,7 +697,12 @@ func runnerStatusHandler(store core.BindingStore, callbackSecret string) http.Ha
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if _, err := core.RecordRunnerStatus(r.Context(), store, namespace, workloadUID, report.ExitCode, report.Message); err != nil {
+		status, err := report.CoreStatus()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if _, err := core.RecordRunnerStatus(r.Context(), store, namespace, workloadUID, status); err != nil {
 			if errors.Is(err, core.ErrBindingNotFound) {
 				http.Error(w, err.Error(), http.StatusNotFound)
 				return

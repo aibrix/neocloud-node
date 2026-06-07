@@ -529,6 +529,43 @@ func TestRunnerStatusHandlerUpdatesBinding(t *testing.T) {
 	}
 }
 
+func TestRunnerStatusHandlerRecordsRunningPhase(t *testing.T) {
+	ctx := context.Background()
+	store := core.NewMemoryBindingStore()
+	_, _, err := store.CreateOrGet(ctx, core.Binding{
+		Namespace:   "default",
+		Name:        "lambda-runner",
+		WorkloadUID: "uid-lambda-running",
+		RemoteID:    "lambda-1",
+		Phase:       core.BindingPending,
+		Request:     core.WorkloadRequest{Provider: ProviderLambda},
+	})
+	if err != nil {
+		t.Fatalf("CreateOrGet() error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/gpu-burst-node/v1/runner/status",
+		bytes.NewBufferString(`{"workloadID":"default/uid-lambda-running","phase":"Running","message":"runner started"}`))
+	recorder := httptest.NewRecorder()
+
+	runnerStatusHandler(store, "").ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("status code = %d, want %d; body=%s", recorder.Code, http.StatusNoContent, recorder.Body.String())
+	}
+	binding, err := store.GetByWorkloadUID(ctx, "default", "uid-lambda-running")
+	if err != nil {
+		t.Fatalf("GetByWorkloadUID() error = %v", err)
+	}
+	if binding.Phase != core.BindingRunning {
+		t.Fatalf("phase = %s, want %s", binding.Phase, core.BindingRunning)
+	}
+	condition := core.FindCondition(binding.Conditions, core.ConditionReady)
+	if condition == nil || condition.Status != core.ConditionTrue || condition.Reason != "RunnerRunning" {
+		t.Fatalf("ready condition = %#v, want RunnerRunning true", condition)
+	}
+}
+
 func TestStartRunnerCallbackServerUpdatesBinding(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

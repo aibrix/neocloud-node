@@ -93,6 +93,21 @@ type BindingCondition struct {
 	LastTransitionTime time.Time
 }
 
+type RunnerPhase string
+
+const (
+	RunnerPhaseRunning   RunnerPhase = "Running"
+	RunnerPhaseSucceeded RunnerPhase = "Succeeded"
+	RunnerPhaseFailed    RunnerPhase = "Failed"
+)
+
+type RunnerStatus struct {
+	Phase    RunnerPhase
+	ExitCode int
+	Reason   string
+	Message  string
+}
+
 type Binding struct {
 	Namespace   string
 	Name        string

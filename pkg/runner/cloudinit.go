@@ -51,24 +51,30 @@ func BuildCloudInit(config CloudInitConfig) (string, error) {
 
 func runnerCommand(config CloudInitConfig) string {
 	image := shellQuote(config.Request.Image)
-	payloadFormat := shellQuote(`{"workloadID":%s,"exitCode":%s}`)
+	runningPayloadFormat := shellQuote(`{"workloadID":%s,"phase":"Running","message":"runner started"}`)
+	terminalPayloadFormat := shellQuote(`{"workloadID":%s,"phase":"%s","exitCode":%s}`)
 	workloadID := shellQuote(strconv.Quote(config.WorkloadID))
-	callbackHeaders := signedCallbackHeaders(config.CallbackSecret)
 
 	return strings.Join([]string{
 		"set -e",
+		callbackCommand(config, "$(printf "+runningPayloadFormat+" "+workloadID+")") + " || true",
 		"docker pull " + image,
 		"set +e",
 		dockerRunCommand(config.Request),
 		"code=$?",
-		"payload=$(printf " + payloadFormat + " " + workloadID + ` "$code")`,
-		signCallbackCommand(config.CallbackSecret),
-		"curl -fsS --retry 60 --retry-all-errors --retry-delay 10 --max-time 10 -X POST " + shellQuote(config.CallbackURL) +
-			" -H 'Content-Type: application/json'" +
-			callbackHeaders +
-			` -d "$payload"`,
+		`if [ "$code" -eq 0 ]; then phase=Succeeded; else phase=Failed; fi`,
+		callbackCommand(config, "$(printf "+terminalPayloadFormat+" "+workloadID+` "$phase" "$code")`),
 		"exit $code",
 	}, "; ")
+}
+
+func callbackCommand(config CloudInitConfig, payloadExpression string) string {
+	return "payload=" + payloadExpression + "; " +
+		signCallbackCommand(config.CallbackSecret) + "; " +
+		"curl -fsS --retry 60 --retry-all-errors --retry-delay 10 --max-time 10 -X POST " + shellQuote(config.CallbackURL) +
+		" -H 'Content-Type: application/json'" +
+		signedCallbackHeaders(config.CallbackSecret) +
+		` -d "$payload"`
 }
 
 func signCallbackCommand(secret string) string {
