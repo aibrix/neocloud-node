@@ -13,7 +13,7 @@ The Phase 5 placement planner is a provider-neutral mechanism. It does not repla
 - `WorkloadRequest.GPUMemory`
 - remaining runtime and deadline when the caller can estimate them
 - provider offers
-- provider error classes from prior attempts
+- provider error classes from prior attempts, converted into temporary offer blocks by `resource.BlockedOffersFromAttempts`
 - optional provider order
 - optional region order
 - cold start, expected spot lifetime and migration cost when known
@@ -24,17 +24,18 @@ Provider offers come from the `resource.OfferCatalog` interface. Provider-specif
 
 The planner first rejects offers that cannot satisfy the request:
 
-1. GPU type mismatch.
-2. GPU memory mismatch.
-3. Insufficient GPU count.
-4. Market mismatch.
-5. Spot without recovery/checkpoint support.
-6. Offer unavailable.
-7. Price above max price.
-8. Unsupported provider capability.
-9. Deadline cannot be met.
-10. Deadline slack requires on-demand safety net.
-11. Spot expected lifetime is too short to amortize cold start.
+1. Recently blocked provider/location signal from prior fallback attempts.
+2. GPU type mismatch.
+3. GPU memory mismatch.
+4. Insufficient GPU count.
+5. Market mismatch.
+6. Spot without recovery/checkpoint support.
+7. Offer unavailable.
+8. Price above max price.
+9. Unsupported provider capability.
+10. Deadline cannot be met.
+11. Deadline slack requires on-demand safety net.
+12. Spot expected lifetime is too short to amortize cold start.
 
 It then sorts matching offers by:
 
@@ -76,6 +77,8 @@ If no offer matches, `Planner.Plan` returns `UnavailableError` with the rejected
 
 Every provider create/get/delete failure must be reduced to a stable error class before placement or fallback consumes it. Raw provider messages are diagnostic details, not policy inputs.
 
+`Policy.WithFailureSignals` is the bridge from durable execution lineage to placement policy. It takes recent `core.Attempt` entries and appends provider/location-scoped `BlockedOffer` entries for fallback-eligible classes: `Capacity`, `RateLimited`, `Transient` and `Timeout`. `Auth`, `UnsupportedSpec`, expired attempts and incomplete attempts are ignored so they do not poison capacity decisions.
+
 ## Non-Goals
 
 - No custom Kubernetes scheduler.
@@ -83,7 +86,7 @@ Every provider create/get/delete failure must be reduced to a stable error class
 - No CRD policy API.
 - No dynamic provider catalog refresh in the current code.
 - No historical provider scorecard in the current code.
-- No automatic retry/backoff cache in the current code.
+- No cross-workload retry/backoff cache in the current code.
 - No survival-analysis lifetime predictor in the current code.
 
 Those are later layers. Phase 5 only establishes the clean selection mechanism.

@@ -154,6 +154,15 @@ Fallback should consume provider error classes, not raw strings:
 | `Quota` | no | maybe | yes if policy permits | User/account policy dependent. |
 | `UnsupportedSpec` | no | no | only if capability matrix says supported | Never silently downgrade. |
 
+Current code hooks:
+
+- `core.LifecycleService` records each provider create failure as a durable `core.Attempt`.
+- `core.ProviderError` and `core.ClassifyError` normalize RunPod/Lambda/API failures into stable classes.
+- `resource.BlockedOffersFromAttempts` converts recent fallback-eligible attempts into provider/location cooldown blocks.
+- `resource.Policy.WithFailureSignals` lets VK, AIBrix batch or a future resource manager merge those cooldowns into a placement policy without depending on provider-specific code.
+
+This is intentionally scoped to short-term capacity freshness. Longer-lived provider scoring should be a separate scorecard fed by metrics, not hidden inside adapter code.
+
 ### 4. Burn Rate
 
 Burn-rate is a live metric, not just an estimate at launch:
@@ -226,13 +235,13 @@ Provider adapters own launch/delete/list/status. Strategy components own offer s
 
 ## Implementation Order
 
-1. Finish durable attempts/conditions and provider error classes.
-2. Normalize provider catalog and offer model.
-3. Add RunPod price/cost extraction and Lambda instance type price extraction.
-4. Implement deterministic placement/fallback planner using fake catalogs.
-5. Add SkyNomad-inspired deadline, cold-start, expected-lifetime and migration-cost inputs to the planner.
-6. Wire planner into VK lifecycle after provider adapter interface stabilizes.
+1. Durable attempts, provider error classes and fallback lineage.
+2. Normalized offer model, catalog interface and deterministic planner.
+3. RunPod and Lambda cost extraction for launch-time burn-rate estimates.
+4. SkyNomad-inspired deadline, cold-start, expected-lifetime and migration-cost planner inputs.
+5. Recent attempt to cooldown signal bridge for capacity/rate-limit/transient/timeout failures.
+6. Wire planner into VK lifecycle once real provider offer sources are stable.
 7. Reuse the same planner from AIBrix batch runtime/resource manager.
-8. Add burn-rate metrics and orphan sweeper.
-9. Add provider probing and lifetime prediction after enough observations exist.
-10. Add real provider integration tests only after API-key setup is ready.
+8. Add Prometheus burn-rate metrics and orphan sweeper.
+9. Add provider probing, scorecards and lifetime prediction after enough observations exist.
+10. Keep real provider e2e smoke tests gated by explicit API-key environment variables.
