@@ -4,7 +4,9 @@ Date: 2026-06-07
 
 This document summarizes the reusable GPU acquisition mechanism behind catalog, price estimate, fallback, fault tolerance and provider launch. The key decision is that this layer should be a Kubernetes-free resource manager library. GPU Burst Node, AIBrix batch and AIBrix online serving can all call it, but persistence and user-facing surfaces remain owned by each product.
 
-Diagram: [Mermaid source](../figures/gpu-resource-mechanism.md), [SVG](../figures/gpu-resource-mechanism.svg), [PNG](../figures/gpu-resource-mechanism.png).
+Detailed mechanism diagram: [Mermaid source](../figures/gpu-resource-mechanism.md), [SVG](../figures/gpu-resource-mechanism.svg), [PNG](../figures/gpu-resource-mechanism.png).
+
+Paper-style system figure: [Figure notes](../figures/gpu-resource-system-paper.md), [PDF](../figures/gpu-resource-system-paper.pdf), [SVG](../figures/gpu-resource-system-paper.svg), [PNG](../figures/gpu-resource-system-paper.png). This compact version is better for side-by-side comparison with SkyPilot-style system diagrams.
 
 ## One-Sentence Model
 
