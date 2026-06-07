@@ -54,6 +54,8 @@ type CostStatus struct {
 	ObservedAt time.Time
 }
 
+const CostSourcePlacementEstimate = "placement.offer"
+
 type Attempt struct {
 	Provider        string
 	Region          string

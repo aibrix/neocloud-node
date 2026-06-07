@@ -19,8 +19,10 @@ type LifecycleService struct {
 type LifecycleOption func(*LifecycleService)
 
 type CreateCandidate struct {
-	Provider string
-	Request  WorkloadRequest
+	Provider            string
+	Request             WorkloadRequest
+	EstimatedHourlyCost float64
+	CostSource          string
 }
 
 type CreateCandidatePlanner interface {
@@ -88,11 +90,12 @@ func (s *LifecycleService) EnsureCreated(ctx context.Context, desired Binding) (
 		}
 	}
 
-	remote, request, err := s.createWithFallback(ctx, &binding)
+	remote, candidate, err := s.createWithFallback(ctx, &binding)
 	if err != nil {
 		_ = s.store.Update(ctx, binding)
 		return binding, err
 	}
+	request := candidate.Request
 
 	binding.RemoteID = remote.ID
 	binding.Phase = bindingPhaseFromRemote(remote.Phase)
@@ -103,6 +106,7 @@ func (s *LifecycleService) EnsureCreated(ctx context.Context, desired Binding) (
 	binding.Placement.Region = request.RegionHint
 	binding.LastError = ""
 	recordCreateSuccess(&binding)
+	recordCandidateCost(&binding, candidate)
 	recordRemoteCost(&binding, remote)
 	if err := s.store.Update(ctx, binding); err != nil {
 		return Binding{}, err
@@ -110,12 +114,12 @@ func (s *LifecycleService) EnsureCreated(ctx context.Context, desired Binding) (
 	return binding, nil
 }
 
-func (s *LifecycleService) createWithFallback(ctx context.Context, binding *Binding) (RemoteResource, WorkloadRequest, error) {
+func (s *LifecycleService) createWithFallback(ctx context.Context, binding *Binding) (RemoteResource, CreateCandidate, error) {
 	var lastErr error
 	candidates, err := s.createCandidates(ctx, *binding)
 	if err != nil {
 		recordProviderFailure(binding, binding.Request.Provider, binding.Request.RegionHint, "PlacementFailed", err)
-		return RemoteResource{}, binding.Request, err
+		return RemoteResource{}, CreateCandidate{Provider: binding.Request.Provider, Request: binding.Request}, err
 	}
 	for index, candidate := range candidates {
 		adapter := s.providerFor(candidate.Provider)
@@ -127,22 +131,22 @@ func (s *LifecycleService) createWithFallback(ctx context.Context, binding *Bind
 				Message:   "provider adapter is not configured",
 			}
 			recordProviderFailure(binding, candidate.Provider, candidate.Request.RegionHint, "CreateFailed", lastErr)
-			return RemoteResource{}, candidate.Request, lastErr
+			return RemoteResource{}, candidate, lastErr
 		}
 		remote, err := adapter.Create(ctx, idempotencyKey(*binding), candidate.Request)
 		if err == nil {
-			return remote, candidate.Request, nil
+			return remote, candidate, nil
 		}
 		lastErr = err
 		recordProviderFailure(binding, candidate.Provider, candidate.Request.RegionHint, "CreateFailed", err)
 		if index == len(candidates)-1 || !AllowsFallback(err) {
-			return RemoteResource{}, candidate.Request, err
+			return RemoteResource{}, candidate, err
 		}
 	}
 	if lastErr == nil {
 		lastErr = errors.New("no provider candidate configured")
 	}
-	return RemoteResource{}, binding.Request, lastErr
+	return RemoteResource{}, CreateCandidate{Provider: binding.Request.Provider, Request: binding.Request}, lastErr
 }
 
 func (s *LifecycleService) SyncStatus(ctx context.Context, namespace string, workloadUID string) (Binding, error) {
@@ -445,12 +449,27 @@ func recordRemoteCost(binding *Binding, remote RemoteResource) {
 	if binding == nil {
 		return
 	}
-	if remote.HourlyCost <= 0 && remote.CostSource == "" {
+	if remote.HourlyCost <= 0 {
 		return
 	}
 	binding.Cost = CostStatus{
 		HourlyUSD:  remote.HourlyCost,
 		Source:     remote.CostSource,
+		ObservedAt: time.Now().UTC(),
+	}
+}
+
+func recordCandidateCost(binding *Binding, candidate CreateCandidate) {
+	if binding == nil || candidate.EstimatedHourlyCost <= 0 {
+		return
+	}
+	source := candidate.CostSource
+	if source == "" {
+		source = CostSourcePlacementEstimate
+	}
+	binding.Cost = CostStatus{
+		HourlyUSD:  candidate.EstimatedHourlyCost,
+		Source:     source,
 		ObservedAt: time.Now().UTC(),
 	}
 }

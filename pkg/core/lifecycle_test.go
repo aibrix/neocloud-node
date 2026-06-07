@@ -59,7 +59,20 @@ func TestLifecycleServiceRecordsRemoteCostOnCreate(t *testing.T) {
 	ctx := context.Background()
 	store := NewMemoryBindingStore()
 	provider := &costProvider{}
-	service := NewLifecycleService(store, provider)
+	service := NewLifecycleService(store, provider, WithCreateCandidatePlanner(staticCreateCandidatePlanner{
+		candidates: []CreateCandidate{
+			{
+				Provider:            "runpod",
+				EstimatedHourlyCost: 0.88,
+				CostSource:          CostSourcePlacementEstimate,
+				Request: WorkloadRequest{
+					Image:    "example.com/train:latest",
+					GPUCount: 1,
+					Provider: "runpod",
+				},
+			},
+		},
+	}))
 
 	binding, err := service.EnsureCreated(ctx, Binding{
 		Namespace:   "default",
@@ -84,6 +97,55 @@ func TestLifecycleServiceRecordsRemoteCostOnCreate(t *testing.T) {
 	}
 	if stored.Cost.HourlyUSD != 0.44 || stored.Cost.Source != "runpod.costPerHr" || stored.Cost.ObservedAt.IsZero() {
 		t.Fatalf("stored cost = %#v, want persisted provider cost", stored.Cost)
+	}
+}
+
+func TestLifecycleServiceRecordsCandidateCostEstimateOnCreate(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := NewMemoryBindingStore()
+	provider := NewFakeProvider("runpod")
+	service := NewLifecycleService(store, provider, WithCreateCandidatePlanner(staticCreateCandidatePlanner{
+		candidates: []CreateCandidate{
+			{
+				Provider:            "runpod",
+				EstimatedHourlyCost: 0.72,
+				CostSource:          CostSourcePlacementEstimate,
+				Request: WorkloadRequest{
+					Image:      "example.com/train:latest",
+					GPUCount:   1,
+					GPUType:    "A40",
+					Provider:   "runpod",
+					RegionHint: "US-TX-3",
+				},
+			},
+		},
+	}))
+
+	binding, err := service.EnsureCreated(ctx, Binding{
+		Namespace:   "default",
+		Name:        "train-job",
+		WorkloadUID: "pod-123",
+		Request: WorkloadRequest{
+			Image:    "example.com/train:latest",
+			GPUCount: 1,
+			Provider: "runpod",
+		},
+	})
+	if err != nil {
+		t.Fatalf("EnsureCreated returned error: %v", err)
+	}
+	if binding.Cost.HourlyUSD != 0.72 || binding.Cost.Source != CostSourcePlacementEstimate || binding.Cost.ObservedAt.IsZero() {
+		t.Fatalf("binding cost = %#v, want placement estimate", binding.Cost)
+	}
+
+	stored, err := store.GetByWorkloadUID(ctx, "default", "pod-123")
+	if err != nil {
+		t.Fatalf("GetByWorkloadUID returned error: %v", err)
+	}
+	if stored.Cost.HourlyUSD != 0.72 || stored.Cost.Source != CostSourcePlacementEstimate || stored.Cost.ObservedAt.IsZero() {
+		t.Fatalf("stored cost = %#v, want persisted placement estimate", stored.Cost)
 	}
 }
 

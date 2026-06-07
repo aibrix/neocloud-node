@@ -43,8 +43,10 @@ func (p LifecycleCandidatePlanner) CreateCandidates(ctx context.Context, binding
 		}
 		request := requestForOffer(binding.Request, offer)
 		candidates = append(candidates, core.CreateCandidate{
-			Provider: request.Provider,
-			Request:  request,
+			Provider:            request.Provider,
+			Request:             request,
+			EstimatedHourlyCost: offer.HourlyPrice,
+			CostSource:          core.CostSourcePlacementEstimate,
 		})
 	}
 	if len(candidates) == 0 {

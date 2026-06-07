@@ -4,6 +4,8 @@ Date: 2026-06-06
 
 The Phase 5 placement planner is a provider-neutral mechanism. It does not replace the Kubernetes default scheduler. Kubernetes still schedules the Pod to a GPU Burst Node virtual node; the controller then chooses the external cloud offer.
 
+For the broader reusable resource abstraction across GPU Burst Node, AIBrix batch and online serving, see [GPU Resource Mechanism](gpu-resource-mechanism.md).
+
 ## Inputs
 
 - `WorkloadRequest.GPUCount`
@@ -108,7 +110,7 @@ Every provider create/get/delete failure must be reduced to a stable error class
 - No custom Kubernetes scheduler.
 - No Kueue integration.
 - No CRD policy API.
-- No dynamic provider catalog refresh/probe loop in the current code.
+- No provider capacity probing loop in the current code.
 - No historical provider scorecard in the current code.
 - No cross-workload retry/backoff cache in the current code.
 - No survival-analysis lifetime predictor in the current code.

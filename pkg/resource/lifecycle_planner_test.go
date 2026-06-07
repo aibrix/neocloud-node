@@ -53,6 +53,12 @@ func TestLifecycleCandidatePlannerBuildsSelectedAndFallbackCandidates(t *testing
 	}
 	assertCandidate(t, candidates[0], "runpod", "US-TX-3", "A10", core.MarketTypeOnDemand)
 	assertCandidate(t, candidates[1], "lambda", "us-west-1", "A10", core.MarketTypeOnDemand)
+	if candidates[0].EstimatedHourlyCost != 0.60 || candidates[0].CostSource != core.CostSourcePlacementEstimate {
+		t.Fatalf("first candidate cost = %.2f/%q, want 0.60 placement estimate", candidates[0].EstimatedHourlyCost, candidates[0].CostSource)
+	}
+	if candidates[1].EstimatedHourlyCost != 0.75 || candidates[1].CostSource != core.CostSourcePlacementEstimate {
+		t.Fatalf("fallback candidate cost = %.2f/%q, want 0.75 placement estimate", candidates[1].EstimatedHourlyCost, candidates[1].CostSource)
+	}
 	if candidates[0].Request.Image != "example.com/train:latest" || candidates[0].Request.Command[0] != "python" || candidates[0].Request.Env["MODEL"] != "llama" {
 		t.Fatalf("candidate request lost workload fields: %#v", candidates[0].Request)
 	}

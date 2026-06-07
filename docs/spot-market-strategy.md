@@ -4,6 +4,8 @@ Date: 2026-06-06
 
 This document defines the spot/interruptible, fallback, cost-estimation and burn-rate strategy for AIBrix GPU Burst Node. It uses SkyPilot as a reference point, but the product shape is intentionally different: SkyPilot is a CLI/API job broker; this project is a Kubernetes-native resource substrate that can also be reused by AIBrix batch.
 
+For the end-to-end reusable mechanism across VK, batch and online serving, see [GPU Resource Mechanism](gpu-resource-mechanism.md).
+
 ## Evidence Base
 
 - SkyPilot's NSDI 2023 paper frames the core system as an intercloud broker with a catalog, tracker, optimizer, provisioner and executor. The broker optimizes placement against user requirements, cloud availability and prices. Source: [SkyPilot: An Intercloud Broker for Sky Computing](https://www.usenix.org/system/files/nsdi23-yang-zongheng.pdf).
@@ -178,11 +180,12 @@ RunPod exposes cost fields in Pod responses and billing history; Lambda exposes 
 
 Current code maps:
 
+- Placement-selected offer price into `core.CreateCandidate.EstimatedHourlyCost`, then into `CloudPodBinding.status.cost` with source `placement.offer`.
 - RunPod `adjustedCostPerHr` / `costPerHr` into `RemoteResource.HourlyCost`.
 - Lambda `instance_type.price_cents_per_hour` into `RemoteResource.HourlyCost`.
+- Provider-observed positive `RemoteResource.HourlyCost` overrides the placement estimate.
 - `pkg/resource.EstimateBurnRate` into elapsed spend and projected total.
-
-Prometheus export is still a follow-up.
+- `pkg/vk` exposes `gpu_burst_node_current_burn_rate_usd_per_hour` from persisted binding cost.
 
 ### 5. Recovery Without Managed Jobs
 
