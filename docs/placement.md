@@ -20,6 +20,8 @@ The Phase 5 placement planner is a provider-neutral mechanism. It does not repla
 
 Provider offers come from the `resource.OfferCatalog` interface. Provider-specific code implements `ProviderOfferSource`; `CompositeCatalog` merges multiple sources and preserves per-provider catalog errors. This keeps catalog refresh, capacity probing and price collection separate from the risk/cost planner.
 
+For providers without a first-class catalog API, such as RunPod Pods, the code uses `resource.ObservedCatalog` as the normalized input surface. Static bootstrap rows, provider list responses, capacity probes, billing observations and failure feedback can all be recorded as `OfferObservation` entries with a TTL. The planner only consumes fresh normalized offers; it does not need to know whether the signal came from a catalog API or from operational observations.
+
 The planner can now drive lifecycle creation through a narrow hook:
 
 - `core.CreateCandidatePlanner` is the provider-neutral lifecycle interface.
@@ -92,7 +94,7 @@ Every provider create/get/delete failure must be reduced to a stable error class
 - No custom Kubernetes scheduler.
 - No Kueue integration.
 - No CRD policy API.
-- No dynamic provider catalog refresh loop in the current code.
+- No dynamic provider catalog refresh/probe loop in the current code.
 - No historical provider scorecard in the current code.
 - No cross-workload retry/backoff cache in the current code.
 - No survival-analysis lifetime predictor in the current code.

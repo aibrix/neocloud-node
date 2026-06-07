@@ -160,6 +160,7 @@ Current code hooks:
 - `core.ProviderError` and `core.ClassifyError` normalize RunPod/Lambda/API failures into stable classes.
 - `resource.BlockedOffersFromAttempts` converts recent fallback-eligible attempts into provider/location cooldown blocks.
 - `resource.Policy.WithFailureSignals` lets VK, AIBrix batch or a future resource manager merge those cooldowns into a placement policy without depending on provider-specific code.
+- `resource.ObservedCatalog` provides the catalog substitute for providers like RunPod where inventory is assembled from static bootstrap rows, list calls, probes, billing and failure observations instead of one official catalog endpoint.
 
 This is intentionally scoped to short-term capacity freshness. Longer-lived provider scoring should be a separate scorecard fed by metrics, not hidden inside adapter code.
 
@@ -236,7 +237,7 @@ Provider adapters own launch/delete/list/status. Strategy components own offer s
 ## Implementation Order
 
 1. Durable attempts, provider error classes and fallback lineage.
-2. Normalized offer model, catalog interface and deterministic planner.
+2. Normalized offer model, catalog interface, observed catalog and deterministic planner.
 3. RunPod and Lambda cost extraction for launch-time burn-rate estimates.
 4. SkyNomad-inspired deadline, cold-start, expected-lifetime and migration-cost planner inputs.
 5. Recent attempt to cooldown signal bridge for capacity/rate-limit/transient/timeout failures.
