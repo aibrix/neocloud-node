@@ -255,6 +255,7 @@ type podResponse struct {
 	Ports             []string       `json:"ports"`
 	PublicIP          string         `json:"publicIp"`
 	PortMappings      map[string]int `json:"portMappings"`
+	Interruptible     bool           `json:"interruptible"`
 	GPU               struct {
 		Count       int    `json:"count"`
 		DisplayName string `json:"displayName"`
@@ -314,6 +315,7 @@ type PodFilter struct {
 }
 
 func remoteFromPod(pod podResponse, idempotencyKey string, request core.WorkloadRequest) core.RemoteResource {
+	request = requestWithPodShape(request, pod)
 	return core.RemoteResource{
 		ID:             pod.ID,
 		IdempotencyKey: idempotencyKey,
@@ -324,6 +326,44 @@ func remoteFromPod(pod podResponse, idempotencyKey string, request core.Workload
 		HourlyCost:     hourlyCost(pod),
 		CostSource:     costSource(pod),
 	}
+}
+
+func requestWithPodShape(request core.WorkloadRequest, pod podResponse) core.WorkloadRequest {
+	if request.Provider == "" {
+		request.Provider = providerName
+	}
+	if request.GPUCount <= 0 {
+		request.GPUCount = pod.GPU.Count
+	}
+	if strings.TrimSpace(request.GPUType) == "" {
+		request.GPUType = strings.TrimSpace(pod.GPU.DisplayName)
+	}
+	if strings.TrimSpace(request.RegionHint) == "" {
+		request.RegionHint = firstNonEmpty(pod.Machine.DataCenterID, pod.NetworkVolume.DataCenterID)
+	}
+	if strings.TrimSpace(request.MarketType) == "" {
+		if pod.Interruptible {
+			request.MarketType = core.MarketTypeSpot
+		} else {
+			request.MarketType = core.MarketTypeOnDemand
+		}
+	}
+	if request.ProviderHints == nil {
+		request.ProviderHints = map[string]string{}
+	}
+	if request.RegionHint != "" && request.ProviderHints[core.AnnotationRunPodDataCenterIDs] == "" {
+		request.ProviderHints[core.AnnotationRunPodDataCenterIDs] = request.RegionHint
+	}
+	if pod.TemplateID != "" && request.ProviderHints[core.AnnotationRunPodTemplateID] == "" {
+		request.ProviderHints[core.AnnotationRunPodTemplateID] = pod.TemplateID
+	}
+	if pod.NetworkVolume.ID != "" && request.ProviderHints[core.AnnotationRunPodNetworkVolumeID] == "" {
+		request.ProviderHints[core.AnnotationRunPodNetworkVolumeID] = pod.NetworkVolume.ID
+	}
+	if len(request.ProviderHints) == 0 {
+		request.ProviderHints = nil
+	}
+	return request
 }
 
 func phaseFromDesiredStatus(status string) core.RemotePhase {
@@ -409,6 +449,15 @@ func providerHintOrDefault(request core.WorkloadRequest, key string, fallback st
 		return value
 	}
 	return fallback
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func splitCSV(raw string) []string {

@@ -179,6 +179,48 @@ func TestClientGetMapsLambdaStatus(t *testing.T) {
 	}
 }
 
+func TestClientListBackfillsRemoteRequestShape(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("method = %s, want GET", r.Method)
+		}
+		if r.URL.Path != "/instances" {
+			t.Fatalf("path = %s, want /instances", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"data":[{
+			"id":"lambda-1",
+			"name":"gpu-burst-node-default-pod-123",
+			"status":"active",
+			"region":{"name":"us-west-1"},
+			"instance_type":{
+				"name":"gpu_1x_a10",
+				"gpu_description":"A10",
+				"price_cents_per_hour":74,
+				"specs":{"gpus":1}
+			}
+		}]}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{BaseURL: server.URL, APIKey: "lambda-key"})
+	remotes, err := client.ListRemoteResources(context.Background())
+	if err != nil {
+		t.Fatalf("ListRemoteResources() error = %v", err)
+	}
+	if len(remotes) != 1 {
+		t.Fatalf("remotes = %#v, want one remote", remotes)
+	}
+	request := remotes[0].Request
+	if request.Provider != providerName || request.GPUType != "A10" || request.GPUCount != 1 || request.RegionHint != "us-west-1" {
+		t.Fatalf("request shape = %#v, want lambda A10 in us-west-1", request)
+	}
+	if request.ProviderHints[core.AnnotationLambdaInstanceType] != "gpu_1x_a10" {
+		t.Fatalf("provider hints = %#v, want lambda instance type", request.ProviderHints)
+	}
+}
+
 func TestClientDeleteTreatsNotFoundAsSuccess(t *testing.T) {
 	t.Parallel()
 

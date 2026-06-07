@@ -360,9 +360,26 @@ func remoteFromInstance(instance instance) core.RemoteResource {
 		ExternalName: instance.Name,
 		Provider:     providerName,
 		Phase:        phaseFromStatus(instance.Status),
+		Request:      requestFromInstance(instance),
 		HourlyCost:   float64(instance.InstanceType.PriceCentsPerHour) / 100.0,
 		CostSource:   costSource(instance),
 	}
+}
+
+func requestFromInstance(instance instance) core.WorkloadRequest {
+	request := core.WorkloadRequest{
+		Provider:   providerName,
+		RegionHint: strings.TrimSpace(instance.Region.Name),
+		GPUType:    firstNonEmpty(instance.InstanceType.GPUDescription, instance.InstanceType.Name),
+		GPUCount:   instance.InstanceType.Specs.GPUs,
+		MarketType: core.MarketTypeOnDemand,
+	}
+	if instance.InstanceType.Name != "" {
+		request.ProviderHints = map[string]string{
+			core.AnnotationLambdaInstanceType: instance.InstanceType.Name,
+		}
+	}
+	return request
 }
 
 func costSource(instance instance) string {

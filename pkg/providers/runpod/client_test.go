@@ -296,6 +296,48 @@ func TestClientGetMapsDesiredStatus(t *testing.T) {
 	}
 }
 
+func TestClientListBackfillsRemoteRequestShape(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("method = %s, want GET", r.Method)
+		}
+		if r.URL.Path != "/pods" {
+			t.Fatalf("path = %s, want /pods", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`[{
+			"id": "runpod-1",
+			"name": "gpu-burst-node-default-pod-123",
+			"desiredStatus": "RUNNING",
+			"interruptible": true,
+			"costPerHr": 0.74,
+			"gpu": {"count": 1, "displayName": "A40"},
+			"machine": {"dataCenterId": "US-TX-3"}
+		}]`))
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{BaseURL: server.URL, APIKey: "test-token"})
+	remotes, err := client.ListRemoteResources(context.Background())
+	if err != nil {
+		t.Fatalf("ListRemoteResources() error = %v", err)
+	}
+	if len(remotes) != 1 {
+		t.Fatalf("remotes = %#v, want one remote", remotes)
+	}
+	request := remotes[0].Request
+	if request.Provider != providerName || request.GPUType != "A40" || request.GPUCount != 1 || request.RegionHint != "US-TX-3" {
+		t.Fatalf("request shape = %#v, want runpod A40 in US-TX-3", request)
+	}
+	if request.MarketType != core.MarketTypeSpot {
+		t.Fatalf("market type = %q, want spot", request.MarketType)
+	}
+	if request.ProviderHints[core.AnnotationRunPodDataCenterIDs] != "US-TX-3" {
+		t.Fatalf("provider hints = %#v, want datacenter hint", request.ProviderHints)
+	}
+}
+
 func TestClientDeleteTreatsNotFoundAsSuccess(t *testing.T) {
 	t.Parallel()
 
