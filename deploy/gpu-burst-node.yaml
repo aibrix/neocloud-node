@@ -209,6 +209,9 @@ spec:
             - --advertise-pod-capacity=$(GPU_BURST_ADVERTISE_POD_CAPACITY)
             - --orphan-sweeper-interval=$(GPU_BURST_ORPHAN_SWEEPER_INTERVAL)
             - --orphan-sweeper-dry-run=$(GPU_BURST_ORPHAN_SWEEPER_DRY_RUN)
+            - --placement-offers=$(GPU_BURST_PLACEMENT_OFFERS)
+            - --placement-offer-ttl=$(GPU_BURST_PLACEMENT_OFFER_TTL)
+            - --placement-signal-cooldown=$(GPU_BURST_PLACEMENT_SIGNAL_COOLDOWN)
           env:
             - name: GPU_BURST_NODE_NAME
               value: aibrix-gpu-burst
@@ -218,6 +221,12 @@ spec:
               value: "100"
             - name: GPU_BURST_ADVERTISE_POD_CAPACITY
               value: "1000"
+            - name: GPU_BURST_PLACEMENT_OFFERS
+              value: ""
+            - name: GPU_BURST_PLACEMENT_OFFER_TTL
+              value: 24h
+            - name: GPU_BURST_PLACEMENT_SIGNAL_COOLDOWN
+              value: 5m
             - name: GPU_BURST_ORPHAN_SWEEPER_INTERVAL
               value: "0"
             - name: GPU_BURST_ORPHAN_SWEEPER_DRY_RUN

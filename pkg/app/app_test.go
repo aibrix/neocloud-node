@@ -16,6 +16,7 @@ import (
 	kubefake "k8s.io/client-go/kubernetes/fake"
 
 	"github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/core"
+	burstresource "github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/resource"
 )
 
 func TestParseOptionsDefaultsToFakeProviderAndKubernetesStore(t *testing.T) {
@@ -154,6 +155,88 @@ func TestParseOptionsReadsOrphanSweeperOptions(t *testing.T) {
 	}
 	if options.StatusSyncInterval != 3*time.Second {
 		t.Fatalf("StatusSyncInterval = %s, want 3s", options.StatusSyncInterval)
+	}
+}
+
+func TestParseOptionsReadsPlacementOptions(t *testing.T) {
+	env := mapEnv(map[string]string{
+		"GPU_BURST_PLACEMENT_OFFERS":    "provider=runpod,location=US-TX-3,gpu=A40,count=1,market=on-demand,price=0.74",
+		"GPU_BURST_PLACEMENT_OFFER_TTL": "30m",
+	})
+
+	options, err := ParseOptions([]string{
+		"--placement-signal-cooldown=2m",
+	}, env)
+	if err != nil {
+		t.Fatalf("ParseOptions() error = %v", err)
+	}
+	if options.PlacementOffers == "" {
+		t.Fatal("PlacementOffers is empty, want env value")
+	}
+	if options.PlacementOfferTTL != 30*time.Minute {
+		t.Fatalf("PlacementOfferTTL = %s, want 30m", options.PlacementOfferTTL)
+	}
+	if options.PlacementSignalCooldown != 2*time.Minute {
+		t.Fatalf("PlacementSignalCooldown = %s, want flag override", options.PlacementSignalCooldown)
+	}
+}
+
+func TestParsePlacementOffers(t *testing.T) {
+	offers, err := parsePlacementOffers("provider=runpod,location=US-TX-3,gpu=A40,count=1,market=on-demand,price=0.74; provider=lambda,location=us-west-1,gpu=A10,count=1,market=spot,price=1.10,available=false,capabilities=cloud-init|public-ip")
+	if err != nil {
+		t.Fatalf("parsePlacementOffers() error = %v", err)
+	}
+	if len(offers) != 2 {
+		t.Fatalf("offers = %#v, want two", offers)
+	}
+	if offers[0].Provider != "runpod" || offers[0].Location != "US-TX-3" || offers[0].GPUType != "A40" || offers[0].GPUCount != 1 || offers[0].HourlyPrice != 0.74 || !offers[0].Available {
+		t.Fatalf("first offer = %#v, want runpod A40", offers[0])
+	}
+	if offers[1].Market != burstresource.MarketSpot || offers[1].Available {
+		t.Fatalf("second offer market/availability = %#v, want unavailable spot", offers[1])
+	}
+	if !offers[1].Capabilities[burstresource.CapabilityCloudInit] || !offers[1].Capabilities[burstresource.CapabilityPublicIP] {
+		t.Fatalf("second offer capabilities = %#v, want cloud-init and public-ip", offers[1].Capabilities)
+	}
+}
+
+func TestNewCandidatePlannerFromBootstrapOffers(t *testing.T) {
+	options, err := ParseOptions([]string{
+		"--provider=runpod",
+		"--runpod-api-key=runpod-key",
+		"--fallback-providers=lambda",
+		"--lambda-api-key=lambda-key",
+		"--placement-offers=provider=runpod,location=US-TX-3,gpu=A40,count=1,market=on-demand,price=0.74;provider=lambda,location=us-west-1,gpu=A40,count=1,market=on-demand,price=0.90",
+	}, emptyEnv)
+	if err != nil {
+		t.Fatalf("ParseOptions() error = %v", err)
+	}
+
+	planner, err := newCandidatePlanner(options, []string{ProviderLambda})
+	if err != nil {
+		t.Fatalf("newCandidatePlanner() error = %v", err)
+	}
+	if planner == nil {
+		t.Fatal("newCandidatePlanner() = nil, want planner")
+	}
+	candidates, err := planner.CreateCandidates(context.Background(), core.Binding{
+		Namespace:   "default",
+		Name:        "train-job",
+		WorkloadUID: "pod-123",
+		Request: core.WorkloadRequest{
+			Image:      "example.com/train:latest",
+			GPUCount:   1,
+			GPUType:    "A40",
+			MaxPrice:   "1.00",
+			MarketType: core.MarketTypeOnDemand,
+			Provider:   ProviderRunPod,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateCandidates() error = %v", err)
+	}
+	if len(candidates) != 2 || candidates[0].Provider != ProviderRunPod || candidates[1].Provider != ProviderLambda {
+		t.Fatalf("candidates = %#v, want runpod then lambda", candidates)
 	}
 }
 

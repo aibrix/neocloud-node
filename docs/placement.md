@@ -22,6 +22,14 @@ Provider offers come from the `resource.OfferCatalog` interface. Provider-specif
 
 For providers without a first-class catalog API, such as RunPod Pods, the code uses `resource.ObservedCatalog` as the normalized input surface. Static bootstrap rows, provider list responses, capacity probes, billing observations and failure feedback can all be recorded as `OfferObservation` entries with a TTL. The planner only consumes fresh normalized offers; it does not need to know whether the signal came from a catalog API or from operational observations.
 
+Bootstrap rows can be supplied to the binary through `--placement-offers` or `GPU_BURST_PLACEMENT_OFFERS`:
+
+```text
+provider=runpod,location=US-TX-3,gpu=A40,count=1,market=on-demand,price=0.74;provider=lambda,location=us-west-1,gpu=A10,count=1,market=on-demand,price=1.10,capabilities=cloud-init|public-ip
+```
+
+`--placement-offer-ttl` controls how long those rows stay fresh, and `--placement-signal-cooldown` controls how long recent capacity/rate-limit/transient failures block a provider/location candidate.
+
 The planner can now drive lifecycle creation through a narrow hook:
 
 - `core.CreateCandidatePlanner` is the provider-neutral lifecycle interface.

@@ -20,7 +20,7 @@ import (
 
 	"github.com/virtual-kubelet/virtual-kubelet/node/nodeutil"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
+	kresource "k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -32,6 +32,7 @@ import (
 	"github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/core"
 	lambdacloud "github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/providers/lambda"
 	"github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/providers/runpod"
+	burstresource "github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/resource"
 	"github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/runner"
 	kstore "github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/store/kubernetes"
 	"github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/vk"
@@ -88,6 +89,10 @@ type Options struct {
 	OrphanSweeperDryRun   bool
 
 	StatusSyncInterval time.Duration
+
+	PlacementOffers         string
+	PlacementOfferTTL       time.Duration
+	PlacementSignalCooldown time.Duration
 }
 
 func ParseOptions(args []string, getenv func(string) string) (Options, error) {
@@ -131,6 +136,10 @@ func ParseOptions(args []string, getenv func(string) string) (Options, error) {
 		OrphanSweeperInterval: durationEnv(getenv, "GPU_BURST_ORPHAN_SWEEPER_INTERVAL", 0),
 		OrphanSweeperDryRun:   boolEnv(getenv, "GPU_BURST_ORPHAN_SWEEPER_DRY_RUN", true),
 		StatusSyncInterval:    durationEnv(getenv, "GPU_BURST_STATUS_SYNC_INTERVAL", 15*time.Second),
+
+		PlacementOffers:         envOr(getenv, "GPU_BURST_PLACEMENT_OFFERS", ""),
+		PlacementOfferTTL:       durationEnv(getenv, "GPU_BURST_PLACEMENT_OFFER_TTL", 24*time.Hour),
+		PlacementSignalCooldown: durationEnv(getenv, "GPU_BURST_PLACEMENT_SIGNAL_COOLDOWN", burstresource.DefaultFailureSignalCooldown),
 	}
 
 	fs := flag.NewFlagSet("gpu-burst-node", flag.ContinueOnError)
@@ -164,6 +173,9 @@ func ParseOptions(args []string, getenv func(string) string) (Options, error) {
 	fs.DurationVar(&options.OrphanSweeperInterval, "orphan-sweeper-interval", options.OrphanSweeperInterval, "periodic orphan sweeper interval; 0 disables it")
 	fs.BoolVar(&options.OrphanSweeperDryRun, "orphan-sweeper-dry-run", options.OrphanSweeperDryRun, "report orphaned provider resources without deleting them")
 	fs.DurationVar(&options.StatusSyncInterval, "status-sync-interval", options.StatusSyncInterval, "periodic remote status sync interval; 0 disables it")
+	fs.StringVar(&options.PlacementOffers, "placement-offers", options.PlacementOffers, "semicolon-separated bootstrap placement offers as key=value CSV records")
+	fs.DurationVar(&options.PlacementOfferTTL, "placement-offer-ttl", options.PlacementOfferTTL, "TTL for bootstrap placement offers")
+	fs.DurationVar(&options.PlacementSignalCooldown, "placement-signal-cooldown", options.PlacementSignalCooldown, "cooldown for recent provider attempts used by placement")
 
 	if err := fs.Parse(args); err != nil {
 		return Options{}, err
@@ -215,6 +227,10 @@ func NewNode(ctx context.Context, options Options, kubeClient kubernetes.Interfa
 	if err != nil {
 		return nil, err
 	}
+	candidatePlanner, err := newCandidatePlanner(options, fallbackOrder)
+	if err != nil {
+		return nil, err
+	}
 	if err := startOrphanSweeper(ctx, store, adapter, options); err != nil {
 		return nil, err
 	}
@@ -227,6 +243,7 @@ func NewNode(ctx context.Context, options Options, kubeClient kubernetes.Interfa
 		Adapter:          adapter,
 		FallbackAdapters: fallbackAdapters,
 		FallbackOrder:    fallbackOrder,
+		CandidatePlanner: candidatePlanner,
 		LaunchGuard:      launchGuard(options),
 		NodeName:         options.NodeName,
 		EventRecorder: newEventRecorder(kubeClient,
@@ -340,6 +357,152 @@ func newFallbackProviderAdapters(options Options) (map[string]core.ProviderAdapt
 		adapters[provider] = adapter
 	}
 	return adapters, fallbackOrder, nil
+}
+
+func newCandidatePlanner(options Options, fallbackOrder []string) (core.CreateCandidatePlanner, error) {
+	offers, err := parsePlacementOffers(options.PlacementOffers)
+	if err != nil {
+		return nil, err
+	}
+	if len(offers) == 0 {
+		return nil, nil
+	}
+
+	catalog := burstresource.NewObservedCatalog(burstresource.ObservedCatalogOptions{
+		DefaultTTL: options.PlacementOfferTTL,
+	})
+	now := time.Now().UTC()
+	for _, offer := range offers {
+		catalog.Record(burstresource.OfferObservation{
+			Offer:      offer,
+			ObservedAt: now,
+			TTL:        options.PlacementOfferTTL,
+			Source:     "bootstrap",
+		})
+	}
+
+	providerOrder := append([]string{options.Provider}, fallbackOrder...)
+	return burstresource.LifecycleCandidatePlanner{
+		Catalog: catalog,
+		Policy: burstresource.Policy{
+			ProviderOrder: providerOrder,
+		},
+		SignalPolicy: burstresource.FailureSignalPolicy{
+			Cooldown: options.PlacementSignalCooldown,
+		},
+	}, nil
+}
+
+func parsePlacementOffers(raw string) ([]burstresource.Offer, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	records := strings.Split(raw, ";")
+	offers := make([]burstresource.Offer, 0, len(records))
+	for _, record := range records {
+		record = strings.TrimSpace(record)
+		if record == "" {
+			continue
+		}
+		offer, err := parsePlacementOffer(record)
+		if err != nil {
+			return nil, err
+		}
+		offers = append(offers, offer)
+	}
+	return offers, nil
+}
+
+func parsePlacementOffer(record string) (burstresource.Offer, error) {
+	offer := burstresource.Offer{
+		GPUCount:  1,
+		Market:    burstresource.MarketOnDemand,
+		Available: true,
+	}
+	for _, field := range strings.Split(record, ",") {
+		field = strings.TrimSpace(field)
+		if field == "" {
+			continue
+		}
+		key, value, ok := strings.Cut(field, "=")
+		if !ok {
+			return burstresource.Offer{}, fmt.Errorf("invalid placement offer field %q", field)
+		}
+		key = strings.ToLower(strings.TrimSpace(key))
+		value = strings.TrimSpace(value)
+		switch key {
+		case "id":
+			offer.ID = value
+		case "provider":
+			offer.Provider = strings.ToLower(value)
+		case "location", "region", "datacenter", "zone":
+			offer.Location = value
+		case "gpu", "gputype", "gpu_type", "accelerator":
+			offer.GPUType = value
+		case "gpumemory", "gpu_memory", "memory":
+			offer.GPUMemory = value
+		case "count", "gpucount", "gpu_count":
+			count, err := strconv.Atoi(value)
+			if err != nil || count <= 0 {
+				return burstresource.Offer{}, fmt.Errorf("invalid placement offer gpu count %q", value)
+			}
+			offer.GPUCount = count
+		case "market":
+			offer.Market = burstresource.Market(strings.ToLower(value))
+		case "price", "hourly", "hourlyprice", "hourly_price":
+			price, err := strconv.ParseFloat(value, 64)
+			if err != nil || price < 0 {
+				return burstresource.Offer{}, fmt.Errorf("invalid placement offer price %q", value)
+			}
+			offer.HourlyPrice = price
+		case "available":
+			available, err := strconv.ParseBool(value)
+			if err != nil {
+				return burstresource.Offer{}, fmt.Errorf("invalid placement offer availability %q", value)
+			}
+			offer.Available = available
+		case "capabilities":
+			capabilities, err := parsePlacementCapabilities(value)
+			if err != nil {
+				return burstresource.Offer{}, err
+			}
+			offer.Capabilities = capabilities
+		default:
+			return burstresource.Offer{}, fmt.Errorf("unknown placement offer key %q", key)
+		}
+	}
+	if strings.TrimSpace(offer.Provider) == "" {
+		return burstresource.Offer{}, errors.New("placement offer provider is required")
+	}
+	if strings.TrimSpace(offer.GPUType) == "" {
+		return burstresource.Offer{}, errors.New("placement offer gpu type is required")
+	}
+	return offer, nil
+}
+
+func parsePlacementCapabilities(raw string) (map[burstresource.Capability]bool, error) {
+	capabilities := make(map[burstresource.Capability]bool)
+	for _, part := range strings.Split(raw, "|") {
+		value := strings.TrimSpace(part)
+		if value == "" {
+			continue
+		}
+		capability := burstresource.Capability(value)
+		switch capability {
+		case burstresource.CapabilityPorts,
+			burstresource.CapabilityRegistryAuth,
+			burstresource.CapabilityNetworkVolume,
+			burstresource.CapabilityCloudInit,
+			burstresource.CapabilityPublicIP:
+			capabilities[capability] = true
+		default:
+			return nil, fmt.Errorf("unknown placement offer capability %q", value)
+		}
+	}
+	if len(capabilities) == 0 {
+		return nil, nil
+	}
+	return capabilities, nil
 }
 
 func providerAdapterFor(options Options, provider string) (core.ProviderAdapter, error) {
@@ -589,6 +752,12 @@ func validateOptions(options Options) error {
 	if options.OrphanSweeperInterval < 0 {
 		return errors.New("orphan sweeper interval cannot be negative")
 	}
+	if options.PlacementOfferTTL < 0 {
+		return errors.New("placement offer ttl cannot be negative")
+	}
+	if options.PlacementSignalCooldown < 0 {
+		return errors.New("placement signal cooldown cannot be negative")
+	}
 	return nil
 }
 
@@ -638,16 +807,16 @@ func configureNodeSpec(config *nodeutil.NodeConfig, options Options) error {
 
 	config.NodeSpec.Spec.Taints = upsertProviderTaint(config.NodeSpec.Spec.Taints, options.Provider)
 
-	cpu, err := resource.ParseQuantity(options.AdvertiseCPU)
+	cpu, err := kresource.ParseQuantity(options.AdvertiseCPU)
 	if err != nil {
 		return fmt.Errorf("invalid advertised CPU %q: %w", options.AdvertiseCPU, err)
 	}
-	memory, err := resource.ParseQuantity(options.AdvertiseMemory)
+	memory, err := kresource.ParseQuantity(options.AdvertiseMemory)
 	if err != nil {
 		return fmt.Errorf("invalid advertised memory %q: %w", options.AdvertiseMemory, err)
 	}
-	gpu := resource.MustParse(strconv.Itoa(options.AdvertiseGPUCount))
-	pods := resource.MustParse(strconv.Itoa(options.AdvertisePodCapacity))
+	gpu := kresource.MustParse(strconv.Itoa(options.AdvertiseGPUCount))
+	pods := kresource.MustParse(strconv.Itoa(options.AdvertisePodCapacity))
 
 	capacity := corev1.ResourceList{
 		corev1.ResourceCPU:                     cpu,

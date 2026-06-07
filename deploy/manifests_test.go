@@ -25,6 +25,9 @@ func TestBaseManifestContainsRunnableControlPlaneResources(t *testing.T) {
 	requireContains(t, args, "--node-name=$(GPU_BURST_NODE_NAME)")
 	requireContains(t, args, "--orphan-sweeper-interval=$(GPU_BURST_ORPHAN_SWEEPER_INTERVAL)")
 	requireContains(t, args, "--orphan-sweeper-dry-run=$(GPU_BURST_ORPHAN_SWEEPER_DRY_RUN)")
+	requireContains(t, args, "--placement-offers=$(GPU_BURST_PLACEMENT_OFFERS)")
+	requireContains(t, args, "--placement-offer-ttl=$(GPU_BURST_PLACEMENT_OFFER_TTL)")
+	requireContains(t, args, "--placement-signal-cooldown=$(GPU_BURST_PLACEMENT_SIGNAL_COOLDOWN)")
 }
 
 func TestCRDHasStatusSubresourceAndPrinterColumns(t *testing.T) {
