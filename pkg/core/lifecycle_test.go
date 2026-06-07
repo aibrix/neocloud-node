@@ -261,6 +261,136 @@ func TestLifecycleServiceUsesSelectedProviderForSyncAndDelete(t *testing.T) {
 	}
 }
 
+func TestLifecycleServiceUsesCreateCandidatePlanner(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := NewMemoryBindingStore()
+	runpod := &createFailureProvider{
+		provider: "runpod",
+		err: &ProviderError{
+			Provider:  "runpod",
+			Operation: "create",
+			Class:     ErrorClassCapacity,
+			Message:   "no runpod capacity",
+		},
+	}
+	lambda := NewFakeProvider("lambda")
+	service := NewLifecycleService(
+		store,
+		runpod,
+		WithFallbackProviders(map[string]ProviderAdapter{
+			"runpod": runpod,
+			"lambda": lambda,
+		}, []string{"runpod"}),
+		WithCreateCandidatePlanner(staticCreateCandidatePlanner{
+			candidates: []CreateCandidate{
+				{
+					Provider: "lambda",
+					Request: WorkloadRequest{
+						Image:      "example.com/train:latest",
+						GPUCount:   1,
+						GPUType:    "A10",
+						Provider:   "lambda",
+						RegionHint: "us-west-1",
+					},
+				},
+				{
+					Provider: "runpod",
+					Request: WorkloadRequest{
+						Image:      "example.com/train:latest",
+						GPUCount:   1,
+						GPUType:    "A10",
+						Provider:   "runpod",
+						RegionHint: "US-TX-3",
+					},
+				},
+			},
+		}),
+	)
+
+	binding, err := service.EnsureCreated(ctx, Binding{
+		Namespace:   "default",
+		Name:        "train-job",
+		WorkloadUID: "pod-123",
+		Request: WorkloadRequest{
+			Image:      "example.com/train:latest",
+			GPUCount:   1,
+			GPUType:    "A10",
+			Provider:   "runpod",
+			RegionHint: "US-TX-3",
+		},
+	})
+	if err != nil {
+		t.Fatalf("EnsureCreated() error = %v", err)
+	}
+	if binding.Placement.Provider != "lambda" {
+		t.Fatalf("placement provider = %q, want lambda", binding.Placement.Provider)
+	}
+	if binding.Placement.Region != "us-west-1" {
+		t.Fatalf("placement region = %q, want us-west-1", binding.Placement.Region)
+	}
+	if lambda.CreateCount() != 1 {
+		t.Fatalf("lambda CreateCount = %d, want planner-selected lambda create", lambda.CreateCount())
+	}
+}
+
+func TestLifecycleServiceRecordsCreateCandidatePlannerFailure(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := NewMemoryBindingStore()
+	provider := NewFakeProvider("runpod")
+	service := NewLifecycleService(
+		store,
+		provider,
+		WithCreateCandidatePlanner(staticCreateCandidatePlanner{
+			err: &ProviderError{
+				Provider:  "runpod",
+				Operation: "placement",
+				Class:     ErrorClassCapacity,
+				Message:   "no feasible offers",
+			},
+		}),
+	)
+
+	_, err := service.EnsureCreated(ctx, Binding{
+		Namespace:   "default",
+		Name:        "train-job",
+		WorkloadUID: "pod-123",
+		Request: WorkloadRequest{
+			Image:      "example.com/train:latest",
+			GPUCount:   1,
+			Provider:   "runpod",
+			RegionHint: "US-TX-3",
+		},
+	})
+	if err == nil {
+		t.Fatal("EnsureCreated() error = nil, want planner failure")
+	}
+	if provider.CreateCount() != 0 {
+		t.Fatalf("provider CreateCount = %d, want no remote create after planner failure", provider.CreateCount())
+	}
+
+	stored, getErr := store.GetByWorkloadUID(ctx, "default", "pod-123")
+	if getErr != nil {
+		t.Fatalf("GetByWorkloadUID() error = %v", getErr)
+	}
+	if stored.Phase != BindingFailed {
+		t.Fatalf("phase = %s, want Failed", stored.Phase)
+	}
+	if len(stored.Attempts) != 1 {
+		t.Fatalf("attempts = %#v, want planner failure attempt", stored.Attempts)
+	}
+	if stored.Attempts[0].Reason != "PlacementFailed" || stored.Attempts[0].Class != ErrorClassCapacity {
+		t.Fatalf("attempt = %#v, want capacity placement failure", stored.Attempts[0])
+	}
+	condition := FindCondition(stored.Conditions, ConditionCapacity)
+	if condition == nil || condition.Status != ConditionTrue {
+		t.Fatalf("capacity condition = %#v, want true condition", condition)
+	}
+}
+
 func TestRecordRunnerStatusMarksBindingSucceeded(t *testing.T) {
 	t.Parallel()
 
@@ -642,4 +772,16 @@ func (p *trackingProvider) Get(ctx context.Context, remoteID string) (RemoteReso
 func (p *trackingProvider) Delete(ctx context.Context, remoteID string) error {
 	p.deleteCount++
 	return p.ProviderAdapter.Delete(ctx, remoteID)
+}
+
+type staticCreateCandidatePlanner struct {
+	candidates []CreateCandidate
+	err        error
+}
+
+func (p staticCreateCandidatePlanner) CreateCandidates(ctx context.Context, binding Binding) ([]CreateCandidate, error) {
+	if p.err != nil {
+		return nil, p.err
+	}
+	return append([]CreateCandidate(nil), p.candidates...), nil
 }

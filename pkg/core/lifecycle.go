@@ -8,14 +8,24 @@ import (
 )
 
 type LifecycleService struct {
-	store         BindingStore
-	provider      ProviderAdapter
-	providers     map[string]ProviderAdapter
-	fallbackOrder []string
-	guard         *LaunchGuard
+	store            BindingStore
+	provider         ProviderAdapter
+	providers        map[string]ProviderAdapter
+	fallbackOrder    []string
+	guard            *LaunchGuard
+	candidatePlanner CreateCandidatePlanner
 }
 
 type LifecycleOption func(*LifecycleService)
+
+type CreateCandidate struct {
+	Provider string
+	Request  WorkloadRequest
+}
+
+type CreateCandidatePlanner interface {
+	CreateCandidates(ctx context.Context, binding Binding) ([]CreateCandidate, error)
+}
 
 func NewLifecycleService(store BindingStore, provider ProviderAdapter, options ...LifecycleOption) *LifecycleService {
 	service := &LifecycleService{
@@ -46,6 +56,12 @@ func WithFallbackProviders(providers map[string]ProviderAdapter, fallbackOrder [
 			}
 		}
 		service.fallbackOrder = append([]string(nil), fallbackOrder...)
+	}
+}
+
+func WithCreateCandidatePlanner(planner CreateCandidatePlanner) LifecycleOption {
+	return func(service *LifecycleService) {
+		service.candidatePlanner = planner
 	}
 }
 
@@ -95,7 +111,11 @@ func (s *LifecycleService) EnsureCreated(ctx context.Context, desired Binding) (
 
 func (s *LifecycleService) createWithFallback(ctx context.Context, binding *Binding) (RemoteResource, WorkloadRequest, error) {
 	var lastErr error
-	candidates := s.createCandidates(*binding)
+	candidates, err := s.createCandidates(ctx, *binding)
+	if err != nil {
+		recordProviderFailure(binding, binding.Request.Provider, binding.Request.RegionHint, "PlacementFailed", err)
+		return RemoteResource{}, binding.Request, err
+	}
 	for index, candidate := range candidates {
 		adapter := s.providerFor(candidate.Provider)
 		if adapter == nil {
@@ -263,12 +283,11 @@ func recordProviderFailure(binding *Binding, provider string, region string, rea
 	})
 }
 
-type createCandidate struct {
-	Provider string
-	Request  WorkloadRequest
-}
+func (s *LifecycleService) createCandidates(ctx context.Context, binding Binding) ([]CreateCandidate, error) {
+	if s.candidatePlanner != nil {
+		return s.candidatePlanner.CreateCandidates(ctx, binding)
+	}
 
-func (s *LifecycleService) createCandidates(binding Binding) []createCandidate {
 	providers := make([]string, 0, 1+len(s.fallbackOrder))
 	seen := map[string]bool{}
 	add := func(provider string) {
@@ -286,18 +305,18 @@ func (s *LifecycleService) createCandidates(binding Binding) []createCandidate {
 		providers = append(providers, "")
 	}
 
-	candidates := make([]createCandidate, 0, len(providers))
+	candidates := make([]CreateCandidate, 0, len(providers))
 	for _, provider := range providers {
 		request := binding.Request
 		if provider != "" {
 			request.Provider = provider
 		}
-		candidates = append(candidates, createCandidate{
+		candidates = append(candidates, CreateCandidate{
 			Provider: provider,
 			Request:  request,
 		})
 	}
-	return candidates
+	return candidates, nil
 }
 
 func (s *LifecycleService) providerForBinding(binding Binding) ProviderAdapter {
