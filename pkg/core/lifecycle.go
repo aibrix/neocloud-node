@@ -102,6 +102,7 @@ func (s *LifecycleService) EnsureCreated(ctx context.Context, desired Binding) (
 	}
 	binding.Placement.Region = request.RegionHint
 	binding.LastError = ""
+	recordCreateSuccess(&binding)
 	recordRemoteCost(&binding, remote)
 	if err := s.store.Update(ctx, binding); err != nil {
 		return Binding{}, err
@@ -280,6 +281,39 @@ func recordProviderFailure(binding *Binding, provider string, region string, rea
 		Status:  ConditionTrue,
 		Reason:  string(class),
 		Message: err.Error(),
+	})
+}
+
+func recordCreateSuccess(binding *Binding) {
+	if binding == nil {
+		return
+	}
+	SetCondition(binding, BindingCondition{
+		Type:    ConditionReady,
+		Status:  ConditionTrue,
+		Reason:  "RemoteCreated",
+		Message: "remote resource created",
+	})
+	for _, conditionType := range []ConditionType{
+		ConditionUnsupportedSpec,
+		ConditionAuth,
+		ConditionCapacity,
+		ConditionProviderError,
+	} {
+		clearCreateFailureCondition(binding, conditionType)
+	}
+}
+
+func clearCreateFailureCondition(binding *Binding, conditionType ConditionType) {
+	condition := FindCondition(binding.Conditions, conditionType)
+	if condition == nil || condition.Status != ConditionTrue {
+		return
+	}
+	SetCondition(binding, BindingCondition{
+		Type:    conditionType,
+		Status:  ConditionFalse,
+		Reason:  "RemoteCreated",
+		Message: "condition cleared after successful remote create",
 	})
 }
 

@@ -103,6 +103,46 @@ func TestCreatePodUsesConfiguredCandidatePlanner(t *testing.T) {
 	}
 }
 
+func TestCreatePodFallbackSuccessDoesNotExposeStaleCapacityCondition(t *testing.T) {
+	ctx := context.Background()
+	runpod := failingProvider{
+		err: &core.ProviderError{
+			Provider:  "runpod",
+			Operation: "create",
+			Class:     core.ErrorClassCapacity,
+			Message:   "no A40 capacity",
+		},
+	}
+	lambda := core.NewFakeProvider("lambda")
+	provider := newTestProviderWithConfig(t, Config{
+		Adapter: runpod,
+		FallbackAdapters: map[string]core.ProviderAdapter{
+			"runpod": runpod,
+			"lambda": lambda,
+		},
+		FallbackOrder: []string{"lambda"},
+	})
+
+	if err := provider.CreatePod(ctx, gpuPod("fallback-clean", "uid-fallback-clean")); err != nil {
+		t.Fatalf("CreatePod() error = %v", err)
+	}
+
+	cached, err := provider.GetPod(ctx, "default", "fallback-clean")
+	if err != nil {
+		t.Fatalf("GetPod() error = %v", err)
+	}
+	if cached.Status.Phase != corev1.PodRunning {
+		t.Fatalf("cached phase = %s, want Running", cached.Status.Phase)
+	}
+	ready := podReadyCondition(cached.Status.Conditions)
+	if ready.Status != corev1.ConditionTrue {
+		t.Fatalf("PodReady = %#v, want true after fallback success", ready)
+	}
+	if ready.Reason == string(core.ErrorClassCapacity) || strings.Contains(ready.Message, "no A40 capacity") {
+		t.Fatalf("PodReady = %#v, want no stale capacity error after fallback success", ready)
+	}
+}
+
 func TestCreatePodRejectsUnsupportedSpecBeforeLaunchingRemoteWorkload(t *testing.T) {
 	ctx := context.Background()
 	adapter := core.NewFakeProvider("runpod")

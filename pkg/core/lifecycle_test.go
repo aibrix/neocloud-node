@@ -140,6 +140,13 @@ func TestLifecycleServiceFallsBackOnCapacityCreateFailure(t *testing.T) {
 	if attempt.Provider != "runpod" || attempt.Class != ErrorClassCapacity || !attempt.FallbackAllowed {
 		t.Fatalf("attempt = %#v, want capacity fallback attempt for runpod", attempt)
 	}
+	if condition := FindCondition(binding.Conditions, ConditionCapacity); condition != nil && condition.Status == ConditionTrue {
+		t.Fatalf("capacity condition = %#v, want inactive after fallback success", condition)
+	}
+	ready := FindCondition(binding.Conditions, ConditionReady)
+	if ready == nil || ready.Status != ConditionTrue || ready.Reason != "RemoteCreated" {
+		t.Fatalf("ready condition = %#v, want RemoteCreated true after fallback success", ready)
+	}
 	if lambda.CreateCount() != 1 {
 		t.Fatalf("lambda CreateCount = %d, want 1", lambda.CreateCount())
 	}
@@ -150,6 +157,9 @@ func TestLifecycleServiceFallsBackOnCapacityCreateFailure(t *testing.T) {
 	}
 	if stored.Placement.Provider != "lambda" || stored.RemoteID != "lambda-1" {
 		t.Fatalf("stored binding = %#v, want lambda placement", stored)
+	}
+	if condition := FindCondition(stored.Conditions, ConditionCapacity); condition != nil && condition.Status == ConditionTrue {
+		t.Fatalf("stored capacity condition = %#v, want inactive after fallback success", condition)
 	}
 }
 
