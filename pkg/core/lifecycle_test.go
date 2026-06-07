@@ -87,6 +87,180 @@ func TestLifecycleServiceRecordsRemoteCostOnCreate(t *testing.T) {
 	}
 }
 
+func TestLifecycleServiceFallsBackOnCapacityCreateFailure(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := NewMemoryBindingStore()
+	runpod := &createFailureProvider{
+		provider: "runpod",
+		err: &ProviderError{
+			Provider:  "runpod",
+			Operation: "create",
+			Class:     ErrorClassCapacity,
+			Message:   "no A40 capacity",
+		},
+	}
+	lambda := NewFakeProvider("lambda")
+	service := NewLifecycleService(
+		store,
+		runpod,
+		WithFallbackProviders(map[string]ProviderAdapter{
+			"runpod": runpod,
+			"lambda": lambda,
+		}, []string{"lambda"}),
+	)
+
+	binding, err := service.EnsureCreated(ctx, Binding{
+		Namespace:   "default",
+		Name:        "train-job",
+		WorkloadUID: "pod-123",
+		Request: WorkloadRequest{
+			Image:    "example.com/train:latest",
+			GPUCount: 1,
+			Provider: "runpod",
+		},
+	})
+	if err != nil {
+		t.Fatalf("EnsureCreated() error = %v", err)
+	}
+	if binding.Phase != BindingRunning {
+		t.Fatalf("phase = %s, want Running", binding.Phase)
+	}
+	if binding.Placement.Provider != "lambda" {
+		t.Fatalf("placement provider = %q, want lambda", binding.Placement.Provider)
+	}
+	if binding.RemoteID != "lambda-1" {
+		t.Fatalf("remote ID = %q, want lambda-1", binding.RemoteID)
+	}
+	if len(binding.Attempts) != 1 {
+		t.Fatalf("attempts = %#v, want one failed runpod attempt", binding.Attempts)
+	}
+	attempt := binding.Attempts[0]
+	if attempt.Provider != "runpod" || attempt.Class != ErrorClassCapacity || !attempt.FallbackAllowed {
+		t.Fatalf("attempt = %#v, want capacity fallback attempt for runpod", attempt)
+	}
+	if lambda.CreateCount() != 1 {
+		t.Fatalf("lambda CreateCount = %d, want 1", lambda.CreateCount())
+	}
+
+	stored, err := store.GetByWorkloadUID(ctx, "default", "pod-123")
+	if err != nil {
+		t.Fatalf("GetByWorkloadUID() error = %v", err)
+	}
+	if stored.Placement.Provider != "lambda" || stored.RemoteID != "lambda-1" {
+		t.Fatalf("stored binding = %#v, want lambda placement", stored)
+	}
+}
+
+func TestLifecycleServiceStopsFallbackOnAuthFailure(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := NewMemoryBindingStore()
+	runpod := &createFailureProvider{
+		provider: "runpod",
+		err: &ProviderError{
+			Provider:  "runpod",
+			Operation: "create",
+			Class:     ErrorClassAuth,
+			Message:   "bad api key",
+		},
+	}
+	lambda := NewFakeProvider("lambda")
+	service := NewLifecycleService(
+		store,
+		runpod,
+		WithFallbackProviders(map[string]ProviderAdapter{
+			"runpod": runpod,
+			"lambda": lambda,
+		}, []string{"lambda"}),
+	)
+
+	_, err := service.EnsureCreated(ctx, Binding{
+		Namespace:   "default",
+		Name:        "train-job",
+		WorkloadUID: "pod-123",
+		Request: WorkloadRequest{
+			Image:    "example.com/train:latest",
+			GPUCount: 1,
+			Provider: "runpod",
+		},
+	})
+	if err == nil {
+		t.Fatal("EnsureCreated() error = nil, want auth error")
+	}
+	if lambda.CreateCount() != 0 {
+		t.Fatalf("lambda CreateCount = %d, want no fallback on auth", lambda.CreateCount())
+	}
+	stored, getErr := store.GetByWorkloadUID(ctx, "default", "pod-123")
+	if getErr != nil {
+		t.Fatalf("GetByWorkloadUID() error = %v", getErr)
+	}
+	if stored.Phase != BindingFailed {
+		t.Fatalf("phase = %s, want Failed", stored.Phase)
+	}
+	if len(stored.Attempts) != 1 || stored.Attempts[0].FallbackAllowed {
+		t.Fatalf("attempts = %#v, want one non-fallback auth attempt", stored.Attempts)
+	}
+}
+
+func TestLifecycleServiceUsesSelectedProviderForSyncAndDelete(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := NewMemoryBindingStore()
+	runpod := &createFailureProvider{
+		provider: "runpod",
+		err: &ProviderError{
+			Provider:  "runpod",
+			Operation: "create",
+			Class:     ErrorClassCapacity,
+			Message:   "no capacity",
+		},
+	}
+	lambda := &trackingProvider{ProviderAdapter: NewFakeProvider("lambda")}
+	service := NewLifecycleService(
+		store,
+		runpod,
+		WithFallbackProviders(map[string]ProviderAdapter{
+			"runpod": runpod,
+			"lambda": lambda,
+		}, []string{"lambda"}),
+	)
+
+	binding, err := service.EnsureCreated(ctx, Binding{
+		Namespace:   "default",
+		Name:        "train-job",
+		WorkloadUID: "pod-123",
+		Request: WorkloadRequest{
+			Image:    "example.com/train:latest",
+			GPUCount: 1,
+			Provider: "runpod",
+		},
+	})
+	if err != nil {
+		t.Fatalf("EnsureCreated() error = %v", err)
+	}
+	if binding.Placement.Provider != "lambda" {
+		t.Fatalf("placement provider = %s, want lambda", binding.Placement.Provider)
+	}
+
+	if _, err := service.SyncStatus(ctx, "default", "pod-123"); err != nil {
+		t.Fatalf("SyncStatus() error = %v", err)
+	}
+	if lambda.getCount != 1 {
+		t.Fatalf("lambda getCount = %d, want selected provider sync", lambda.getCount)
+	}
+
+	if err := service.EnsureDeleted(ctx, "default", "pod-123"); err != nil {
+		t.Fatalf("EnsureDeleted() error = %v", err)
+	}
+	if lambda.deleteCount != 1 {
+		t.Fatalf("lambda deleteCount = %d, want selected provider delete", lambda.deleteCount)
+	}
+}
+
 func TestRecordRunnerStatusMarksBindingSucceeded(t *testing.T) {
 	t.Parallel()
 
@@ -438,7 +612,8 @@ func TestLifecycleServiceRecordsDeleteFailure(t *testing.T) {
 }
 
 type createFailureProvider struct {
-	err error
+	provider string
+	err      error
 }
 
 func (p *createFailureProvider) Create(ctx context.Context, idempotencyKey string, request WorkloadRequest) (RemoteResource, error) {
@@ -451,4 +626,20 @@ func (p *createFailureProvider) Get(ctx context.Context, remoteID string) (Remot
 
 func (p *createFailureProvider) Delete(ctx context.Context, remoteID string) error {
 	return nil
+}
+
+type trackingProvider struct {
+	ProviderAdapter
+	getCount    int
+	deleteCount int
+}
+
+func (p *trackingProvider) Get(ctx context.Context, remoteID string) (RemoteResource, error) {
+	p.getCount++
+	return p.ProviderAdapter.Get(ctx, remoteID)
+}
+
+func (p *trackingProvider) Delete(ctx context.Context, remoteID string) error {
+	p.deleteCount++
+	return p.ProviderAdapter.Delete(ctx, remoteID)
 }

@@ -52,6 +52,7 @@ const (
 type Options struct {
 	NodeName                 string
 	Provider                 string
+	FallbackProviders        string
 	BindingStore             string
 	Kubeconfig               string
 	ListenAddr               string
@@ -91,8 +92,10 @@ func ParseOptions(args []string, getenv func(string) string) (Options, error) {
 	}
 
 	options := Options{
-		NodeName:     envOr(getenv, "GPU_BURST_NODE_NAME", DefaultNodeName),
-		Provider:     envOr(getenv, "GPU_BURST_PROVIDER", ProviderFake),
+		NodeName: envOr(getenv, "GPU_BURST_NODE_NAME", DefaultNodeName),
+		Provider: envOr(getenv, "GPU_BURST_PROVIDER", ProviderFake),
+		FallbackProviders: envOr(getenv,
+			"GPU_BURST_FALLBACK_PROVIDERS", ""),
 		BindingStore: envOr(getenv, "GPU_BURST_BINDING_STORE", BindingStoreKubernetes),
 		Kubeconfig:   envOr(getenv, "KUBECONFIG", ""),
 		ListenAddr:   envOr(getenv, "GPU_BURST_LISTEN_ADDR", ":10250"),
@@ -128,6 +131,7 @@ func ParseOptions(args []string, getenv func(string) string) (Options, error) {
 	fs.SetOutput(io.Discard)
 	fs.StringVar(&options.NodeName, "node-name", options.NodeName, "virtual node name")
 	fs.StringVar(&options.Provider, "provider", options.Provider, "provider adapter: fake, runpod or lambda")
+	fs.StringVar(&options.FallbackProviders, "fallback-providers", options.FallbackProviders, "comma-separated provider adapters to try after the primary provider fails with a fallback-safe error")
 	fs.StringVar(&options.BindingStore, "binding-store", options.BindingStore, "binding store backend: kubernetes or memory")
 	fs.StringVar(&options.Kubeconfig, "kubeconfig", options.Kubeconfig, "path to kubeconfig")
 	fs.StringVar(&options.ListenAddr, "listen-addr", options.ListenAddr, "kubelet API listen address")
@@ -158,6 +162,7 @@ func ParseOptions(args []string, getenv func(string) string) (Options, error) {
 		return Options{}, err
 	}
 	options.Provider = strings.ToLower(strings.TrimSpace(options.Provider))
+	options.FallbackProviders = normalizeCSV(options.FallbackProviders)
 	options.BindingStore = strings.ToLower(strings.TrimSpace(options.BindingStore))
 
 	if err := validateOptions(options); err != nil {
@@ -199,6 +204,10 @@ func NewNode(ctx context.Context, options Options, kubeClient kubernetes.Interfa
 	if err != nil {
 		return nil, err
 	}
+	fallbackAdapters, fallbackOrder, err := newFallbackProviderAdapters(options)
+	if err != nil {
+		return nil, err
+	}
 	if err := startOrphanSweeper(ctx, store, adapter, options); err != nil {
 		return nil, err
 	}
@@ -207,10 +216,12 @@ func NewNode(ctx context.Context, options Options, kubeClient kubernetes.Interfa
 	}
 
 	providerConfig := vk.Config{
-		Store:       store,
-		Adapter:     adapter,
-		LaunchGuard: launchGuard(options),
-		NodeName:    options.NodeName,
+		Store:            store,
+		Adapter:          adapter,
+		FallbackAdapters: fallbackAdapters,
+		FallbackOrder:    fallbackOrder,
+		LaunchGuard:      launchGuard(options),
+		NodeName:         options.NodeName,
 		EventRecorder: newEventRecorder(kubeClient,
 			"gpu-burst-node/"+options.Provider),
 		StatusSyncContext:  ctx,
@@ -297,7 +308,35 @@ func newBindingStore(options Options, dynamicClient dynamic.Interface) (core.Bin
 }
 
 func newProviderAdapter(options Options) (core.ProviderAdapter, error) {
-	switch options.Provider {
+	return providerAdapterFor(options, options.Provider)
+}
+
+func newFallbackProviderAdapters(options Options) (map[string]core.ProviderAdapter, []string, error) {
+	fallbackOrder := commaSeparated(options.FallbackProviders)
+	if len(fallbackOrder) == 0 {
+		return nil, nil, nil
+	}
+	adapters := make(map[string]core.ProviderAdapter, len(fallbackOrder)+1)
+	primary, err := providerAdapterFor(options, options.Provider)
+	if err != nil {
+		return nil, nil, err
+	}
+	adapters[options.Provider] = primary
+	for _, provider := range fallbackOrder {
+		if provider == options.Provider {
+			continue
+		}
+		adapter, err := providerAdapterFor(options, provider)
+		if err != nil {
+			return nil, nil, err
+		}
+		adapters[provider] = adapter
+	}
+	return adapters, fallbackOrder, nil
+}
+
+func providerAdapterFor(options Options, provider string) (core.ProviderAdapter, error) {
+	switch provider {
 	case ProviderFake:
 		return core.NewFakeProvider(ProviderFake), nil
 	case ProviderRunPod:
@@ -315,7 +354,7 @@ func newProviderAdapter(options Options) (core.ProviderAdapter, error) {
 			DefaultSSHKeyNames:  commaSeparated(options.LambdaSSHKeyNames),
 		}), nil
 	default:
-		return nil, fmt.Errorf("unsupported provider %q", options.Provider)
+		return nil, fmt.Errorf("unsupported provider %q", provider)
 	}
 }
 
@@ -476,6 +515,14 @@ func validateOptions(options Options) error {
 	default:
 		return fmt.Errorf("unsupported provider %q", options.Provider)
 	}
+	for _, provider := range commaSeparated(options.FallbackProviders) {
+		if provider == options.Provider {
+			continue
+		}
+		if err := validateProviderConfigured(options, provider); err != nil {
+			return err
+		}
+	}
 	switch options.BindingStore {
 	case BindingStoreMemory, BindingStoreKubernetes:
 	default:
@@ -496,6 +543,25 @@ func validateOptions(options Options) error {
 	return nil
 }
 
+func validateProviderConfigured(options Options, provider string) error {
+	switch provider {
+	case ProviderFake:
+		return nil
+	case ProviderRunPod:
+		if strings.TrimSpace(options.RunPodAPIKey) == "" {
+			return errors.New("runpod fallback provider requires --runpod-api-key or RUNPOD_API_KEY")
+		}
+		return nil
+	case ProviderLambda:
+		if strings.TrimSpace(options.LambdaAPIKey) == "" {
+			return errors.New("lambda fallback provider requires --lambda-api-key or LAMBDA_API_KEY")
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported fallback provider %q", provider)
+	}
+}
+
 func commaSeparated(raw string) []string {
 	if strings.TrimSpace(raw) == "" {
 		return nil
@@ -509,6 +575,10 @@ func commaSeparated(raw string) []string {
 		}
 	}
 	return out
+}
+
+func normalizeCSV(raw string) string {
+	return strings.Join(commaSeparated(strings.ToLower(raw)), ",")
 }
 
 func configureNodeSpec(config *nodeutil.NodeConfig, options Options) error {

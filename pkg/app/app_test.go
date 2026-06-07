@@ -76,6 +76,60 @@ func TestParseOptionsReadsFlagsAndEnvironment(t *testing.T) {
 	}
 }
 
+func TestParseOptionsReadsFallbackProviders(t *testing.T) {
+	env := mapEnv(map[string]string{
+		"RUNPOD_API_KEY":                 "runpod-key",
+		"LAMBDA_API_KEY":                 "lambda-key",
+		"GPU_BURST_PROVIDER":             ProviderRunPod,
+		"GPU_BURST_FALLBACK_PROVIDERS":   " Lambda , fake ",
+		"GPU_BURST_LAMBDA_REGION":        "us-west-1",
+		"GPU_BURST_LAMBDA_INSTANCE_TYPE": "gpu_1x_a10",
+		"GPU_BURST_LAMBDA_SSH_KEY_NAMES": "lambda-key-name",
+	})
+
+	options, err := ParseOptions([]string{"--binding-store=memory"}, env)
+	if err != nil {
+		t.Fatalf("ParseOptions() error = %v", err)
+	}
+	if options.FallbackProviders != "lambda,fake" {
+		t.Fatalf("FallbackProviders = %q, want normalized lambda,fake", options.FallbackProviders)
+	}
+}
+
+func TestParseOptionsRequiresFallbackProviderCredentials(t *testing.T) {
+	_, err := ParseOptions([]string{
+		"--provider=runpod",
+		"--runpod-api-key=runpod-key",
+		"--fallback-providers=lambda",
+	}, emptyEnv)
+	if err == nil {
+		t.Fatal("ParseOptions() error = nil, want missing lambda fallback credential error")
+	}
+}
+
+func TestNewFallbackProviderAdaptersBuildsPrimaryAndFallback(t *testing.T) {
+	options, err := ParseOptions([]string{
+		"--provider=runpod",
+		"--runpod-api-key=runpod-key",
+		"--lambda-api-key=lambda-key",
+		"--fallback-providers=lambda",
+	}, emptyEnv)
+	if err != nil {
+		t.Fatalf("ParseOptions() error = %v", err)
+	}
+
+	adapters, order, err := newFallbackProviderAdapters(options)
+	if err != nil {
+		t.Fatalf("newFallbackProviderAdapters() error = %v", err)
+	}
+	if len(order) != 1 || order[0] != ProviderLambda {
+		t.Fatalf("fallback order = %#v, want lambda", order)
+	}
+	if adapters[ProviderRunPod] == nil || adapters[ProviderLambda] == nil {
+		t.Fatalf("adapters = %#v, want runpod and lambda adapters", adapters)
+	}
+}
+
 func TestParseOptionsReadsOrphanSweeperOptions(t *testing.T) {
 	env := mapEnv(map[string]string{
 		"GPU_BURST_ORPHAN_SWEEPER_INTERVAL": "5m",

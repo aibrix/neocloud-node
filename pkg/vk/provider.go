@@ -34,12 +34,14 @@ type EventRecorder interface {
 }
 
 type Config struct {
-	Store         core.BindingStore
-	Adapter       core.ProviderAdapter
-	Transformer   PodTransformer
-	LaunchGuard   *core.LaunchGuard
-	NodeName      string
-	EventRecorder EventRecorder
+	Store            core.BindingStore
+	Adapter          core.ProviderAdapter
+	FallbackAdapters map[string]core.ProviderAdapter
+	FallbackOrder    []string
+	Transformer      PodTransformer
+	LaunchGuard      *core.LaunchGuard
+	NodeName         string
+	EventRecorder    EventRecorder
 
 	StatusSyncContext  context.Context
 	StatusSyncInterval time.Duration
@@ -77,6 +79,9 @@ func NewProvider(config Config) (*Provider, error) {
 	options := []core.LifecycleOption{}
 	if config.LaunchGuard != nil {
 		options = append(options, core.WithLaunchGuard(*config.LaunchGuard))
+	}
+	if len(config.FallbackAdapters) > 0 || len(config.FallbackOrder) > 0 {
+		options = append(options, core.WithFallbackProviders(config.FallbackAdapters, config.FallbackOrder))
 	}
 
 	provider := &Provider{

@@ -8,9 +8,11 @@ import (
 )
 
 type LifecycleService struct {
-	store    BindingStore
-	provider ProviderAdapter
-	guard    *LaunchGuard
+	store         BindingStore
+	provider      ProviderAdapter
+	providers     map[string]ProviderAdapter
+	fallbackOrder []string
+	guard         *LaunchGuard
 }
 
 type LifecycleOption func(*LifecycleService)
@@ -29,6 +31,21 @@ func NewLifecycleService(store BindingStore, provider ProviderAdapter, options .
 func WithLaunchGuard(guard LaunchGuard) LifecycleOption {
 	return func(service *LifecycleService) {
 		service.guard = &guard
+	}
+}
+
+func WithFallbackProviders(providers map[string]ProviderAdapter, fallbackOrder []string) LifecycleOption {
+	return func(service *LifecycleService) {
+		if len(providers) > 0 {
+			service.providers = make(map[string]ProviderAdapter, len(providers))
+			for name, provider := range providers {
+				if name == "" || provider == nil {
+					continue
+				}
+				service.providers[name] = provider
+			}
+		}
+		service.fallbackOrder = append([]string(nil), fallbackOrder...)
 	}
 }
 
@@ -55,9 +72,8 @@ func (s *LifecycleService) EnsureCreated(ctx context.Context, desired Binding) (
 		}
 	}
 
-	remote, err := s.provider.Create(ctx, idempotencyKey(binding), binding.Request)
+	remote, request, err := s.createWithFallback(ctx, &binding)
 	if err != nil {
-		recordProviderFailure(&binding, binding.Request.Provider, binding.Request.RegionHint, "CreateFailed", err)
 		_ = s.store.Update(ctx, binding)
 		return binding, err
 	}
@@ -66,13 +82,46 @@ func (s *LifecycleService) EnsureCreated(ctx context.Context, desired Binding) (
 	binding.Phase = bindingPhaseFromRemote(remote.Phase)
 	binding.Placement.Provider = remote.Provider
 	if binding.Placement.Provider == "" {
-		binding.Placement.Provider = binding.Request.Provider
+		binding.Placement.Provider = request.Provider
 	}
+	binding.Placement.Region = request.RegionHint
+	binding.LastError = ""
 	recordRemoteCost(&binding, remote)
 	if err := s.store.Update(ctx, binding); err != nil {
 		return Binding{}, err
 	}
 	return binding, nil
+}
+
+func (s *LifecycleService) createWithFallback(ctx context.Context, binding *Binding) (RemoteResource, WorkloadRequest, error) {
+	var lastErr error
+	candidates := s.createCandidates(*binding)
+	for index, candidate := range candidates {
+		adapter := s.providerFor(candidate.Provider)
+		if adapter == nil {
+			lastErr = &ProviderError{
+				Provider:  candidate.Provider,
+				Operation: "create",
+				Class:     ErrorClassUnsupportedSpec,
+				Message:   "provider adapter is not configured",
+			}
+			recordProviderFailure(binding, candidate.Provider, candidate.Request.RegionHint, "CreateFailed", lastErr)
+			return RemoteResource{}, candidate.Request, lastErr
+		}
+		remote, err := adapter.Create(ctx, idempotencyKey(*binding), candidate.Request)
+		if err == nil {
+			return remote, candidate.Request, nil
+		}
+		lastErr = err
+		recordProviderFailure(binding, candidate.Provider, candidate.Request.RegionHint, "CreateFailed", err)
+		if index == len(candidates)-1 || !AllowsFallback(err) {
+			return RemoteResource{}, candidate.Request, err
+		}
+	}
+	if lastErr == nil {
+		lastErr = errors.New("no provider candidate configured")
+	}
+	return RemoteResource{}, binding.Request, lastErr
 }
 
 func (s *LifecycleService) SyncStatus(ctx context.Context, namespace string, workloadUID string) (Binding, error) {
@@ -87,7 +136,17 @@ func (s *LifecycleService) SyncStatus(ctx context.Context, namespace string, wor
 		return binding, nil
 	}
 
-	remote, err := s.provider.Get(ctx, binding.RemoteID)
+	provider := s.providerForBinding(binding)
+	if provider == nil {
+		err := &ProviderError{
+			Provider:  selectedProvider(binding),
+			Operation: "get",
+			Class:     ErrorClassUnsupportedSpec,
+			Message:   "provider adapter is not configured",
+		}
+		return binding, err
+	}
+	remote, err := provider.Get(ctx, binding.RemoteID)
 	if err != nil {
 		if errors.Is(err, ErrRemoteNotFound) {
 			binding.Phase = BindingFailed
@@ -121,7 +180,19 @@ func (s *LifecycleService) EnsureDeleted(ctx context.Context, namespace string, 
 	}
 
 	if binding.RemoteID != "" {
-		if err := s.provider.Delete(ctx, binding.RemoteID); err != nil && !errors.Is(err, ErrRemoteNotFound) {
+		provider := s.providerForBinding(binding)
+		if provider == nil {
+			err := &ProviderError{
+				Provider:  selectedProvider(binding),
+				Operation: "delete",
+				Class:     ErrorClassUnsupportedSpec,
+				Message:   "provider adapter is not configured",
+			}
+			recordDeleteFailure(&binding, err)
+			_ = s.store.Update(ctx, binding)
+			return err
+		}
+		if err := provider.Delete(ctx, binding.RemoteID); err != nil && !errors.Is(err, ErrRemoteNotFound) {
 			recordDeleteFailure(&binding, err)
 			_ = s.store.Update(ctx, binding)
 			return err
@@ -190,6 +261,64 @@ func recordProviderFailure(binding *Binding, provider string, region string, rea
 		Reason:  string(class),
 		Message: err.Error(),
 	})
+}
+
+type createCandidate struct {
+	Provider string
+	Request  WorkloadRequest
+}
+
+func (s *LifecycleService) createCandidates(binding Binding) []createCandidate {
+	providers := make([]string, 0, 1+len(s.fallbackOrder))
+	seen := map[string]bool{}
+	add := func(provider string) {
+		if seen[provider] {
+			return
+		}
+		seen[provider] = true
+		providers = append(providers, provider)
+	}
+	add(binding.Request.Provider)
+	for _, provider := range s.fallbackOrder {
+		add(provider)
+	}
+	if len(providers) == 0 {
+		providers = append(providers, "")
+	}
+
+	candidates := make([]createCandidate, 0, len(providers))
+	for _, provider := range providers {
+		request := binding.Request
+		if provider != "" {
+			request.Provider = provider
+		}
+		candidates = append(candidates, createCandidate{
+			Provider: provider,
+			Request:  request,
+		})
+	}
+	return candidates
+}
+
+func (s *LifecycleService) providerForBinding(binding Binding) ProviderAdapter {
+	return s.providerFor(selectedProvider(binding))
+}
+
+func (s *LifecycleService) providerFor(provider string) ProviderAdapter {
+	if provider != "" && len(s.providers) > 0 {
+		if adapter := s.providers[provider]; adapter != nil {
+			return adapter
+		}
+		return nil
+	}
+	return s.provider
+}
+
+func selectedProvider(binding Binding) string {
+	if binding.Placement.Provider != "" {
+		return binding.Placement.Provider
+	}
+	return binding.Request.Provider
 }
 
 func recordDeleteFailure(binding *Binding, err error) {
