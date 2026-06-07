@@ -20,6 +20,14 @@ The Phase 5 placement planner is a provider-neutral mechanism. It does not repla
 
 Provider offers come from the `resource.OfferCatalog` interface. Provider-specific code implements `ProviderOfferSource`; `CompositeCatalog` merges multiple sources and preserves per-provider catalog errors. This keeps catalog refresh, capacity probing and price collection separate from the risk/cost planner.
 
+The planner can now drive lifecycle creation through a narrow hook:
+
+- `core.CreateCandidatePlanner` is the provider-neutral lifecycle interface.
+- `resource.LifecycleCandidatePlanner` adapts `OfferCatalog`, `Planner`, `Policy` and recent `core.Attempt` signals into ordered `core.CreateCandidate` values.
+- `vk.Config.CandidatePlanner` injects that planner into Virtual Kubelet without making `pkg/core` depend on `pkg/resource`.
+
+This is the boundary that lets GPU Burst Node and AIBrix batch share resource strategy while keeping provider launch/delete logic in adapters.
+
 ## Selection Order
 
 The planner first rejects offers that cannot satisfy the request:
@@ -84,7 +92,7 @@ Every provider create/get/delete failure must be reduced to a stable error class
 - No custom Kubernetes scheduler.
 - No Kueue integration.
 - No CRD policy API.
-- No dynamic provider catalog refresh in the current code.
+- No dynamic provider catalog refresh loop in the current code.
 - No historical provider scorecard in the current code.
 - No cross-workload retry/backoff cache in the current code.
 - No survival-analysis lifetime predictor in the current code.

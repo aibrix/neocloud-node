@@ -66,6 +66,43 @@ func TestCreatePodLaunchesRemoteWorkloadAndCachesRunningStatus(t *testing.T) {
 	assertRunningPod(t, notified[0])
 }
 
+func TestCreatePodUsesConfiguredCandidatePlanner(t *testing.T) {
+	ctx := context.Background()
+	runpod := core.NewFakeProvider("runpod")
+	lambda := core.NewFakeProvider("lambda")
+	provider := newTestProviderWithConfig(t, Config{
+		Adapter: runpod,
+		FallbackAdapters: map[string]core.ProviderAdapter{
+			"runpod": runpod,
+			"lambda": lambda,
+		},
+		CandidatePlanner: vkStaticCandidatePlanner{
+			candidates: []core.CreateCandidate{
+				{
+					Provider: "lambda",
+					Request: core.WorkloadRequest{
+						Image:      "ghcr.io/example/train:latest",
+						GPUCount:   1,
+						GPUType:    "NVIDIA A100",
+						Provider:   "lambda",
+						RegionHint: "us-west-1",
+					},
+				},
+			},
+		},
+	})
+
+	if err := provider.CreatePod(ctx, gpuPod("planned", "uid-planned")); err != nil {
+		t.Fatalf("CreatePod() error = %v", err)
+	}
+	if runpod.CreateCount() != 0 {
+		t.Fatalf("runpod CreateCount = %d, want planner to bypass primary", runpod.CreateCount())
+	}
+	if lambda.CreateCount() != 1 {
+		t.Fatalf("lambda CreateCount = %d, want planner-selected lambda create", lambda.CreateCount())
+	}
+}
+
 func TestCreatePodRejectsUnsupportedSpecBeforeLaunchingRemoteWorkload(t *testing.T) {
 	ctx := context.Background()
 	adapter := core.NewFakeProvider("runpod")
@@ -558,6 +595,14 @@ func requireGaugeValue(t *testing.T, family *dto.MetricFamily, labels map[string
 	}
 	t.Fatalf("metric labels %#v not found in family %#v", labels, family)
 	return 0
+}
+
+type vkStaticCandidatePlanner struct {
+	candidates []core.CreateCandidate
+}
+
+func (p vkStaticCandidatePlanner) CreateCandidates(ctx context.Context, binding core.Binding) ([]core.CreateCandidate, error) {
+	return append([]core.CreateCandidate(nil), p.candidates...), nil
 }
 
 func metricLabelsMatch(metric *dto.Metric, labels map[string]string) bool {

@@ -38,6 +38,7 @@ type Config struct {
 	Adapter          core.ProviderAdapter
 	FallbackAdapters map[string]core.ProviderAdapter
 	FallbackOrder    []string
+	CandidatePlanner core.CreateCandidatePlanner
 	Transformer      PodTransformer
 	LaunchGuard      *core.LaunchGuard
 	NodeName         string
@@ -82,6 +83,9 @@ func NewProvider(config Config) (*Provider, error) {
 	}
 	if len(config.FallbackAdapters) > 0 || len(config.FallbackOrder) > 0 {
 		options = append(options, core.WithFallbackProviders(config.FallbackAdapters, config.FallbackOrder))
+	}
+	if config.CandidatePlanner != nil {
+		options = append(options, core.WithCreateCandidatePlanner(config.CandidatePlanner))
 	}
 
 	provider := &Provider{
