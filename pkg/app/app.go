@@ -466,6 +466,9 @@ func placementOfferSources(primary string, fallbackOrder []string, adapters map[
 		if adapter == nil {
 			continue
 		}
+		if source, ok := adapter.(burstresource.ProviderOfferSource); ok {
+			sources = append(sources, source)
+		}
 		lister, ok := adapter.(core.RemoteResourceLister)
 		if !ok {
 			continue

@@ -329,6 +329,49 @@ func TestNewPlacementPlannerDisabledWithoutBootstrapOrRefresh(t *testing.T) {
 	}
 }
 
+func TestNewPlacementPlannerIncludesProviderCatalogSources(t *testing.T) {
+	options, err := ParseOptions([]string{
+		"--provider=fake",
+		"--binding-store=memory",
+		"--placement-refresh-interval=1m",
+	}, emptyEnv)
+	if err != nil {
+		t.Fatalf("ParseOptions() error = %v", err)
+	}
+	adapter := catalogProviderAdapter{FakeProvider: core.NewFakeProvider(ProviderFake)}
+
+	setup, err := newPlacementPlannerSetup(options, []string{}, map[string]core.ProviderAdapter{ProviderFake: adapter})
+	if err != nil {
+		t.Fatalf("newPlacementPlannerSetup() error = %v", err)
+	}
+	if setup.Planner == nil || setup.Refresher == nil {
+		t.Fatalf("setup = %#v, want planner and refresher", setup)
+	}
+	report := setup.Refresher.Refresh(context.Background())
+	if report.Recorded != 1 {
+		t.Fatalf("refresh report = %#v, want one catalog offer", report)
+	}
+	candidates, err := setup.Planner.CreateCandidates(context.Background(), core.Binding{
+		Namespace:   "default",
+		Name:        "catalog-job",
+		WorkloadUID: "pod-catalog",
+		Request: core.WorkloadRequest{
+			Image:      "example.com/train:latest",
+			GPUCount:   1,
+			GPUType:    "A10",
+			MaxPrice:   "1.00",
+			MarketType: core.MarketTypeOnDemand,
+			Provider:   ProviderFake,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateCandidates() error = %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].Request.RegionHint != "catalog-region" {
+		t.Fatalf("candidates = %#v, want catalog-region candidate", candidates)
+	}
+}
+
 func TestConfigureNodeSpecAdvertisesProviderTaintAndCapacity(t *testing.T) {
 	options, err := ParseOptions([]string{
 		"--provider=fake",
@@ -658,4 +701,30 @@ func mapEnv(values map[string]string) func(string) string {
 	return func(key string) string {
 		return values[key]
 	}
+}
+
+type catalogProviderAdapter struct {
+	*core.FakeProvider
+}
+
+func (a catalogProviderAdapter) Provider() string {
+	return ProviderFake
+}
+
+func (a catalogProviderAdapter) ListOffers(ctx context.Context, intent burstresource.Intent) ([]burstresource.Offer, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return []burstresource.Offer{
+		{
+			ID:          "fake-a10-catalog",
+			Provider:    ProviderFake,
+			Location:    "catalog-region",
+			GPUType:     "A10",
+			GPUCount:    1,
+			Market:      burstresource.MarketOnDemand,
+			HourlyPrice: 0.42,
+			Available:   true,
+		},
+	}, nil
 }

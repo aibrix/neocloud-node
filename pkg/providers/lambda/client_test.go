@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/core"
+	burstresource "github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/resource"
 )
 
 func TestClientCreateLaunchesLambdaInstance(t *testing.T) {
@@ -218,6 +219,54 @@ func TestClientListBackfillsRemoteRequestShape(t *testing.T) {
 	}
 	if request.ProviderHints[core.AnnotationLambdaInstanceType] != "gpu_1x_a10" {
 		t.Fatalf("provider hints = %#v, want lambda instance type", request.ProviderHints)
+	}
+}
+
+func TestClientListOffersFromInstanceTypesCatalog(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/instance-types" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"data":{
+			"gpu_1x_a10":{
+				"instance_type":{
+					"name":"gpu_1x_a10",
+					"price_cents_per_hour":74,
+					"specs":{"gpus":1,"gpu_description":"A10"}
+				},
+				"regions_with_capacity_available":[{"name":"us-west-1"}]
+			},
+			"gpu_8x_h100":{
+				"instance_type":{
+					"name":"gpu_8x_h100",
+					"price_cents_per_hour":1272,
+					"specs":{"gpus":8,"gpu_description":"H100"}
+				},
+				"regions_with_capacity_available":[{"name":"us-east-1"}]
+			}
+		}}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{BaseURL: server.URL, APIKey: "lambda-key"})
+	offers, err := client.ListOffers(context.Background(), burstresource.Intent{})
+	if err != nil {
+		t.Fatalf("ListOffers() error = %v", err)
+	}
+	if len(offers) != 1 {
+		t.Fatalf("offers = %#v, want one single-GPU offer", offers)
+	}
+	offer := offers[0]
+	if offer.Provider != providerName || offer.Location != "us-west-1" || offer.GPUType != "A10" || offer.GPUCount != 1 {
+		t.Fatalf("offer = %#v, want lambda A10 us-west-1", offer)
+	}
+	if offer.Market != burstresource.MarketOnDemand || !offer.Available || math.Abs(offer.HourlyPrice-0.74) > 0.000001 {
+		t.Fatalf("offer price/market = %#v, want available on-demand 0.74", offer)
+	}
+	if offer.ProviderHints[core.AnnotationLambdaInstanceType] != "gpu_1x_a10" {
+		t.Fatalf("provider hints = %#v, want lambda instance type hint", offer.ProviderHints)
 	}
 }
 

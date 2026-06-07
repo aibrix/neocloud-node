@@ -7,6 +7,7 @@ The Lambda Cloud adapter implements the core `ProviderAdapter` against Lambda Cl
 Official API references:
 
 - Launch instances: `POST https://cloud.lambda.ai/api/v1/instance-operations/launch`
+- List instance types and regional capacity: `GET https://cloud.lambda.ai/api/v1/instance-types`
 - List running instances: `GET https://cloud.lambda.ai/api/v1/instances`
 - Retrieve instance details: `GET https://cloud.lambda.ai/api/v1/instances/{id}`
 - Terminate instances: `POST https://cloud.lambda.ai/api/v1/instance-operations/terminate`
@@ -51,6 +52,10 @@ Lambda HTTP errors are converted to `core.ProviderError`:
 | body mentioning quota/limit | `Quota` |
 
 Delete treats `RemoteNotFound` as successful cleanup. If terminate returns a transient/timeout error, the adapter reads `GET /instances/{id}` once; if the instance is already gone, cleanup is treated as successful.
+
+## Catalog Semantics
+
+The adapter implements `resource.ProviderOfferSource` by reading `GET /instance-types`. Each region in `regions_with_capacity_available` becomes a normalized on-demand offer with hourly price, GPU count, GPU description and a `lambda-instance-type` provider hint. Empty catalog refreshes are conservative and expose only single-GPU instance types; explicit multi-GPU placement should come through a workload intent or a bootstrap offer so a one-card workload is not accidentally routed to an eight-card VM.
 
 ## Current Limitations
 

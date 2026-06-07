@@ -32,6 +32,8 @@ provider=runpod,location=US-TX-3,gpu=A40,count=1,market=on-demand,price=0.74;pro
 
 When `--placement-refresh-interval` is greater than zero, GPU Burst Node also refreshes provider-observed resources into the same catalog. Adapters that implement `core.RemoteResourceLister` are wrapped by `resource.RemoteResourceOfferSource`; their `RemoteResource.Request` shape, region, market and cost become normalized offers with the configured TTL. This is intentionally weaker than a full provider catalog API, but it gives RunPod/Lambda-style integrations a clean path to accumulate capacity, price and failure signals without hard-coding provider logic inside the lifecycle service.
 
+Adapters can also expose native catalog sources by implementing `resource.ProviderOfferSource`. Lambda Cloud uses this path to convert `GET /instance-types` into on-demand offers with region capacity, instance-type hints and hourly price. RunPod does not currently expose an equivalent stable public catalog in this code path, so RunPod placement still relies on bootstrap rows, provider list observations and failure feedback.
+
 If both `--placement-offers` and `--placement-refresh-interval` are empty or zero, the placement planner stays disabled and lifecycle creation uses the direct primary/fallback provider path.
 
 The planner can now drive lifecycle creation through a narrow hook:
