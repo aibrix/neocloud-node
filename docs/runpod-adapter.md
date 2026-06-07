@@ -16,7 +16,7 @@ Official API references:
 
 | `core.WorkloadRequest` | RunPod create field | Notes |
 | --- | --- | --- |
-| idempotency key | `name` | Sanitized as `gpu-burst-node-<namespace>-<uid>`. This is not yet remote create de-duplication. |
+| idempotency key | `name` | Sanitized as `gpu-burst-node-<namespace>-<uid>`. Transient create failures are recovered by listing this external name before retrying. |
 | `Image` | `imageName` | Required by transformer. |
 | `Command` | `dockerEntrypoint` | Preserved as array. |
 | `Args` | `dockerStartCmd` | Preserved as array. |
@@ -45,7 +45,7 @@ Official API references:
 
 ## Delete Semantics
 
-`DELETE /pods/{podId}` treats both `204 No Content` and `404 Not Found` as successful cleanup. This matches the lifecycle invariant that remote not found during deletion means there is no paid resource left to clean up.
+`DELETE /pods/{podId}` treats both `204 No Content` and `404 Not Found` as successful cleanup. If delete returns a transient/timeout error, the adapter reads `GET /pods/{podId}` once; if the pod is already gone, cleanup is treated as successful. This matches the lifecycle invariant that remote not found during deletion means there is no paid resource left to clean up.
 
 ## Error Semantics
 

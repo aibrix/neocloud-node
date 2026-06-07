@@ -50,12 +50,12 @@ Lambda HTTP errors are converted to `core.ProviderError`:
 | body mentioning `insufficient-capacity` | `Capacity` |
 | body mentioning quota/limit | `Quota` |
 
-Delete treats `RemoteNotFound` as successful cleanup.
+Delete treats `RemoteNotFound` as successful cleanup. If terminate returns a transient/timeout error, the adapter reads `GET /instances/{id}` once; if the instance is already gone, cleanup is treated as successful.
 
 ## Current Limitations
 
 - A gated real Lambda smoke test exists, but the current development environment has not completed it successfully yet.
-- The controller exposes `POST /gpu-burst-node/v1/runner/status` when the kubelet API server is enabled. The shell runner can report terminal exit code through this endpoint, but heartbeat and logs are not implemented yet.
+- The controller exposes `POST /gpu-burst-node/v1/runner/status` when the kubelet API server is enabled. The shell runner reports `Running` and terminal `Succeeded`/`Failed` callbacks through this endpoint; periodic heartbeat timeouts and logs are not implemented yet.
 - No automatic SSH key creation.
 - No logs collection.
 
