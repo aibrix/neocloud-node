@@ -20,6 +20,7 @@ type Config struct {
 	BaseURL             string
 	APIKey              string
 	CallbackURL         string
+	CallbackSecret      string
 	DefaultRegion       string
 	DefaultInstanceType string
 	DefaultSSHKeyNames  []string
@@ -30,6 +31,7 @@ type Client struct {
 	baseURL             string
 	apiKey              string
 	callbackURL         string
+	callbackSecret      string
 	defaultRegion       string
 	defaultInstanceType string
 	defaultSSHKeyNames  []string
@@ -51,6 +53,7 @@ func NewClient(config Config) *Client {
 		baseURL:             baseURL,
 		apiKey:              config.APIKey,
 		callbackURL:         config.CallbackURL,
+		callbackSecret:      config.CallbackSecret,
 		defaultRegion:       config.DefaultRegion,
 		defaultInstanceType: config.DefaultInstanceType,
 		defaultSSHKeyNames:  append([]string(nil), config.DefaultSSHKeyNames...),
@@ -229,9 +232,10 @@ func (c *Client) launchPayload(idempotencyKey string, name string, request core.
 	}
 	if c.callbackURL != "" {
 		cloudInit, err := runner.BuildCloudInit(runner.CloudInitConfig{
-			WorkloadID:  idempotencyKey,
-			CallbackURL: c.callbackURL,
-			Request:     request,
+			WorkloadID:     idempotencyKey,
+			CallbackURL:    c.callbackURL,
+			CallbackSecret: c.callbackSecret,
+			Request:        request,
 		})
 		if err != nil {
 			return launchRequest{}, err

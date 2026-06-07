@@ -2,7 +2,10 @@ package app
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -60,6 +63,7 @@ type Options struct {
 	TLSCertFile              string
 	TLSKeyFile               string
 	RunnerCallbackListenAddr string
+	RunnerCallbackSecret     string
 
 	RunPodAPIKey  string
 	RunPodBaseURL string
@@ -103,6 +107,8 @@ func ParseOptions(args []string, getenv func(string) string) (Options, error) {
 		TLSKeyFile:   envOr(getenv, "GPU_BURST_TLS_KEY_FILE", ""),
 		RunnerCallbackListenAddr: envOr(getenv,
 			"GPU_BURST_RUNNER_CALLBACK_ADDR", ""),
+		RunnerCallbackSecret: envOr(getenv,
+			"GPU_BURST_RUNNER_CALLBACK_SECRET", ""),
 
 		RunPodAPIKey:  envOr(getenv, "RUNPOD_API_KEY", ""),
 		RunPodBaseURL: envOr(getenv, "GPU_BURST_RUNPOD_BASE_URL", ""),
@@ -139,6 +145,7 @@ func ParseOptions(args []string, getenv func(string) string) (Options, error) {
 	fs.StringVar(&options.TLSCertFile, "tls-cert-file", options.TLSCertFile, "TLS certificate file for kubelet API")
 	fs.StringVar(&options.TLSKeyFile, "tls-key-file", options.TLSKeyFile, "TLS key file for kubelet API")
 	fs.StringVar(&options.RunnerCallbackListenAddr, "runner-callback-addr", options.RunnerCallbackListenAddr, "plain HTTP listen address for VM runner status callbacks; empty disables it")
+	fs.StringVar(&options.RunnerCallbackSecret, "runner-callback-secret", options.RunnerCallbackSecret, "shared HMAC secret required for VM runner status callbacks; empty permits unsigned callbacks")
 	fs.StringVar(&options.RunPodAPIKey, "runpod-api-key", options.RunPodAPIKey, "RunPod API key")
 	fs.StringVar(&options.RunPodBaseURL, "runpod-base-url", options.RunPodBaseURL, "RunPod REST API base URL")
 	fs.StringVar(&options.LambdaAPIKey, "lambda-api-key", options.LambdaAPIKey, "Lambda Cloud API key")
@@ -211,7 +218,7 @@ func NewNode(ctx context.Context, options Options, kubeClient kubernetes.Interfa
 	if err := startOrphanSweeper(ctx, store, adapter, options); err != nil {
 		return nil, err
 	}
-	if _, _, err := startRunnerCallbackServer(ctx, options.RunnerCallbackListenAddr, store); err != nil {
+	if _, _, err := startRunnerCallbackServer(ctx, options.RunnerCallbackListenAddr, options.RunnerCallbackSecret, store); err != nil {
 		return nil, err
 	}
 
@@ -243,7 +250,7 @@ func NewNode(ctx context.Context, options Options, kubeClient kubernetes.Interfa
 			return nil, err
 		}
 		mux := http.NewServeMux()
-		mux.Handle("/gpu-burst-node/v1/runner/status", runnerStatusHandler(store))
+		mux.Handle("/gpu-burst-node/v1/runner/status", runnerStatusHandler(store, options.RunnerCallbackSecret))
 		nodeOptions = append(nodeOptions,
 			nodeutil.AttachProviderRoutes(mux),
 			func(config *nodeutil.NodeConfig) error {
@@ -349,6 +356,7 @@ func providerAdapterFor(options Options, provider string) (core.ProviderAdapter,
 			APIKey:              options.LambdaAPIKey,
 			BaseURL:             options.LambdaBaseURL,
 			CallbackURL:         options.LambdaCallbackURL,
+			CallbackSecret:      options.RunnerCallbackSecret,
 			DefaultRegion:       options.LambdaDefaultRegion,
 			DefaultInstanceType: options.LambdaInstanceType,
 			DefaultSSHKeyNames:  commaSeparated(options.LambdaSSHKeyNames),
@@ -379,15 +387,24 @@ func newEventRecorder(kubeClient kubernetes.Interface, component string) record.
 	return broadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: component})
 }
 
-func runnerStatusHandler(store core.BindingStore) http.Handler {
+func runnerStatusHandler(store core.BindingStore, callbackSecret string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		if err != nil {
+			http.Error(w, "read runner status: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := verifyRunnerCallbackSignature(r, body, callbackSecret, time.Now()); err != nil {
+			http.Error(w, err.Error(), http.StatusUnauthorized)
+			return
+		}
 		var report runner.StatusReport
-		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&report); err != nil {
+		if err := json.NewDecoder(strings.NewReader(string(body))).Decode(&report); err != nil {
 			http.Error(w, "decode runner status: "+err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -408,7 +425,39 @@ func runnerStatusHandler(store core.BindingStore) http.Handler {
 	})
 }
 
-func startRunnerCallbackServer(ctx context.Context, listenAddr string, store core.BindingStore) (string, func(context.Context) error, error) {
+func verifyRunnerCallbackSignature(r *http.Request, body []byte, secret string, now time.Time) error {
+	if strings.TrimSpace(secret) == "" {
+		return nil
+	}
+	timestamp := strings.TrimSpace(r.Header.Get("X-GPU-Burst-Runner-Timestamp"))
+	signature := strings.TrimSpace(r.Header.Get("X-GPU-Burst-Runner-Signature"))
+	if timestamp == "" || signature == "" {
+		return errors.New("missing runner callback signature")
+	}
+	seconds, err := strconv.ParseInt(timestamp, 10, 64)
+	if err != nil {
+		return errors.New("invalid runner callback timestamp")
+	}
+	signedAt := time.Unix(seconds, 0)
+	if now.Sub(signedAt) > 10*time.Minute || signedAt.Sub(now) > 10*time.Minute {
+		return errors.New("stale runner callback timestamp")
+	}
+	expected := runnerCallbackSignature(secret, timestamp, body)
+	if !hmac.Equal([]byte(signature), []byte(expected)) {
+		return errors.New("invalid runner callback signature")
+	}
+	return nil
+}
+
+func runnerCallbackSignature(secret string, timestamp string, body []byte) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(timestamp))
+	_, _ = mac.Write([]byte("."))
+	_, _ = mac.Write(body)
+	return "v1=" + hex.EncodeToString(mac.Sum(nil))
+}
+
+func startRunnerCallbackServer(ctx context.Context, listenAddr string, callbackSecret string, store core.BindingStore) (string, func(context.Context) error, error) {
 	if strings.TrimSpace(listenAddr) == "" {
 		return "", func(context.Context) error { return nil }, nil
 	}
@@ -416,7 +465,7 @@ func startRunnerCallbackServer(ctx context.Context, listenAddr string, store cor
 	if err != nil {
 		return "", nil, fmt.Errorf("listen runner callback server: %w", err)
 	}
-	server := &http.Server{Handler: runnerStatusHandler(store)}
+	server := &http.Server{Handler: runnerStatusHandler(store, callbackSecret)}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

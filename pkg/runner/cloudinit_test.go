@@ -56,6 +56,24 @@ func TestRunnerCommandExpandsExitCodeInStatusPayload(t *testing.T) {
 	}
 }
 
+func TestRunnerCommandSignsCallbackWhenSecretConfigured(t *testing.T) {
+	t.Parallel()
+
+	command := runnerCommand(CloudInitConfig{
+		WorkloadID:     "default/pod-123",
+		CallbackURL:    "https://controller.example.com/v1/runner/status",
+		CallbackSecret: "shared-secret",
+		Request: core.WorkloadRequest{
+			Image: "example.com/train:latest",
+		},
+	})
+
+	assertContains(t, command, `ts=$(date +%s)`)
+	assertContains(t, command, `SECRET='shared-secret' TS="$ts" PAYLOAD="$payload" python3 -c`)
+	assertContains(t, command, `X-GPU-Burst-Runner-Timestamp: $ts`)
+	assertContains(t, command, `X-GPU-Burst-Runner-Signature: $sig`)
+}
+
 func TestBuildCloudInitValidation(t *testing.T) {
 	t.Parallel()
 

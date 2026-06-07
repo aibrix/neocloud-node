@@ -30,7 +30,7 @@ Phase 4 cloud-init contains:
 
 ## Callback Contract
 
-When the kubelet API server is enabled, GPU Burst Node serves:
+GPU Burst Node serves a provider-neutral runner callback endpoint:
 
 `POST /gpu-burst-node/v1/runner/status`
 
@@ -49,6 +49,31 @@ The controller resolves `workloadID` as `<namespace>/<podUID>` and updates the d
 - `exitCode == 0` -> `CloudPodBinding.status.phase=Succeeded`
 - `exitCode != 0` -> `CloudPodBinding.status.phase=Failed` with a `RunnerExitCode` condition
 
+### Authentication
+
+Unsigned callbacks are accepted only when no callback secret is configured. Production deployments should set `--runner-callback-secret` or `GPU_BURST_RUNNER_CALLBACK_SECRET`.
+
+When a secret is configured, the runner must send:
+
+| Header | Value |
+| --- | --- |
+| `X-GPU-Burst-Runner-Timestamp` | Unix seconds at signing time |
+| `X-GPU-Burst-Runner-Signature` | `v1=<hex hmac-sha256>` |
+
+The signed message is:
+
+```text
+<timestamp>.<raw request body>
+```
+
+The HMAC key is the configured callback secret. The controller rejects missing signatures, invalid signatures and timestamps outside a 10 minute clock-skew window. This protects against accidental cross-workload callback writes and basic replay.
+
+### Provider Integration Rules
+
+- VM-backed providers such as Lambda pass the callback URL and optional secret into cloud-init.
+- Container-backed providers such as RunPod should not rely on provider pod lifecycle alone for batch completion. RunPod direct pods currently expose a durable pod resource state (`RUNNING`) rather than a reliable container exit state through the REST pod object. Batch completion should therefore use the same runner callback contract, either through a generated wrapper command or a small runner binary.
+- Serving workloads can skip runner completion callbacks and remain `Running` until deleted.
+
 ## Validation
 
 `BuildCloudInit` rejects:
@@ -63,7 +88,7 @@ The controller resolves `workloadID` as `<namespace>/<podUID>` and updates the d
 
 - No SSH fallback.
 - No log streaming.
-- No secure secret delivery model.
+- Callback signing is supported, but secret delivery is still operator-managed env/flag configuration.
 - No checkpoint hook.
 - No retry or timeout supervisor on the VM.
 - No heartbeat protocol yet.

@@ -10,9 +10,10 @@ import (
 )
 
 type CloudInitConfig struct {
-	WorkloadID  string
-	CallbackURL string
-	Request     core.WorkloadRequest
+	WorkloadID     string
+	CallbackURL    string
+	CallbackSecret string
+	Request        core.WorkloadRequest
 }
 
 type ConfigError struct {
@@ -52,6 +53,7 @@ func runnerCommand(config CloudInitConfig) string {
 	image := shellQuote(config.Request.Image)
 	payloadFormat := shellQuote(`{"workloadID":%s,"exitCode":%s}`)
 	workloadID := shellQuote(strconv.Quote(config.WorkloadID))
+	callbackHeaders := signedCallbackHeaders(config.CallbackSecret)
 
 	return strings.Join([]string{
 		"set -e",
@@ -60,11 +62,28 @@ func runnerCommand(config CloudInitConfig) string {
 		dockerRunCommand(config.Request),
 		"code=$?",
 		"payload=$(printf " + payloadFormat + " " + workloadID + ` "$code")`,
+		signCallbackCommand(config.CallbackSecret),
 		"curl -fsS --retry 60 --retry-all-errors --retry-delay 10 --max-time 10 -X POST " + shellQuote(config.CallbackURL) +
 			" -H 'Content-Type: application/json'" +
+			callbackHeaders +
 			` -d "$payload"`,
 		"exit $code",
 	}, "; ")
+}
+
+func signCallbackCommand(secret string) string {
+	if strings.TrimSpace(secret) == "" {
+		return ":"
+	}
+	python := `import hashlib,hmac,os; print("v1="+hmac.new(os.environ["SECRET"].encode(), (os.environ["TS"]+"."+os.environ["PAYLOAD"]).encode(), hashlib.sha256).hexdigest())`
+	return "ts=$(date +%s); sig=$(SECRET=" + shellQuote(secret) + ` TS="$ts" PAYLOAD="$payload" python3 -c ` + shellQuote(python) + ")"
+}
+
+func signedCallbackHeaders(secret string) string {
+	if strings.TrimSpace(secret) == "" {
+		return ""
+	}
+	return ` -H "X-GPU-Burst-Runner-Timestamp: $ts" -H "X-GPU-Burst-Runner-Signature: $sig"`
 }
 
 func dockerRunCommand(request core.WorkloadRequest) string {

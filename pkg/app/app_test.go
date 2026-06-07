@@ -5,6 +5,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -210,13 +211,14 @@ func TestParseOptionsRequiresRunPodAPIKey(t *testing.T) {
 
 func TestParseOptionsReadsLambdaOptions(t *testing.T) {
 	env := mapEnv(map[string]string{
-		"LAMBDA_API_KEY":                 "lambda-key",
-		"GPU_BURST_LAMBDA_BASE_URL":      "https://lambda.example/api/v1",
-		"GPU_BURST_LAMBDA_CALLBACK_URL":  "https://controller.example/status",
-		"GPU_BURST_RUNNER_CALLBACK_ADDR": "127.0.0.1:19090",
-		"GPU_BURST_LAMBDA_REGION":        "us-west-1",
-		"GPU_BURST_LAMBDA_INSTANCE_TYPE": "gpu_1x_a10",
-		"GPU_BURST_LAMBDA_SSH_KEY_NAMES": "key-a,key-b",
+		"LAMBDA_API_KEY":                   "lambda-key",
+		"GPU_BURST_LAMBDA_BASE_URL":        "https://lambda.example/api/v1",
+		"GPU_BURST_LAMBDA_CALLBACK_URL":    "https://controller.example/status",
+		"GPU_BURST_RUNNER_CALLBACK_ADDR":   "127.0.0.1:19090",
+		"GPU_BURST_RUNNER_CALLBACK_SECRET": "shared-secret",
+		"GPU_BURST_LAMBDA_REGION":          "us-west-1",
+		"GPU_BURST_LAMBDA_INSTANCE_TYPE":   "gpu_1x_a10",
+		"GPU_BURST_LAMBDA_SSH_KEY_NAMES":   "key-a,key-b",
 	})
 
 	options, err := ParseOptions([]string{
@@ -238,6 +240,9 @@ func TestParseOptionsReadsLambdaOptions(t *testing.T) {
 	}
 	if options.RunnerCallbackListenAddr != "127.0.0.1:19091" {
 		t.Fatalf("RunnerCallbackListenAddr = %q, want flag override", options.RunnerCallbackListenAddr)
+	}
+	if options.RunnerCallbackSecret != "shared-secret" {
+		t.Fatalf("RunnerCallbackSecret = %q, want env secret", options.RunnerCallbackSecret)
 	}
 }
 
@@ -330,7 +335,7 @@ func TestRunnerStatusHandlerUpdatesBinding(t *testing.T) {
 		bytes.NewBufferString(`{"workloadID":"default/uid-lambda-runner","exitCode":0,"message":"ok"}`))
 	recorder := httptest.NewRecorder()
 
-	runnerStatusHandler(store).ServeHTTP(recorder, req)
+	runnerStatusHandler(store, "").ServeHTTP(recorder, req)
 
 	if recorder.Code != http.StatusNoContent {
 		t.Fatalf("status code = %d, want %d; body=%s", recorder.Code, http.StatusNoContent, recorder.Body.String())
@@ -360,7 +365,7 @@ func TestStartRunnerCallbackServerUpdatesBinding(t *testing.T) {
 		t.Fatalf("CreateOrGet() error = %v", err)
 	}
 
-	addr, shutdown, err := startRunnerCallbackServer(ctx, "127.0.0.1:0", store)
+	addr, shutdown, err := startRunnerCallbackServer(ctx, "127.0.0.1:0", "", store)
 	if err != nil {
 		t.Fatalf("startRunnerCallbackServer() error = %v", err)
 	}
@@ -381,6 +386,50 @@ func TestStartRunnerCallbackServerUpdatesBinding(t *testing.T) {
 	}
 	if binding.Phase != core.BindingSucceeded {
 		t.Fatalf("phase = %s, want %s", binding.Phase, core.BindingSucceeded)
+	}
+}
+
+func TestRunnerStatusHandlerAcceptsSignedCallback(t *testing.T) {
+	ctx := context.Background()
+	store := core.NewMemoryBindingStore()
+	_, _, err := store.CreateOrGet(ctx, core.Binding{
+		Namespace:   "default",
+		Name:        "lambda-runner",
+		WorkloadUID: "uid-signed",
+		RemoteID:    "lambda-1",
+		Phase:       core.BindingRunning,
+		Request:     core.WorkloadRequest{Provider: ProviderLambda},
+	})
+	if err != nil {
+		t.Fatalf("CreateOrGet() error = %v", err)
+	}
+
+	body := []byte(`{"workloadID":"default/uid-signed","exitCode":0}`)
+	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+	req := httptest.NewRequest(http.MethodPost, "/gpu-burst-node/v1/runner/status", bytes.NewReader(body))
+	req.Header.Set("X-GPU-Burst-Runner-Timestamp", timestamp)
+	req.Header.Set("X-GPU-Burst-Runner-Signature", runnerCallbackSignature("shared-secret", timestamp, body))
+	recorder := httptest.NewRecorder()
+
+	runnerStatusHandler(store, "shared-secret").ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("status code = %d, body = %q, want %d", recorder.Code, recorder.Body.String(), http.StatusNoContent)
+	}
+}
+
+func TestRunnerStatusHandlerRejectsBadSignature(t *testing.T) {
+	store := core.NewMemoryBindingStore()
+	body := []byte(`{"workloadID":"default/uid-signed","exitCode":0}`)
+	req := httptest.NewRequest(http.MethodPost, "/gpu-burst-node/v1/runner/status", bytes.NewReader(body))
+	req.Header.Set("X-GPU-Burst-Runner-Timestamp", strconv.FormatInt(time.Now().Unix(), 10))
+	req.Header.Set("X-GPU-Burst-Runner-Signature", "v1=bad")
+	recorder := httptest.NewRecorder()
+
+	runnerStatusHandler(store, "shared-secret").ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("status code = %d, want %d", recorder.Code, http.StatusUnauthorized)
 	}
 }
 
