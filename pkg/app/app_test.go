@@ -160,8 +160,9 @@ func TestParseOptionsReadsOrphanSweeperOptions(t *testing.T) {
 
 func TestParseOptionsReadsPlacementOptions(t *testing.T) {
 	env := mapEnv(map[string]string{
-		"GPU_BURST_PLACEMENT_OFFERS":    "provider=runpod,location=US-TX-3,gpu=A40,count=1,market=on-demand,price=0.74",
-		"GPU_BURST_PLACEMENT_OFFER_TTL": "30m",
+		"GPU_BURST_PLACEMENT_OFFERS":           "provider=runpod,location=US-TX-3,gpu=A40,count=1,market=on-demand,price=0.74",
+		"GPU_BURST_PLACEMENT_OFFER_TTL":        "30m",
+		"GPU_BURST_PLACEMENT_REFRESH_INTERVAL": "45s",
 	})
 
 	options, err := ParseOptions([]string{
@@ -178,6 +179,9 @@ func TestParseOptionsReadsPlacementOptions(t *testing.T) {
 	}
 	if options.PlacementSignalCooldown != 2*time.Minute {
 		t.Fatalf("PlacementSignalCooldown = %s, want flag override", options.PlacementSignalCooldown)
+	}
+	if options.PlacementRefreshInterval != 45*time.Second {
+		t.Fatalf("PlacementRefreshInterval = %s, want 45s", options.PlacementRefreshInterval)
 	}
 }
 
@@ -240,6 +244,91 @@ func TestNewCandidatePlannerFromBootstrapOffers(t *testing.T) {
 	}
 }
 
+func TestNewPlacementPlannerIncludesRemoteResourceSources(t *testing.T) {
+	options, err := ParseOptions([]string{
+		"--provider=fake",
+		"--binding-store=memory",
+		"--placement-refresh-interval=1m",
+	}, emptyEnv)
+	if err != nil {
+		t.Fatalf("ParseOptions() error = %v", err)
+	}
+	adapter := core.NewFakeProvider(ProviderFake)
+	remote, err := adapter.Create(context.Background(), "default/pod-123", core.WorkloadRequest{
+		Provider:   ProviderFake,
+		RegionHint: "observed",
+		GPUType:    "A10",
+		GPUCount:   1,
+		MarketType: core.MarketTypeOnDemand,
+	})
+	if err != nil {
+		t.Fatalf("fake Create() error = %v", err)
+	}
+	if remote.ID == "" {
+		t.Fatal("remote ID is empty")
+	}
+
+	setup, err := newPlacementPlannerSetup(options, []string{}, map[string]core.ProviderAdapter{ProviderFake: adapter})
+	if err != nil {
+		t.Fatalf("newPlacementPlannerSetup() error = %v", err)
+	}
+	if setup.Planner == nil || setup.Refresher == nil {
+		t.Fatalf("setup = %#v, want planner and refresher", setup)
+	}
+	report := setup.Refresher.Refresh(context.Background())
+	if report.Recorded == 0 {
+		t.Fatalf("refresh report = %#v, want remote resource observations", report)
+	}
+
+	candidates, err := setup.Planner.CreateCandidates(context.Background(), core.Binding{
+		Namespace:   "default",
+		Name:        "train-job",
+		WorkloadUID: "pod-456",
+		Request: core.WorkloadRequest{
+			Image:      "example.com/train:latest",
+			GPUCount:   1,
+			GPUType:    "A10",
+			MaxPrice:   "1.00",
+			MarketType: core.MarketTypeOnDemand,
+			Provider:   ProviderFake,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateCandidates() error = %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].Request.RegionHint != "observed" {
+		t.Fatalf("candidates = %#v, want observed remote-source candidate", candidates)
+	}
+}
+
+func TestNewPlacementPlannerDisabledWithoutBootstrapOrRefresh(t *testing.T) {
+	options, err := ParseOptions([]string{
+		"--provider=fake",
+		"--binding-store=memory",
+	}, emptyEnv)
+	if err != nil {
+		t.Fatalf("ParseOptions() error = %v", err)
+	}
+	adapter := core.NewFakeProvider(ProviderFake)
+	if _, err := adapter.Create(context.Background(), "default/pod-123", core.WorkloadRequest{
+		Provider:   ProviderFake,
+		RegionHint: "observed",
+		GPUType:    "A10",
+		GPUCount:   1,
+		MarketType: core.MarketTypeOnDemand,
+	}); err != nil {
+		t.Fatalf("fake Create() error = %v", err)
+	}
+
+	setup, err := newPlacementPlannerSetup(options, []string{}, map[string]core.ProviderAdapter{ProviderFake: adapter})
+	if err != nil {
+		t.Fatalf("newPlacementPlannerSetup() error = %v", err)
+	}
+	if setup.Planner != nil || setup.Refresher != nil {
+		t.Fatalf("setup = %#v, want placement disabled without bootstrap offers or refresh", setup)
+	}
+}
+
 func TestConfigureNodeSpecAdvertisesProviderTaintAndCapacity(t *testing.T) {
 	options, err := ParseOptions([]string{
 		"--provider=fake",
@@ -282,6 +371,9 @@ func TestParseOptionsRejectsInvalidProviderAndStore(t *testing.T) {
 func TestParseOptionsRejectsNegativeOrphanSweeperInterval(t *testing.T) {
 	if _, err := ParseOptions([]string{"--orphan-sweeper-interval=-1s"}, emptyEnv); err == nil {
 		t.Fatal("ParseOptions() error = nil for negative orphan sweeper interval")
+	}
+	if _, err := ParseOptions([]string{"--placement-refresh-interval=-1s"}, emptyEnv); err == nil {
+		t.Fatal("ParseOptions() error = nil for negative placement refresh interval")
 	}
 }
 
@@ -362,7 +454,7 @@ func TestNewNodeBuildsVirtualKubeletNodeWithFakeProvider(t *testing.T) {
 	}
 }
 
-func TestNewNodeRejectsOrphanSweeperWithoutProviderCleaner(t *testing.T) {
+func TestNewNodeStartsOrphanSweeperForFakeCleaner(t *testing.T) {
 	options, err := ParseOptions([]string{
 		"--provider=fake",
 		"--binding-store=memory",
@@ -371,10 +463,15 @@ func TestNewNodeRejectsOrphanSweeperWithoutProviderCleaner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseOptions() error = %v", err)
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	_, err = NewNode(context.Background(), options, kubefake.NewSimpleClientset(), dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()))
-	if err == nil {
-		t.Fatal("NewNode() error = nil, want unsupported orphan sweeper provider error")
+	node, err := NewNode(ctx, options, kubefake.NewSimpleClientset(), dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()))
+	if err != nil {
+		t.Fatalf("NewNode() error = %v", err)
+	}
+	if node == nil {
+		t.Fatal("NewNode() = nil, want node")
 	}
 }
 

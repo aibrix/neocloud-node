@@ -211,6 +211,7 @@ spec:
             - --orphan-sweeper-dry-run=$(GPU_BURST_ORPHAN_SWEEPER_DRY_RUN)
             - --placement-offers=$(GPU_BURST_PLACEMENT_OFFERS)
             - --placement-offer-ttl=$(GPU_BURST_PLACEMENT_OFFER_TTL)
+            - --placement-refresh-interval=$(GPU_BURST_PLACEMENT_REFRESH_INTERVAL)
             - --placement-signal-cooldown=$(GPU_BURST_PLACEMENT_SIGNAL_COOLDOWN)
           env:
             - name: GPU_BURST_NODE_NAME
@@ -225,6 +226,8 @@ spec:
               value: ""
             - name: GPU_BURST_PLACEMENT_OFFER_TTL
               value: 24h
+            - name: GPU_BURST_PLACEMENT_REFRESH_INTERVAL
+              value: "0"
             - name: GPU_BURST_PLACEMENT_SIGNAL_COOLDOWN
               value: 5m
             - name: GPU_BURST_ORPHAN_SWEEPER_INTERVAL

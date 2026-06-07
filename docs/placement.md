@@ -30,6 +30,10 @@ provider=runpod,location=US-TX-3,gpu=A40,count=1,market=on-demand,price=0.74;pro
 
 `--placement-offer-ttl` controls how long those rows stay fresh, and `--placement-signal-cooldown` controls how long recent capacity/rate-limit/transient failures block a provider/location candidate.
 
+When `--placement-refresh-interval` is greater than zero, GPU Burst Node also refreshes provider-observed resources into the same catalog. Adapters that implement `core.RemoteResourceLister` are wrapped by `resource.RemoteResourceOfferSource`; their `RemoteResource.Request` shape, region, market and cost become normalized offers with the configured TTL. This is intentionally weaker than a full provider catalog API, but it gives RunPod/Lambda-style integrations a clean path to accumulate capacity, price and failure signals without hard-coding provider logic inside the lifecycle service.
+
+If both `--placement-offers` and `--placement-refresh-interval` are empty or zero, the placement planner stays disabled and lifecycle creation uses the direct primary/fallback provider path.
+
 The planner can now drive lifecycle creation through a narrow hook:
 
 - `core.CreateCandidatePlanner` is the provider-neutral lifecycle interface.

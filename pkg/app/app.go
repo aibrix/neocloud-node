@@ -90,9 +90,10 @@ type Options struct {
 
 	StatusSyncInterval time.Duration
 
-	PlacementOffers         string
-	PlacementOfferTTL       time.Duration
-	PlacementSignalCooldown time.Duration
+	PlacementOffers          string
+	PlacementOfferTTL        time.Duration
+	PlacementRefreshInterval time.Duration
+	PlacementSignalCooldown  time.Duration
 }
 
 func ParseOptions(args []string, getenv func(string) string) (Options, error) {
@@ -137,9 +138,10 @@ func ParseOptions(args []string, getenv func(string) string) (Options, error) {
 		OrphanSweeperDryRun:   boolEnv(getenv, "GPU_BURST_ORPHAN_SWEEPER_DRY_RUN", true),
 		StatusSyncInterval:    durationEnv(getenv, "GPU_BURST_STATUS_SYNC_INTERVAL", 15*time.Second),
 
-		PlacementOffers:         envOr(getenv, "GPU_BURST_PLACEMENT_OFFERS", ""),
-		PlacementOfferTTL:       durationEnv(getenv, "GPU_BURST_PLACEMENT_OFFER_TTL", 24*time.Hour),
-		PlacementSignalCooldown: durationEnv(getenv, "GPU_BURST_PLACEMENT_SIGNAL_COOLDOWN", burstresource.DefaultFailureSignalCooldown),
+		PlacementOffers:          envOr(getenv, "GPU_BURST_PLACEMENT_OFFERS", ""),
+		PlacementOfferTTL:        durationEnv(getenv, "GPU_BURST_PLACEMENT_OFFER_TTL", 24*time.Hour),
+		PlacementRefreshInterval: durationEnv(getenv, "GPU_BURST_PLACEMENT_REFRESH_INTERVAL", 0),
+		PlacementSignalCooldown:  durationEnv(getenv, "GPU_BURST_PLACEMENT_SIGNAL_COOLDOWN", burstresource.DefaultFailureSignalCooldown),
 	}
 
 	fs := flag.NewFlagSet("gpu-burst-node", flag.ContinueOnError)
@@ -175,6 +177,7 @@ func ParseOptions(args []string, getenv func(string) string) (Options, error) {
 	fs.DurationVar(&options.StatusSyncInterval, "status-sync-interval", options.StatusSyncInterval, "periodic remote status sync interval; 0 disables it")
 	fs.StringVar(&options.PlacementOffers, "placement-offers", options.PlacementOffers, "semicolon-separated bootstrap placement offers as key=value CSV records")
 	fs.DurationVar(&options.PlacementOfferTTL, "placement-offer-ttl", options.PlacementOfferTTL, "TTL for bootstrap placement offers")
+	fs.DurationVar(&options.PlacementRefreshInterval, "placement-refresh-interval", options.PlacementRefreshInterval, "periodic refresh interval for provider-observed placement offers; 0 disables it")
 	fs.DurationVar(&options.PlacementSignalCooldown, "placement-signal-cooldown", options.PlacementSignalCooldown, "cooldown for recent provider attempts used by placement")
 
 	if err := fs.Parse(args); err != nil {
@@ -227,10 +230,12 @@ func NewNode(ctx context.Context, options Options, kubeClient kubernetes.Interfa
 	if err != nil {
 		return nil, err
 	}
-	candidatePlanner, err := newCandidatePlanner(options, fallbackOrder)
+	placementSetup, err := newPlacementPlannerSetup(options, fallbackOrder,
+		placementProviderAdapters(options.Provider, adapter, fallbackAdapters))
 	if err != nil {
 		return nil, err
 	}
+	startCatalogRefresher(ctx, options, placementSetup.Refresher)
 	if err := startOrphanSweeper(ctx, store, adapter, options); err != nil {
 		return nil, err
 	}
@@ -243,7 +248,7 @@ func NewNode(ctx context.Context, options Options, kubeClient kubernetes.Interfa
 		Adapter:          adapter,
 		FallbackAdapters: fallbackAdapters,
 		FallbackOrder:    fallbackOrder,
-		CandidatePlanner: candidatePlanner,
+		CandidatePlanner: placementSetup.Planner,
 		LaunchGuard:      launchGuard(options),
 		NodeName:         options.NodeName,
 		EventRecorder: newEventRecorder(kubeClient,
@@ -360,12 +365,30 @@ func newFallbackProviderAdapters(options Options) (map[string]core.ProviderAdapt
 }
 
 func newCandidatePlanner(options Options, fallbackOrder []string) (core.CreateCandidatePlanner, error) {
-	offers, err := parsePlacementOffers(options.PlacementOffers)
+	setup, err := newPlacementPlannerSetup(options, fallbackOrder, nil)
 	if err != nil {
 		return nil, err
 	}
-	if len(offers) == 0 {
-		return nil, nil
+	return setup.Planner, nil
+}
+
+type placementPlannerSetup struct {
+	Planner   core.CreateCandidatePlanner
+	Refresher *burstresource.CatalogRefresher
+}
+
+func newPlacementPlannerSetup(options Options, fallbackOrder []string, adapters map[string]core.ProviderAdapter) (placementPlannerSetup, error) {
+	offers, err := parsePlacementOffers(options.PlacementOffers)
+	if err != nil {
+		return placementPlannerSetup{}, err
+	}
+
+	var sources []burstresource.ProviderOfferSource
+	if len(offers) > 0 || options.PlacementRefreshInterval > 0 {
+		sources = placementOfferSources(options.Provider, fallbackOrder, adapters)
+	}
+	if len(offers) == 0 && len(sources) == 0 {
+		return placementPlannerSetup{}, nil
 	}
 
 	catalog := burstresource.NewObservedCatalog(burstresource.ObservedCatalogOptions{
@@ -381,16 +404,114 @@ func newCandidatePlanner(options Options, fallbackOrder []string) (core.CreateCa
 		})
 	}
 
-	providerOrder := append([]string{options.Provider}, fallbackOrder...)
-	return burstresource.LifecycleCandidatePlanner{
-		Catalog: catalog,
-		Policy: burstresource.Policy{
-			ProviderOrder: providerOrder,
+	setup := placementPlannerSetup{
+		Planner: burstresource.LifecycleCandidatePlanner{
+			Catalog: catalog,
+			Policy: burstresource.Policy{
+				ProviderOrder: placementProviderOrder(options.Provider, fallbackOrder),
+			},
+			SignalPolicy: burstresource.FailureSignalPolicy{
+				Cooldown: options.PlacementSignalCooldown,
+			},
 		},
-		SignalPolicy: burstresource.FailureSignalPolicy{
-			Cooldown: options.PlacementSignalCooldown,
-		},
-	}, nil
+	}
+	if len(sources) > 0 {
+		refresher := burstresource.CatalogRefresher{
+			Catalog: catalog,
+			Sources: sources,
+			TTL:     options.PlacementOfferTTL,
+		}
+		setup.Refresher = &refresher
+	}
+	return setup, nil
+}
+
+func placementProviderAdapters(primary string, primaryAdapter core.ProviderAdapter, fallbackAdapters map[string]core.ProviderAdapter) map[string]core.ProviderAdapter {
+	adapters := make(map[string]core.ProviderAdapter, len(fallbackAdapters)+1)
+	if primaryAdapter != nil {
+		adapters[primary] = primaryAdapter
+	}
+	for provider, adapter := range fallbackAdapters {
+		if provider == primary {
+			continue
+		}
+		if adapter != nil {
+			adapters[provider] = adapter
+		}
+	}
+	return adapters
+}
+
+func placementProviderOrder(primary string, fallbackOrder []string) []string {
+	providerOrder := []string{primary}
+	seen := map[string]struct{}{primary: {}}
+	for _, provider := range fallbackOrder {
+		if _, ok := seen[provider]; ok {
+			continue
+		}
+		providerOrder = append(providerOrder, provider)
+		seen[provider] = struct{}{}
+	}
+	return providerOrder
+}
+
+func placementOfferSources(primary string, fallbackOrder []string, adapters map[string]core.ProviderAdapter) []burstresource.ProviderOfferSource {
+	if len(adapters) == 0 {
+		return nil
+	}
+	providerOrder := placementProviderOrder(primary, fallbackOrder)
+	sources := make([]burstresource.ProviderOfferSource, 0, len(providerOrder))
+	for _, provider := range providerOrder {
+		adapter := adapters[provider]
+		if adapter == nil {
+			continue
+		}
+		lister, ok := adapter.(core.RemoteResourceLister)
+		if !ok {
+			continue
+		}
+		sources = append(sources, burstresource.RemoteResourceOfferSource{
+			ProviderName: provider,
+			Lister:       lister,
+		})
+	}
+	return sources
+}
+
+func startCatalogRefresher(ctx context.Context, options Options, refresher *burstresource.CatalogRefresher) {
+	if refresher == nil || options.PlacementRefreshInterval <= 0 {
+		return
+	}
+	go runCatalogRefresher(ctx, options.PlacementRefreshInterval, *refresher)
+}
+
+func runCatalogRefresher(ctx context.Context, interval time.Duration, refresher burstresource.CatalogRefresher) {
+	if interval <= 0 {
+		return
+	}
+	report := refresher.Refresh(ctx)
+	logCatalogRefreshReport(report)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			report := refresher.Refresh(ctx)
+			logCatalogRefreshReport(report)
+		}
+	}
+}
+
+func logCatalogRefreshReport(report burstresource.CatalogRefreshReport) {
+	if len(report.Errors) > 0 {
+		log.Printf("gpu-burst-node placement catalog refresh completed: recorded=%d errors=%d firstError=%v",
+			report.Recorded, len(report.Errors), report.Errors[0])
+		return
+	}
+	log.Printf("gpu-burst-node placement catalog refresh completed: recorded=%d", report.Recorded)
 }
 
 func parsePlacementOffers(raw string) ([]burstresource.Offer, error) {
@@ -754,6 +875,9 @@ func validateOptions(options Options) error {
 	}
 	if options.PlacementOfferTTL < 0 {
 		return errors.New("placement offer ttl cannot be negative")
+	}
+	if options.PlacementRefreshInterval < 0 {
+		return errors.New("placement refresh interval cannot be negative")
 	}
 	if options.PlacementSignalCooldown < 0 {
 		return errors.New("placement signal cooldown cannot be negative")

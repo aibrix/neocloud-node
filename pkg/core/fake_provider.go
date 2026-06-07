@@ -112,6 +112,21 @@ func (p *FakeProvider) Delete(ctx context.Context, remoteID string) error {
 	return nil
 }
 
+func (p *FakeProvider) ListRemoteResources(ctx context.Context) ([]RemoteResource, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	remotes := make([]RemoteResource, 0, len(p.byID))
+	for _, remote := range p.byID {
+		remotes = append(remotes, remote)
+	}
+	return remotes, nil
+}
+
 func (p *FakeProvider) CreateCount() int {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
