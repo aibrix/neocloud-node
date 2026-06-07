@@ -184,9 +184,20 @@ func (c *Client) Delete(ctx context.Context, remoteID string) error {
 		if strings.TrimSpace(remoteID) != "" && isRemoteNotFound(err) {
 			return nil
 		}
+		if c.deletedAfterUncertainDelete(ctx, remoteID, err) {
+			return nil
+		}
 		return err
 	}
 	return nil
+}
+
+func (c *Client) deletedAfterUncertainDelete(ctx context.Context, remoteID string, deleteErr error) bool {
+	if strings.TrimSpace(remoteID) == "" || !shouldRecoverDelete(deleteErr) {
+		return false
+	}
+	_, err := c.Get(ctx, remoteID)
+	return isRemoteNotFound(err)
 }
 
 func (c *Client) launchPayload(idempotencyKey string, name string, request core.WorkloadRequest) (launchRequest, error) {
@@ -437,6 +448,11 @@ func firstNonEmpty(values ...string) string {
 }
 
 func shouldRecoverCreate(err error) bool {
+	class := core.ClassifyError(err)
+	return class == core.ErrorClassTransient || class == core.ErrorClassTimeout
+}
+
+func shouldRecoverDelete(err error) bool {
 	class := core.ClassifyError(err)
 	return class == core.ErrorClassTransient || class == core.ErrorClassTimeout
 }

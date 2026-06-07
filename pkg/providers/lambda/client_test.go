@@ -254,6 +254,30 @@ func TestClientDeleteTreatsNotFoundAsSuccess(t *testing.T) {
 	}
 }
 
+func TestClientDeleteRecoversLostDeleteResponseWhenRemoteIsGone(t *testing.T) {
+	t.Parallel()
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		switch {
+		case requests == 1 && r.Method == http.MethodPost && r.URL.Path == "/instance-operations/terminate":
+			http.Error(w, "gateway timeout", http.StatusGatewayTimeout)
+		case requests == 2 && r.Method == http.MethodGet && r.URL.Path == "/instances/lambda-1":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":{"code":"global/object-does-not-exist"}}`))
+		default:
+			t.Fatalf("unexpected request %d %s %s", requests, r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{BaseURL: server.URL, APIKey: "lambda-key"})
+	if err := client.Delete(context.Background(), "lambda-1"); err != nil {
+		t.Fatalf("Delete returned error: %v", err)
+	}
+}
+
 func TestClientClassifiesLambdaErrors(t *testing.T) {
 	t.Parallel()
 

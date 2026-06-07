@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -177,7 +178,11 @@ func (c *Client) Delete(ctx context.Context, remoteID string) error {
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return providerTransportError(httpReq, err)
+		err = providerTransportError(httpReq, err)
+		if c.deletedAfterUncertainDelete(ctx, remoteID, err) {
+			return nil
+		}
+		return err
 	}
 	defer resp.Body.Close()
 
@@ -189,8 +194,20 @@ func (c *Client) Delete(ctx context.Context, remoteID string) error {
 		if err != nil {
 			return providerTransportError(httpReq, err)
 		}
-		return providerHTTPError(httpReq, resp.StatusCode, body)
+		err = providerHTTPError(httpReq, resp.StatusCode, body)
+		if c.deletedAfterUncertainDelete(ctx, remoteID, err) {
+			return nil
+		}
+		return err
 	}
+}
+
+func (c *Client) deletedAfterUncertainDelete(ctx context.Context, remoteID string, deleteErr error) bool {
+	if strings.TrimSpace(remoteID) == "" || !shouldRecoverDelete(deleteErr) {
+		return false
+	}
+	_, err := c.Get(ctx, remoteID)
+	return errors.Is(err, core.ErrRemoteNotFound) || core.ClassifyError(err) == core.ErrorClassRemoteNotFound
 }
 
 func (c *Client) setHeaders(req *http.Request) {
@@ -479,6 +496,11 @@ func splitCSV(raw string) []string {
 }
 
 func shouldRecoverCreate(err error) bool {
+	class := core.ClassifyError(err)
+	return class == core.ErrorClassTransient || class == core.ErrorClassTimeout
+}
+
+func shouldRecoverDelete(err error) bool {
 	class := core.ClassifyError(err)
 	return class == core.ErrorClassTransient || class == core.ErrorClassTimeout
 }
