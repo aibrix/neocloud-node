@@ -154,6 +154,12 @@ func cloneOffers(in []Offer) []Offer {
 				copied.Capabilities[capability] = supported
 			}
 		}
+		if len(offer.ProviderHints) > 0 {
+			copied.ProviderHints = make(map[string]string, len(offer.ProviderHints))
+			for key, value := range offer.ProviderHints {
+				copied.ProviderHints[key] = value
+			}
+		}
 		out = append(out, copied)
 	}
 	return out

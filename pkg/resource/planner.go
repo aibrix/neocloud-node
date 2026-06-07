@@ -52,6 +52,7 @@ type Offer struct {
 	HourlyPrice         float64
 	Available           bool
 	Capabilities        map[Capability]bool
+	ProviderHints       map[string]string
 	MigrationCost       float64
 	ColdStart           time.Duration
 	ExpectedLifetime    time.Duration

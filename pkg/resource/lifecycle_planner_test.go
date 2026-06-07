@@ -58,6 +58,65 @@ func TestLifecycleCandidatePlannerBuildsSelectedAndFallbackCandidates(t *testing
 	}
 }
 
+func TestLifecycleCandidatePlannerMergesOfferProviderHints(t *testing.T) {
+	t.Parallel()
+
+	planner := LifecycleCandidatePlanner{
+		Catalog: CompositeCatalog{
+			AllowPartial: true,
+			Sources: []ProviderOfferSource{
+				StaticCatalog{
+					ProviderName: "lambda",
+					Offers: []Offer{
+						{
+							ID:        "lambda-a10",
+							Provider:  "lambda",
+							Location:  "us-west-1",
+							GPUType:   "A10",
+							GPUCount:  1,
+							Market:    MarketOnDemand,
+							Available: true,
+							ProviderHints: map[string]string{
+								core.AnnotationLambdaInstanceType: "gpu_1x_a10",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	candidates, err := planner.CreateCandidates(context.Background(), core.Binding{
+		Namespace:   "default",
+		Name:        "train-job",
+		WorkloadUID: "pod-123",
+		Request: core.WorkloadRequest{
+			Image:      "example.com/train:latest",
+			GPUCount:   1,
+			GPUType:    "A10",
+			MaxPrice:   "1.00",
+			MarketType: core.MarketTypeOnDemand,
+			Provider:   "lambda",
+			ProviderHints: map[string]string{
+				core.AnnotationLambdaSSHKeyNames: "default-key",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateCandidates() error = %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("candidates = %#v, want one lambda candidate", candidates)
+	}
+	hints := candidates[0].Request.ProviderHints
+	if hints[core.AnnotationLambdaInstanceType] != "gpu_1x_a10" {
+		t.Fatalf("lambda instance type hint = %q, want gpu_1x_a10", hints[core.AnnotationLambdaInstanceType])
+	}
+	if hints[core.AnnotationLambdaSSHKeyNames] != "default-key" {
+		t.Fatalf("lambda ssh key hint = %q, want existing hint preserved", hints[core.AnnotationLambdaSSHKeyNames])
+	}
+}
+
 func TestLifecycleCandidatePlannerUsesRecentAttemptsAsCooldown(t *testing.T) {
 	t.Parallel()
 

@@ -84,6 +84,23 @@ func requestForOffer(request core.WorkloadRequest, offer Offer) core.WorkloadReq
 	if offer.Market != "" && offer.Market != MarketEither {
 		out.MarketType = string(offer.Market)
 	}
+	if len(offer.ProviderHints) > 0 {
+		out.ProviderHints = mergeStringMaps(out.ProviderHints, offer.ProviderHints)
+	}
+	return out
+}
+
+func mergeStringMaps(base map[string]string, overlay map[string]string) map[string]string {
+	if len(base) == 0 && len(overlay) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(base)+len(overlay))
+	for key, value := range base {
+		out[key] = value
+	}
+	for key, value := range overlay {
+		out[key] = value
+	}
 	return out
 }
 
