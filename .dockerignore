@@ -1,0 +1,15 @@
+.git
+.github
+bin
+data
+dist
+docs
+figures
+logs
+tools
+
+gpu-burst-node
+neocloud-node
+coverage.out
+*.log
+*.tmp
