@@ -16,7 +16,7 @@ Official API references:
 
 | `core.WorkloadRequest` / config | Lambda launch field | Notes |
 | --- | --- | --- |
-| idempotency key | `name`, `hostname`, tags | Sanitized as `gpu-burst-node-<namespace>-<uid>` and truncated for Lambda's name limit. |
+| idempotency key | `name`, `hostname`, tags | Sanitized as `neocloud-node-<namespace>-<uid>` and truncated for Lambda's name limit. |
 | `RegionHint` or `--lambda-region` | `region_name` | Required. |
 | provider hint `lambda-instance-type` or `--lambda-instance-type` | `instance_type_name` | Required because Lambda instance type is not the same as a generic GPU type. |
 | provider hint `lambda-ssh-key-names` or `--lambda-ssh-key-names` | `ssh_key_names` | Required by Lambda launch API. |
@@ -60,7 +60,7 @@ The adapter implements `resource.ProviderOfferSource` by reading `GET /instance-
 ## Current Limitations
 
 - A gated real Lambda smoke test exists, but the current development environment has not completed it successfully yet.
-- The controller exposes `POST /gpu-burst-node/v1/runner/status` when the kubelet API server is enabled. The shell runner reports `Running` and terminal `Succeeded`/`Failed` callbacks through this endpoint; periodic heartbeat timeouts and logs are not implemented yet.
+- The controller exposes `POST /neocloud-node/v1/runner/status` when the kubelet API server is enabled. The shell runner reports `Running` and terminal `Succeeded`/`Failed` callbacks through this endpoint; periodic heartbeat timeouts and logs are not implemented yet.
 - No automatic SSH key creation.
 - No logs collection.
 

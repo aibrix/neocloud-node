@@ -10,16 +10,37 @@ import (
 )
 
 func TestBaseManifestContainsRunnableControlPlaneResources(t *testing.T) {
-	objects := readObjects(t, "gpu-burst-node.yaml")
+	objects := readObjects(t, "neocloud-node.yaml")
 
-	requireKindName(t, objects, "CustomResourceDefinition", "cloudpodbindings.gpu-burst-node.aibrix.ai")
-	requireKindName(t, objects, "ServiceAccount", "gpu-burst-node")
-	requireKindName(t, objects, "ClusterRole", "gpu-burst-node")
-	requireKindName(t, objects, "ClusterRoleBinding", "gpu-burst-node")
-	deployment := requireKindName(t, objects, "Deployment", "gpu-burst-node")
+	requireKindName(t, objects, "Namespace", "aibrix-system")
+	requireKindName(t, objects, "CustomResourceDefinition", "cloudpodbindings.cloud.aibrix.ai")
+	serviceAccount := requireKindName(t, objects, "ServiceAccount", "aibrix-neocloud-node")
+	requireKindName(t, objects, "ClusterRole", "aibrix-neocloud-node")
+	clusterRoleBinding := requireKindName(t, objects, "ClusterRoleBinding", "aibrix-neocloud-node")
+	deployment := requireKindName(t, objects, "Deployment", "aibrix-neocloud-node")
 
-	containers := deployment["spec"].(map[string]interface{})["template"].(map[string]interface{})["spec"].(map[string]interface{})["containers"].([]interface{})
-	args := containers[0].(map[string]interface{})["args"].([]interface{})
+	if serviceAccount["metadata"].(map[string]interface{})["namespace"] != "aibrix-system" {
+		t.Fatalf("ServiceAccount namespace = %v, want aibrix-system", serviceAccount["metadata"].(map[string]interface{})["namespace"])
+	}
+	subjects := clusterRoleBinding["subjects"].([]interface{})
+	subject := subjects[0].(map[string]interface{})
+	if subject["name"] != "aibrix-neocloud-node" || subject["namespace"] != "aibrix-system" {
+		t.Fatalf("ClusterRoleBinding subject = %#v, want aibrix-neocloud-node in aibrix-system", subject)
+	}
+	if deployment["metadata"].(map[string]interface{})["namespace"] != "aibrix-system" {
+		t.Fatalf("Deployment namespace = %v, want aibrix-system", deployment["metadata"].(map[string]interface{})["namespace"])
+	}
+
+	podSpec := deployment["spec"].(map[string]interface{})["template"].(map[string]interface{})["spec"].(map[string]interface{})
+	if podSpec["serviceAccountName"] != "aibrix-neocloud-node" {
+		t.Fatalf("serviceAccountName = %v, want aibrix-neocloud-node", podSpec["serviceAccountName"])
+	}
+	containers := podSpec["containers"].([]interface{})
+	container := containers[0].(map[string]interface{})
+	if container["name"] != "aibrix-neocloud-node" {
+		t.Fatalf("container name = %v, want aibrix-neocloud-node", container["name"])
+	}
+	args := container["args"].([]interface{})
 	requireContains(t, args, "--provider=$(GPU_BURST_PROVIDER)")
 	requireContains(t, args, "--binding-store=kubernetes")
 	requireContains(t, args, "--node-name=$(GPU_BURST_NODE_NAME)")
@@ -29,11 +50,15 @@ func TestBaseManifestContainsRunnableControlPlaneResources(t *testing.T) {
 	requireContains(t, args, "--placement-offer-ttl=$(GPU_BURST_PLACEMENT_OFFER_TTL)")
 	requireContains(t, args, "--placement-refresh-interval=$(GPU_BURST_PLACEMENT_REFRESH_INTERVAL)")
 	requireContains(t, args, "--placement-signal-cooldown=$(GPU_BURST_PLACEMENT_SIGNAL_COOLDOWN)")
+
+	env := container["env"].([]interface{})
+	requireSecretRef(t, env, "RUNPOD_API_KEY", "aibrix-neocloud-node-runpod")
+	requireSecretRef(t, env, "LAMBDA_API_KEY", "aibrix-neocloud-node-lambda")
 }
 
 func TestCRDHasStatusSubresourceAndPrinterColumns(t *testing.T) {
-	objects := readObjects(t, "gpu-burst-node.yaml")
-	crd := requireKindName(t, objects, "CustomResourceDefinition", "cloudpodbindings.gpu-burst-node.aibrix.ai")
+	objects := readObjects(t, "neocloud-node.yaml")
+	crd := requireKindName(t, objects, "CustomResourceDefinition", "cloudpodbindings.cloud.aibrix.ai")
 	versions := crd["spec"].(map[string]interface{})["versions"].([]interface{})
 	version := versions[0].(map[string]interface{})
 
@@ -52,11 +77,11 @@ func TestCRDHasStatusSubresourceAndPrinterColumns(t *testing.T) {
 
 func TestExamplePodTargetsGpuBurstNode(t *testing.T) {
 	objects := readObjects(t, "examples/fake-pod.yaml")
-	pod := requireKindName(t, objects, "Pod", "gpu-burst-fake-smoke")
+	pod := requireKindName(t, objects, "Pod", "neocloud-node-fake-smoke")
 	spec := pod["spec"].(map[string]interface{})
 
 	nodeSelector := spec["nodeSelector"].(map[string]interface{})
-	if nodeSelector["gpu-burst-node.aibrix.ai/provider"] != "fake" {
+	if nodeSelector["cloud.aibrix.ai/provider"] != "fake" {
 		t.Fatalf("nodeSelector = %#v, want fake provider selector", nodeSelector)
 	}
 	tolerations := spec["tolerations"].([]interface{})
@@ -64,7 +89,7 @@ func TestExamplePodTargetsGpuBurstNode(t *testing.T) {
 		t.Fatalf("tolerations = %#v, want one provider toleration", tolerations)
 	}
 	toleration := tolerations[0].(map[string]interface{})
-	if toleration["key"] != "gpu-burst-node.aibrix.ai/provider" || toleration["value"] != "fake" {
+	if toleration["key"] != "cloud.aibrix.ai/provider" || toleration["value"] != "fake" {
 		t.Fatalf("toleration = %#v, want fake provider toleration", toleration)
 	}
 }
@@ -116,4 +141,22 @@ func requireContains(t *testing.T, values []interface{}, want string) {
 		}
 	}
 	t.Fatalf("values = %#v, want %q", values, want)
+}
+
+func requireSecretRef(t *testing.T, env []interface{}, name string, secretName string) {
+	t.Helper()
+
+	for _, item := range env {
+		entry := item.(map[string]interface{})
+		if entry["name"] != name {
+			continue
+		}
+		valueFrom := entry["valueFrom"].(map[string]interface{})
+		secretRef := valueFrom["secretKeyRef"].(map[string]interface{})
+		if secretRef["name"] != secretName {
+			t.Fatalf("%s secret ref = %#v, want %s", name, secretRef, secretName)
+		}
+		return
+	}
+	t.Fatalf("env = %#v, want %s secret ref", env, name)
 }

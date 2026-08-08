@@ -39,7 +39,7 @@ import (
 )
 
 const (
-	DefaultNodeName = "aibrix-gpu-burst"
+	DefaultNodeName = "neocloud-node"
 
 	ProviderFake   = "fake"
 	ProviderRunPod = "runpod"
@@ -48,8 +48,8 @@ const (
 	BindingStoreMemory     = "memory"
 	BindingStoreKubernetes = "kubernetes"
 
-	NodeLabelProvider = "gpu-burst-node.aibrix.ai/provider"
-	NodeTaintKey      = "gpu-burst-node.aibrix.ai/provider"
+	NodeLabelProvider = "cloud.aibrix.ai/provider"
+	NodeTaintKey      = "cloud.aibrix.ai/provider"
 	NvidiaGPUResource = "nvidia.com/gpu"
 )
 
@@ -272,7 +272,7 @@ func NewNode(ctx context.Context, options Options, kubeClient kubernetes.Interfa
 			return nil, err
 		}
 		mux := http.NewServeMux()
-		mux.Handle("/gpu-burst-node/v1/runner/status", runnerStatusHandler(store, options.RunnerCallbackSecret))
+		mux.Handle("/neocloud-node/v1/runner/status", runnerStatusHandler(store, options.RunnerCallbackSecret))
 		nodeOptions = append(nodeOptions,
 			nodeutil.AttachProviderRoutes(mux),
 			func(config *nodeutil.NodeConfig) error {
@@ -721,8 +721,8 @@ func verifyRunnerCallbackSignature(r *http.Request, body []byte, secret string, 
 	if strings.TrimSpace(secret) == "" {
 		return nil
 	}
-	timestamp := strings.TrimSpace(r.Header.Get("X-GPU-Burst-Runner-Timestamp"))
-	signature := strings.TrimSpace(r.Header.Get("X-GPU-Burst-Runner-Signature"))
+	timestamp := strings.TrimSpace(r.Header.Get("X-NeoCloud-Runner-Timestamp"))
+	signature := strings.TrimSpace(r.Header.Get("X-NeoCloud-Runner-Signature"))
 	if timestamp == "" || signature == "" {
 		return errors.New("missing runner callback signature")
 	}

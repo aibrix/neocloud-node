@@ -88,7 +88,7 @@ func TestClientCreateSendsRunPodPayload(t *testing.T) {
 		t.Fatalf("remote cost source = %q, want runpod.costPerHr", remote.CostSource)
 	}
 
-	assertPayloadString(t, gotPayload, "name", "gpu-burst-node-default-pod-123")
+	assertPayloadString(t, gotPayload, "name", "neocloud-node-default-pod-123")
 	assertPayloadString(t, gotPayload, "imageName", "example.com/train:latest")
 	assertPayloadString(t, gotPayload, "computeType", "GPU")
 	assertPayloadStringSlice(t, gotPayload, "dockerEntrypoint", []string{"python"})
@@ -128,12 +128,12 @@ func TestClientCreateRecoversLostCreateResponseByExternalName(t *testing.T) {
 		case requests == 1 && r.Method == http.MethodPost && r.URL.Path == "/pods":
 			http.Error(w, "gateway timeout", http.StatusGatewayTimeout)
 		case requests == 2 && r.Method == http.MethodGet && r.URL.Path == "/pods":
-			if got := r.URL.Query().Get("name"); got != "gpu-burst-node-default-pod-123" {
+			if got := r.URL.Query().Get("name"); got != "neocloud-node-default-pod-123" {
 				t.Fatalf("name query = %q, want external name", got)
 			}
 			_, _ = w.Write([]byte(`[{
 				"id": "runpod-existing",
-				"name": "gpu-burst-node-default-pod-123",
+				"name": "neocloud-node-default-pod-123",
 				"desiredStatus": "RUNNING",
 				"image": "example.com/train:latest"
 			}]`))
@@ -167,12 +167,12 @@ func TestClientCreateRecoversDecodeFailureByExternalName(t *testing.T) {
 			w.WriteHeader(http.StatusCreated)
 			_, _ = w.Write([]byte(`{"id":`))
 		case requests == 2 && r.Method == http.MethodGet && r.URL.Path == "/pods":
-			if got := r.URL.Query().Get("name"); got != "gpu-burst-node-default-pod-123" {
+			if got := r.URL.Query().Get("name"); got != "neocloud-node-default-pod-123" {
 				t.Fatalf("name query = %q, want external name", got)
 			}
 			_, _ = w.Write([]byte(`[{
 				"id": "runpod-created",
-				"name": "gpu-burst-node-default-pod-123",
+				"name": "neocloud-node-default-pod-123",
 				"desiredStatus": "RUNNING",
 				"image": "example.com/train:latest",
 				"costPerHr": 0.44
@@ -308,7 +308,7 @@ func TestClientListBackfillsRemoteRequestShape(t *testing.T) {
 		}
 		_, _ = w.Write([]byte(`[{
 			"id": "runpod-1",
-			"name": "gpu-burst-node-default-pod-123",
+			"name": "neocloud-node-default-pod-123",
 			"desiredStatus": "RUNNING",
 			"interruptible": true,
 			"costPerHr": 0.74,

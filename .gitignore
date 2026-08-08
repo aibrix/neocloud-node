@@ -6,6 +6,6 @@ logs/
 data/neocloud-trace/
 
 # Local binaries and generated runtime cache.
-gpu-burst-node
+neocloud-node
 tools/neocloud-trace/__pycache__/
 *.pyc

@@ -482,7 +482,7 @@ func TestNewNodeBuildsVirtualKubeletNodeWithFakeProvider(t *testing.T) {
 	options, err := ParseOptions([]string{
 		"--provider=fake",
 		"--binding-store=memory",
-		"--node-name=test-gpu-burst",
+		"--node-name=test-neocloud-node",
 	}, emptyEnv)
 	if err != nil {
 		t.Fatalf("ParseOptions() error = %v", err)
@@ -554,7 +554,7 @@ func TestRunnerStatusHandlerUpdatesBinding(t *testing.T) {
 		t.Fatalf("CreateOrGet() error = %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/gpu-burst-node/v1/runner/status",
+	req := httptest.NewRequest(http.MethodPost, "/neocloud-node/v1/runner/status",
 		bytes.NewBufferString(`{"workloadID":"default/uid-lambda-runner","exitCode":0,"message":"ok"}`))
 	recorder := httptest.NewRecorder()
 
@@ -587,7 +587,7 @@ func TestRunnerStatusHandlerRecordsRunningPhase(t *testing.T) {
 		t.Fatalf("CreateOrGet() error = %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/gpu-burst-node/v1/runner/status",
+	req := httptest.NewRequest(http.MethodPost, "/neocloud-node/v1/runner/status",
 		bytes.NewBufferString(`{"workloadID":"default/uid-lambda-running","phase":"Running","message":"runner started"}`))
 	recorder := httptest.NewRecorder()
 
@@ -631,7 +631,7 @@ func TestStartRunnerCallbackServerUpdatesBinding(t *testing.T) {
 	}
 	defer shutdown(context.Background())
 
-	resp, err := http.Post("http://"+addr+"/gpu-burst-node/v1/runner/status", "application/json",
+	resp, err := http.Post("http://"+addr+"/neocloud-node/v1/runner/status", "application/json",
 		bytes.NewBufferString(`{"workloadID":"default/uid-callback-server","exitCode":0,"message":"ok"}`))
 	if err != nil {
 		t.Fatalf("runner callback POST error = %v", err)
@@ -666,9 +666,9 @@ func TestRunnerStatusHandlerAcceptsSignedCallback(t *testing.T) {
 
 	body := []byte(`{"workloadID":"default/uid-signed","exitCode":0}`)
 	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
-	req := httptest.NewRequest(http.MethodPost, "/gpu-burst-node/v1/runner/status", bytes.NewReader(body))
-	req.Header.Set("X-GPU-Burst-Runner-Timestamp", timestamp)
-	req.Header.Set("X-GPU-Burst-Runner-Signature", runnerCallbackSignature("shared-secret", timestamp, body))
+	req := httptest.NewRequest(http.MethodPost, "/neocloud-node/v1/runner/status", bytes.NewReader(body))
+	req.Header.Set("X-NeoCloud-Runner-Timestamp", timestamp)
+	req.Header.Set("X-NeoCloud-Runner-Signature", runnerCallbackSignature("shared-secret", timestamp, body))
 	recorder := httptest.NewRecorder()
 
 	runnerStatusHandler(store, "shared-secret").ServeHTTP(recorder, req)
@@ -681,9 +681,9 @@ func TestRunnerStatusHandlerAcceptsSignedCallback(t *testing.T) {
 func TestRunnerStatusHandlerRejectsBadSignature(t *testing.T) {
 	store := core.NewMemoryBindingStore()
 	body := []byte(`{"workloadID":"default/uid-signed","exitCode":0}`)
-	req := httptest.NewRequest(http.MethodPost, "/gpu-burst-node/v1/runner/status", bytes.NewReader(body))
-	req.Header.Set("X-GPU-Burst-Runner-Timestamp", strconv.FormatInt(time.Now().Unix(), 10))
-	req.Header.Set("X-GPU-Burst-Runner-Signature", "v1=bad")
+	req := httptest.NewRequest(http.MethodPost, "/neocloud-node/v1/runner/status", bytes.NewReader(body))
+	req.Header.Set("X-NeoCloud-Runner-Timestamp", strconv.FormatInt(time.Now().Unix(), 10))
+	req.Header.Set("X-NeoCloud-Runner-Signature", "v1=bad")
 	recorder := httptest.NewRecorder()
 
 	runnerStatusHandler(store, "shared-secret").ServeHTTP(recorder, req)

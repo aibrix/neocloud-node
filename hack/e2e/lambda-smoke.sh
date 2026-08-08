@@ -7,13 +7,13 @@ GO="${GO:-go}"
 PYTHON="${PYTHON:-python3}"
 CURL="${CURL:-curl}"
 
-NODE_NAME="${GPU_BURST_E2E_NODE_NAME:-aibrix-gpu-burst-lambda-e2e}"
+NODE_NAME="${GPU_BURST_E2E_NODE_NAME:-neocloud-node-lambda-e2e}"
 NAMESPACE="${GPU_BURST_E2E_NAMESPACE:-default}"
 BINARY="${GPU_BURST_E2E_BINARY:-/tmp/neocloud-node-e2e}"
 LISTEN_ADDR="${GPU_BURST_E2E_LISTEN_ADDR:-:11252}"
 CALLBACK_ADDR="${LAMBDA_E2E_CALLBACK_ADDR:-${GPU_BURST_RUNNER_CALLBACK_ADDR:-}}"
 CALLBACK_URL="${LAMBDA_E2E_CALLBACK_URL:-${GPU_BURST_LAMBDA_CALLBACK_URL:-}}"
-POD_NAME="${LAMBDA_E2E_POD:-gpu-burst-lambda-e2e-success}"
+POD_NAME="${LAMBDA_E2E_POD:-neocloud-node-lambda-e2e-success}"
 SUCCESS_TIMEOUT_SECONDS="${LAMBDA_E2E_SUCCESS_TIMEOUT_SECONDS:-900}"
 RUNNER_TIMEOUT_SECONDS="${LAMBDA_E2E_RUNNER_TIMEOUT_SECONDS:-1800}"
 LAMBDA_BASE_URL="${LAMBDA_BASE_URL:-${GPU_BURST_LAMBDA_BASE_URL:-https://cloud.lambda.ai/api/v1}}"
@@ -220,8 +220,8 @@ cleanup_kubernetes_objects() {
       --type=merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 || true
     "$KUBECTL" -n "$NAMESPACE" delete cloudpodbinding "$binding" \
       --ignore-not-found=true >/dev/null 2>&1 || true
-  done < <("$KUBECTL" -n "$NAMESPACE" get cloudpodbindings.gpu-burst-node.aibrix.ai \
-    -l "gpu-burst-node.aibrix.ai/pod-name=${POD_NAME}" \
+  done < <("$KUBECTL" -n "$NAMESPACE" get cloudpodbindings.cloud.aibrix.ai \
+    -l "cloud.aibrix.ai/pod-name=${POD_NAME}" \
     -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
 
   "$KUBECTL" delete node "$NODE_NAME" --ignore-not-found=true >/dev/null 2>&1 || true
@@ -251,14 +251,14 @@ managed_external_name() {
   raw="${raw//_/-}"
   raw="${raw//./-}"
   raw="${raw//:/-}"
-  printf 'gpu-burst-node-%s\n' "$raw"
+  printf 'neocloud-node-%s\n' "$raw"
 }
 
 apply_control_plane_prereqs() {
-  "$KUBECTL" create namespace gpu-burst-node-system \
+  "$KUBECTL" create namespace aibrix-system \
     --dry-run=client -o yaml | "$KUBECTL" apply -f -
   awk 'BEGIN { doc=0 } /^---$/ { doc++; if (doc >= 2) exit } { print }' \
-    "$ROOT_DIR/deploy/gpu-burst-node.yaml" | "$KUBECTL" apply -f -
+    "$ROOT_DIR/deploy/neocloud-node.yaml" | "$KUBECTL" apply -f -
 }
 
 build_binary() {
@@ -308,18 +308,18 @@ metadata:
   name: ${POD_NAME}
   namespace: ${NAMESPACE}
   labels:
-    gpu-burst-node.aibrix.ai/e2e: lambda
+    cloud.aibrix.ai/e2e: lambda
   annotations:
-    gpu-burst-node.aibrix.ai/provider: lambda
-    gpu-burst-node.aibrix.ai/gpu-type: ${INSTANCE_TYPE}
-    gpu-burst-node.aibrix.ai/region: ${REGION}
-    gpu-burst-node.aibrix.ai/lambda-instance-type: ${INSTANCE_TYPE}
+    cloud.aibrix.ai/provider: lambda
+    cloud.aibrix.ai/gpu-type: ${INSTANCE_TYPE}
+    cloud.aibrix.ai/region: ${REGION}
+    cloud.aibrix.ai/lambda-instance-type: ${INSTANCE_TYPE}
 spec:
   restartPolicy: Never
   nodeSelector:
-    gpu-burst-node.aibrix.ai/provider: lambda
+    cloud.aibrix.ai/provider: lambda
   tolerations:
-    - key: gpu-burst-node.aibrix.ai/provider
+    - key: cloud.aibrix.ai/provider
       operator: Equal
       value: lambda
       effect: NoSchedule
@@ -339,11 +339,11 @@ wait_for_binding_running() {
   local phase=""
   local remote_id=""
   while (( SECONDS < deadline )); do
-    phase="$("$KUBECTL" -n "$NAMESPACE" get cloudpodbindings.gpu-burst-node.aibrix.ai \
-      -l "gpu-burst-node.aibrix.ai/pod-name=${POD_NAME}" \
+    phase="$("$KUBECTL" -n "$NAMESPACE" get cloudpodbindings.cloud.aibrix.ai \
+      -l "cloud.aibrix.ai/pod-name=${POD_NAME}" \
       -o jsonpath='{.items[0].status.phase}' 2>/dev/null || true)"
-    remote_id="$("$KUBECTL" -n "$NAMESPACE" get cloudpodbindings.gpu-burst-node.aibrix.ai \
-      -l "gpu-burst-node.aibrix.ai/pod-name=${POD_NAME}" \
+    remote_id="$("$KUBECTL" -n "$NAMESPACE" get cloudpodbindings.cloud.aibrix.ai \
+      -l "cloud.aibrix.ai/pod-name=${POD_NAME}" \
       -o jsonpath='{.items[0].status.remoteID}' 2>/dev/null || true)"
     log "binding phase=${phase:-<none>} remoteID=${remote_id:-<none>}"
     if [[ -n "$remote_id" && ( "$phase" == "Running" || "$phase" == "Succeeded" ) ]]; then
@@ -351,8 +351,8 @@ wait_for_binding_running() {
     fi
     if [[ "$phase" == "Failed" ]]; then
       "$KUBECTL" -n "$NAMESPACE" describe pod "$POD_NAME" || true
-      "$KUBECTL" -n "$NAMESPACE" get cloudpodbindings.gpu-burst-node.aibrix.ai \
-        -l "gpu-burst-node.aibrix.ai/pod-name=${POD_NAME}" -o yaml || true
+      "$KUBECTL" -n "$NAMESPACE" get cloudpodbindings.cloud.aibrix.ai \
+        -l "cloud.aibrix.ai/pod-name=${POD_NAME}" -o yaml || true
       fail "Lambda binding failed"
     fi
     sleep 10
@@ -364,8 +364,8 @@ wait_for_runner_succeeded() {
 	local deadline=$((SECONDS + RUNNER_TIMEOUT_SECONDS))
 	local phase=""
 	while ((SECONDS < deadline)); do
-		phase="$("$KUBECTL" -n "$NAMESPACE" get cloudpodbindings.gpu-burst-node.aibrix.ai \
-			-l "gpu-burst-node.aibrix.ai/pod-name=${POD_NAME}" \
+		phase="$("$KUBECTL" -n "$NAMESPACE" get cloudpodbindings.cloud.aibrix.ai \
+			-l "cloud.aibrix.ai/pod-name=${POD_NAME}" \
 			-o jsonpath='{.items[0].status.phase}' 2>/dev/null || true)"
 		log "runner binding phase=${phase:-<none>}"
 		if [[ "$phase" == "Succeeded" ]]; then
@@ -373,8 +373,8 @@ wait_for_runner_succeeded() {
 		fi
 		if [[ "$phase" == "Failed" ]]; then
 			"$KUBECTL" -n "$NAMESPACE" describe pod "$POD_NAME" || true
-			"$KUBECTL" -n "$NAMESPACE" get cloudpodbindings.gpu-burst-node.aibrix.ai \
-				-l "gpu-burst-node.aibrix.ai/pod-name=${POD_NAME}" -o yaml || true
+			"$KUBECTL" -n "$NAMESPACE" get cloudpodbindings.cloud.aibrix.ai \
+				-l "cloud.aibrix.ai/pod-name=${POD_NAME}" -o yaml || true
 			fail "Lambda runner failed"
 		fi
 		sleep 10
@@ -387,8 +387,8 @@ delete_pod_and_wait_cleanup() {
   local deadline=$((SECONDS + 180))
   while (( SECONDS < deadline )); do
     local count
-    count="$("$KUBECTL" -n "$NAMESPACE" get cloudpodbindings.gpu-burst-node.aibrix.ai \
-      -l "gpu-burst-node.aibrix.ai/pod-name=${POD_NAME}" \
+    count="$("$KUBECTL" -n "$NAMESPACE" get cloudpodbindings.cloud.aibrix.ai \
+      -l "cloud.aibrix.ai/pod-name=${POD_NAME}" \
       -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | wc -w | tr -d ' ')"
     [[ "$count" == "0" ]] && return 0
     sleep 5

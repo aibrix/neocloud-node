@@ -490,7 +490,7 @@ func TestNewProviderFuncBuildsNodeutilProvider(t *testing.T) {
 	})
 	provider, nodeProvider, err := factory(nodeutil.ProviderConfig{
 		Node: &corev1.Node{
-			ObjectMeta: metav1.ObjectMeta{Name: "aibrix-gpu-burst"},
+			ObjectMeta: metav1.ObjectMeta{Name: "neocloud-node"},
 		},
 	})
 	if err != nil {
@@ -510,8 +510,8 @@ func TestNewProviderFuncBuildsNodeutilProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetStatsSummary() error = %v", err)
 	}
-	if summary.Node.NodeName != "aibrix-gpu-burst" {
-		t.Fatalf("summary node name = %s, want aibrix-gpu-burst", summary.Node.NodeName)
+	if summary.Node.NodeName != "neocloud-node" {
+		t.Fatalf("summary node name = %s, want neocloud-node", summary.Node.NodeName)
 	}
 }
 

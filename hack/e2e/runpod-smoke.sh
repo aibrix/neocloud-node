@@ -6,13 +6,13 @@ KUBECTL="${KUBECTL:-kubectl}"
 GO="${GO:-go}"
 PYTHON="${PYTHON:-python3}"
 
-NODE_NAME="${GPU_BURST_E2E_NODE_NAME:-aibrix-gpu-burst-runpod-e2e}"
+NODE_NAME="${GPU_BURST_E2E_NODE_NAME:-neocloud-node-runpod-e2e}"
 NAMESPACE="${GPU_BURST_E2E_NAMESPACE:-default}"
 BINARY="${GPU_BURST_E2E_BINARY:-/tmp/neocloud-node-e2e}"
 LISTEN_ADDR="${GPU_BURST_E2E_LISTEN_ADDR:-:11251}"
 GPU_TYPE="${RUNPOD_E2E_GPU_TYPE:-NVIDIA A40}"
-SUCCESS_POD="${RUNPOD_E2E_SUCCESS_POD:-gpu-burst-runpod-e2e-success}"
-CAPACITY_POD="${RUNPOD_E2E_CAPACITY_POD:-gpu-burst-runpod-e2e-capacity}"
+SUCCESS_POD="${RUNPOD_E2E_SUCCESS_POD:-neocloud-node-runpod-e2e-success}"
+CAPACITY_POD="${RUNPOD_E2E_CAPACITY_POD:-neocloud-node-runpod-e2e-capacity}"
 SUCCESS_TIMEOUT_SECONDS="${RUNPOD_E2E_SUCCESS_TIMEOUT_SECONDS:-600}"
 COMPLETION_TIMEOUT_SECONDS="${RUNPOD_E2E_COMPLETION_TIMEOUT_SECONDS:-900}"
 CAPACITY_TIMEOUT_SECONDS="${RUNPOD_E2E_CAPACITY_TIMEOUT_SECONDS:-90}"
@@ -120,8 +120,8 @@ cleanup_kubernetes_objects() {
         --type=merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 || true
       "$KUBECTL" -n "$NAMESPACE" delete cloudpodbinding "$binding" \
         --ignore-not-found=true >/dev/null 2>&1 || true
-    done < <("$KUBECTL" -n "$NAMESPACE" get cloudpodbindings.gpu-burst-node.aibrix.ai \
-      -l "gpu-burst-node.aibrix.ai/pod-name=${pod_name}" \
+    done < <("$KUBECTL" -n "$NAMESPACE" get cloudpodbindings.cloud.aibrix.ai \
+      -l "cloud.aibrix.ai/pod-name=${pod_name}" \
       -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
   done
 
@@ -152,14 +152,14 @@ managed_external_name() {
   raw="${raw//_/-}"
   raw="${raw//./-}"
   raw="${raw//:/-}"
-  printf 'gpu-burst-node-%s\n' "$raw"
+  printf 'neocloud-node-%s\n' "$raw"
 }
 
 apply_control_plane_prereqs() {
-  "$KUBECTL" create namespace gpu-burst-node-system \
+  "$KUBECTL" create namespace aibrix-system \
     --dry-run=client -o yaml | "$KUBECTL" apply -f -
   awk 'BEGIN { doc=0 } /^---$/ { doc++; if (doc >= 2) exit } { print }' \
-    "$ROOT_DIR/deploy/gpu-burst-node.yaml" | "$KUBECTL" apply -f -
+    "$ROOT_DIR/deploy/neocloud-node.yaml" | "$KUBECTL" apply -f -
 }
 
 build_binary() {
@@ -201,24 +201,24 @@ metadata:
   name: ${pod_name}
   namespace: ${NAMESPACE}
   labels:
-    gpu-burst-node.aibrix.ai/e2e: runpod
+    cloud.aibrix.ai/e2e: runpod
   annotations:
-    gpu-burst-node.aibrix.ai/provider: runpod
-    gpu-burst-node.aibrix.ai/gpu-type: ${GPU_TYPE}
+    cloud.aibrix.ai/provider: runpod
+    cloud.aibrix.ai/gpu-type: ${GPU_TYPE}
 YAML
     if [[ -n "$cloud_type" ]]; then
-      printf '    gpu-burst-node.aibrix.ai/runpod-cloud-type: %s\n' "$cloud_type"
+      printf '    cloud.aibrix.ai/runpod-cloud-type: %s\n' "$cloud_type"
     fi
     if [[ -n "$market_type" ]]; then
-      printf '    gpu-burst-node.aibrix.ai/market-type: %s\n' "$market_type"
+      printf '    cloud.aibrix.ai/market-type: %s\n' "$market_type"
     fi
     cat <<YAML
 spec:
   restartPolicy: Never
   nodeSelector:
-    gpu-burst-node.aibrix.ai/provider: runpod
+    cloud.aibrix.ai/provider: runpod
   tolerations:
-    - key: gpu-burst-node.aibrix.ai/provider
+    - key: cloud.aibrix.ai/provider
       operator: Equal
       value: runpod
       effect: NoSchedule
@@ -250,14 +250,14 @@ pod_reason() {
 }
 
 binding_remote_id_for_pod() {
-  "$KUBECTL" -n "$NAMESPACE" get cloudpodbindings.gpu-burst-node.aibrix.ai \
-    -l "gpu-burst-node.aibrix.ai/pod-name=${1}" \
+  "$KUBECTL" -n "$NAMESPACE" get cloudpodbindings.cloud.aibrix.ai \
+    -l "cloud.aibrix.ai/pod-name=${1}" \
     -o jsonpath='{range .items[*]}{.status.remoteID}{end}' 2>/dev/null || true
 }
 
 binding_condition_reason_for_pod() {
-  "$KUBECTL" -n "$NAMESPACE" get cloudpodbindings.gpu-burst-node.aibrix.ai \
-    -l "gpu-burst-node.aibrix.ai/pod-name=${1}" \
+  "$KUBECTL" -n "$NAMESPACE" get cloudpodbindings.cloud.aibrix.ai \
+    -l "cloud.aibrix.ai/pod-name=${1}" \
     -o jsonpath='{range .items[*]}{.status.conditions[0].reason}{end}' 2>/dev/null || true
 }
 
@@ -281,8 +281,8 @@ wait_for_started_remote() {
     fi
     if [[ "$phase" == "Failed" ]]; then
       "$KUBECTL" -n "$NAMESPACE" describe pod "$pod_name" >&2 || true
-      "$KUBECTL" -n "$NAMESPACE" get cloudpodbindings.gpu-burst-node.aibrix.ai \
-        -l "gpu-burst-node.aibrix.ai/pod-name=${pod_name}" -o yaml >&2 || true
+      "$KUBECTL" -n "$NAMESPACE" get cloudpodbindings.cloud.aibrix.ai \
+        -l "cloud.aibrix.ai/pod-name=${pod_name}" -o yaml >&2 || true
       return 1
     fi
     sleep 3
@@ -306,15 +306,15 @@ wait_for_succeeded() {
     fi
     if [[ "$phase" == "Failed" ]]; then
       "$KUBECTL" -n "$NAMESPACE" describe pod "$pod_name" >&2 || true
-      "$KUBECTL" -n "$NAMESPACE" get cloudpodbindings.gpu-burst-node.aibrix.ai \
-        -l "gpu-burst-node.aibrix.ai/pod-name=${pod_name}" -o yaml >&2 || true
+      "$KUBECTL" -n "$NAMESPACE" get cloudpodbindings.cloud.aibrix.ai \
+        -l "cloud.aibrix.ai/pod-name=${pod_name}" -o yaml >&2 || true
       fail "${pod_name} failed while waiting for completion"
     fi
     sleep 5
   done
   "$KUBECTL" -n "$NAMESPACE" describe pod "$pod_name" >&2 || true
-  "$KUBECTL" -n "$NAMESPACE" get cloudpodbindings.gpu-burst-node.aibrix.ai \
-    -l "gpu-burst-node.aibrix.ai/pod-name=${pod_name}" -o yaml >&2 || true
+  "$KUBECTL" -n "$NAMESPACE" get cloudpodbindings.cloud.aibrix.ai \
+    -l "cloud.aibrix.ai/pod-name=${pod_name}" -o yaml >&2 || true
   fail "timed out waiting for ${pod_name} to Succeed"
 }
 
@@ -353,8 +353,8 @@ delete_pod_and_verify_cleanup() {
     --ignore-not-found=true --wait=true --timeout=90s
 
   local bindings
-  bindings="$("$KUBECTL" -n "$NAMESPACE" get cloudpodbindings.gpu-burst-node.aibrix.ai \
-    -l "gpu-burst-node.aibrix.ai/pod-name=${pod_name}" \
+  bindings="$("$KUBECTL" -n "$NAMESPACE" get cloudpodbindings.cloud.aibrix.ai \
+    -l "cloud.aibrix.ai/pod-name=${pod_name}" \
     -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)"
   [[ -z "$bindings" ]] || fail "CloudPodBinding still exists for ${pod_name}: ${bindings}"
 

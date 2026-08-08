@@ -2,7 +2,7 @@ package core
 
 import "strings"
 
-const ManagedExternalNamePrefix = "gpu-burst-node-"
+const ManagedExternalNamePrefix = "neocloud-node-"
 
 func ManagedExternalName(idempotencyKey string) string {
 	name := strings.ToLower(idempotencyKey)

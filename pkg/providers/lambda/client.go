@@ -225,8 +225,8 @@ func (c *Client) launchPayload(idempotencyKey string, name string, request core.
 		Name:             name,
 		Hostname:         name,
 		Tags: []tag{
-			{Key: "gpu-burst-node:aibrix:workload", Value: idempotencyKey},
-			{Key: "gpu-burst-node:aibrix:managed-by", Value: "gpu-burst-node"},
+			{Key: "neocloud-node:aibrix:workload", Value: idempotencyKey},
+			{Key: "neocloud-node:aibrix:managed-by", Value: "neocloud-node"},
 		},
 	}
 	if imageID := providerHint(request, core.AnnotationLambdaImageID); imageID != "" {

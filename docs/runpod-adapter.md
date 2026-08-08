@@ -16,7 +16,7 @@ Official API references:
 
 | `core.WorkloadRequest` | RunPod create field | Notes |
 | --- | --- | --- |
-| idempotency key | `name` | Sanitized as `gpu-burst-node-<namespace>-<uid>`. Transient create failures are recovered by listing this external name before retrying. |
+| idempotency key | `name` | Sanitized as `neocloud-node-<namespace>-<uid>`. Transient create failures are recovered by listing this external name before retrying. |
 | `Image` | `imageName` | Required by transformer. |
 | `Command` | `dockerEntrypoint` | Preserved as array. |
 | `Args` | `dockerStartCmd` | Preserved as array. |

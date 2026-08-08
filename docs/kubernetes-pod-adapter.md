@@ -2,7 +2,7 @@
 
 Date：2026-06-05
 
-GPU Burst Node now has a Kubernetes adapter layer in `pkg/kube`.
+NeoCloud Node now has a Kubernetes adapter layer in `pkg/kube`.
 
 The core package stays provider-neutral and testable. The `pkg/kube.Transformer` accepts real Kubernetes `corev1.Pod` objects and converts them into `core.Binding`, then reuses `core.DefaultTransformer` for compatibility validation.
 
@@ -40,4 +40,3 @@ func (Transformer) TransformPod(pod *corev1.Pod) (core.Binding, error)
 - Only literal env vars are mapped. `ValueFrom` refs need an explicit Secret/ConfigMap projection model later.
 - The adapter does not watch Kubernetes. It is a transformer layer only.
 - The Virtual Kubelet provider wrapper still needs to call this adapter from `CreatePod`.
-

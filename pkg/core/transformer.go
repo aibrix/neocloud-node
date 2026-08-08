@@ -6,27 +6,27 @@ import (
 )
 
 const (
-	AnnotationProvider   = "gpu-burst-node.aibrix.ai/provider"
-	AnnotationGPUType    = "gpu-burst-node.aibrix.ai/gpu-type"
-	AnnotationGPUMemory  = "gpu-burst-node.aibrix.ai/gpu-memory"
-	AnnotationMaxPrice   = "gpu-burst-node.aibrix.ai/max-price"
-	AnnotationMarketType = "gpu-burst-node.aibrix.ai/market-type"
-	AnnotationRegion     = "gpu-burst-node.aibrix.ai/region"
+	AnnotationProvider   = "cloud.aibrix.ai/provider"
+	AnnotationGPUType    = "cloud.aibrix.ai/gpu-type"
+	AnnotationGPUMemory  = "cloud.aibrix.ai/gpu-memory"
+	AnnotationMaxPrice   = "cloud.aibrix.ai/max-price"
+	AnnotationMarketType = "cloud.aibrix.ai/market-type"
+	AnnotationRegion     = "cloud.aibrix.ai/region"
 
-	AnnotationRunPodCloudType          = "gpu-burst-node.aibrix.ai/runpod-cloud-type"
-	AnnotationRunPodTemplateID         = "gpu-burst-node.aibrix.ai/runpod-template-id"
-	AnnotationRunPodDataCenterIDs      = "gpu-burst-node.aibrix.ai/runpod-datacenter-ids"
-	AnnotationRunPodDataCenterPriority = "gpu-burst-node.aibrix.ai/runpod-datacenter-priority"
-	AnnotationRunPodNetworkVolumeID    = "gpu-burst-node.aibrix.ai/runpod-network-volume-id"
-	AnnotationRunPodRegistryAuthID     = "gpu-burst-node.aibrix.ai/runpod-registry-auth-id"
-	AnnotationRunPodVolumeMountPath    = "gpu-burst-node.aibrix.ai/runpod-volume-mount-path"
+	AnnotationRunPodCloudType          = "cloud.aibrix.ai/runpod-cloud-type"
+	AnnotationRunPodTemplateID         = "cloud.aibrix.ai/runpod-template-id"
+	AnnotationRunPodDataCenterIDs      = "cloud.aibrix.ai/runpod-datacenter-ids"
+	AnnotationRunPodDataCenterPriority = "cloud.aibrix.ai/runpod-datacenter-priority"
+	AnnotationRunPodNetworkVolumeID    = "cloud.aibrix.ai/runpod-network-volume-id"
+	AnnotationRunPodRegistryAuthID     = "cloud.aibrix.ai/runpod-registry-auth-id"
+	AnnotationRunPodVolumeMountPath    = "cloud.aibrix.ai/runpod-volume-mount-path"
 
-	AnnotationLambdaInstanceType   = "gpu-burst-node.aibrix.ai/lambda-instance-type"
-	AnnotationLambdaSSHKeyNames    = "gpu-burst-node.aibrix.ai/lambda-ssh-key-names"
-	AnnotationLambdaFileSystemIDs  = "gpu-burst-node.aibrix.ai/lambda-file-system-ids"
-	AnnotationLambdaImageID        = "gpu-burst-node.aibrix.ai/lambda-image-id"
-	AnnotationLambdaFirewallIDs    = "gpu-burst-node.aibrix.ai/lambda-firewall-ids"
-	AnnotationLambdaCallbackSecret = "gpu-burst-node.aibrix.ai/lambda-callback-secret"
+	AnnotationLambdaInstanceType   = "cloud.aibrix.ai/lambda-instance-type"
+	AnnotationLambdaSSHKeyNames    = "cloud.aibrix.ai/lambda-ssh-key-names"
+	AnnotationLambdaFileSystemIDs  = "cloud.aibrix.ai/lambda-file-system-ids"
+	AnnotationLambdaImageID        = "cloud.aibrix.ai/lambda-image-id"
+	AnnotationLambdaFirewallIDs    = "cloud.aibrix.ai/lambda-firewall-ids"
+	AnnotationLambdaCallbackSecret = "cloud.aibrix.ai/lambda-callback-secret"
 )
 
 const (

@@ -19,15 +19,15 @@ import (
 )
 
 const (
-	CloudPodBindingGroup      = "gpu-burst-node.aibrix.ai"
+	CloudPodBindingGroup      = "cloud.aibrix.ai"
 	CloudPodBindingVersion    = "v1alpha1"
 	CloudPodBindingKind       = "CloudPodBinding"
 	CloudPodBindingResource   = "cloudpodbindings"
 	CloudPodBindingAPIVersion = CloudPodBindingGroup + "/" + CloudPodBindingVersion
 
-	CloudPodBindingFinalizer = "gpu-burst-node.aibrix.ai/finalizer"
-	LabelPodUID              = "gpu-burst-node.aibrix.ai/pod-uid"
-	LabelPodName             = "gpu-burst-node.aibrix.ai/pod-name"
+	CloudPodBindingFinalizer = "cloud.aibrix.ai/finalizer"
+	LabelPodUID              = "cloud.aibrix.ai/pod-uid"
+	LabelPodName             = "cloud.aibrix.ai/pod-name"
 )
 
 var CloudPodBindingsGVR = schema.GroupVersionResource{

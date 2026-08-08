@@ -630,7 +630,7 @@ func podKey(namespace string, name string) string {
 }
 
 func unsupportedMethod(method string) error {
-	return errdefs.InvalidInput(fmt.Sprintf("%s is not supported by GPU Burst Node provider yet", method))
+	return errdefs.InvalidInput(fmt.Sprintf("%s is not supported by NeoCloud Node provider yet", method))
 }
 
 func normalizeProviderError(err error) error {

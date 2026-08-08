@@ -89,11 +89,11 @@ func signedCallbackHeaders(secret string) string {
 	if strings.TrimSpace(secret) == "" {
 		return ""
 	}
-	return ` -H "X-GPU-Burst-Runner-Timestamp: $ts" -H "X-GPU-Burst-Runner-Signature: $sig"`
+	return ` -H "X-NeoCloud-Runner-Timestamp: $ts" -H "X-NeoCloud-Runner-Signature: $sig"`
 }
 
 func dockerRunCommand(request core.WorkloadRequest) string {
-	parts := []string{"docker run --rm --gpus all --name gpu-burst-workload"}
+	parts := []string{"docker run --rm --gpus all --name neocloud-node-workload"}
 	for _, env := range sortedEnv(request.Env) {
 		parts = append(parts, "-e "+shellQuote(env))
 	}

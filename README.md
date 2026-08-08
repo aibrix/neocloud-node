@@ -63,15 +63,15 @@ The default deployment uses the fake provider so the control-plane path can be
 tested without cloud credentials:
 
 ```bash
-kubectl apply -f deploy/gpu-burst-node.yaml
-kubectl -n gpu-burst-node-system rollout status deploy/gpu-burst-node
+kubectl apply -f deploy/neocloud-node.yaml
+kubectl -n aibrix-system rollout status deploy/aibrix-neocloud-node
 kubectl apply -f deploy/examples/fake-pod.yaml
-kubectl get pod gpu-burst-fake-smoke -w
+kubectl get pod neocloud-node-fake-smoke -w
 kubectl get cloudpodbindings
 ```
 
 To switch the deployment to RunPod, set `GPU_BURST_PROVIDER=runpod` and provide
-`RUNPOD_API_KEY` through the `gpu-burst-node-runpod` Secret referenced by the
+`RUNPOD_API_KEY` through the `aibrix-neocloud-node-runpod` Secret referenced by the
 deployment.
 
 ## RunPod E2E Smoke Test
@@ -91,7 +91,7 @@ Defaults:
 
 - GPU type: `NVIDIA A40`
 - GPU count: `1`
-- virtual node: `aibrix-gpu-burst-runpod-e2e`
+- virtual node: `neocloud-node-runpod-e2e`
 - binary: `/tmp/neocloud-node-e2e`
 
 Optional capacity-classification check:

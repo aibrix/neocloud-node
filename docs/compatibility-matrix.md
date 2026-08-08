@@ -1,8 +1,8 @@
-# AIBrix GPU Burst Node Compatibility Matrix
+# AIBrix NeoCloud Node Compatibility Matrix
 
 Date:2026-06-05
 
-This matrix documents the Phase 1 Pod transformation contract. GPU Burst Node accepts standard Kubernetes workload objects at the integration layer, but the core transformer supports only the subset that can be mapped honestly to remote cloud GPU providers.
+This matrix documents the Phase 1 Pod transformation contract. NeoCloud Node accepts standard Kubernetes workload objects at the integration layer, but the core transformer supports only the subset that can be mapped honestly to remote cloud GPU providers.
 
 Unsupported fields must fail with a stable `UnsupportedSpecError` code and field path. They must not be silently ignored.
 
@@ -13,10 +13,10 @@ Unsupported fields must fail with a stable `UnsupportedSpecError` code and field
 | `metadata.namespace` | `Binding.Namespace` | Used for binding identity and future scoping. |
 | `metadata.name` | `Binding.Name` | Used for observability only. |
 | `metadata.uid` | `Binding.WorkloadUID` | Used as the idempotency key source. |
-| `metadata.annotations[gpu-burst-node.aibrix.ai/provider]` | `WorkloadRequest.Provider` | Provider hint, for example `runpod`. |
-| `metadata.annotations[gpu-burst-node.aibrix.ai/gpu-type]` | `WorkloadRequest.GPUType` | Provider-neutral GPU model hint. |
-| `metadata.annotations[gpu-burst-node.aibrix.ai/max-price]` | `WorkloadRequest.MaxPrice` | String for now; later phases can parse and normalize. |
-| `metadata.annotations[gpu-burst-node.aibrix.ai/region]` | `WorkloadRequest.RegionHint` | Region/datacenter hint. |
+| `metadata.annotations[cloud.aibrix.ai/provider]` | `WorkloadRequest.Provider` | Provider hint, for example `runpod`. |
+| `metadata.annotations[cloud.aibrix.ai/gpu-type]` | `WorkloadRequest.GPUType` | Provider-neutral GPU model hint. |
+| `metadata.annotations[cloud.aibrix.ai/max-price]` | `WorkloadRequest.MaxPrice` | String for now; later phases can parse and normalize. |
+| `metadata.annotations[cloud.aibrix.ai/region]` | `WorkloadRequest.RegionHint` | Region/datacenter hint. |
 | `spec.restartPolicy: Never` | `WorkloadRequest.RestartPolicy` | Default when omitted. |
 | `spec.restartPolicy: OnFailure` | `WorkloadRequest.RestartPolicy` | Supported for batch-style retry semantics. |
 | `spec.imagePullSecrets[*].name` | `WorkloadRequest.ImagePullSecrets` | Provider adapter decides whether it can map registry auth. |
@@ -47,4 +47,3 @@ Unsupported fields must fail with a stable `UnsupportedSpecError` code and field
 - Multi-container sidecar semantics.
 - Privileged or host namespace workloads.
 - Provider-specific placement/fallback. That starts after this transformer contract is stable.
-

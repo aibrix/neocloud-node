@@ -30,9 +30,9 @@ Phase 4 cloud-init contains:
 
 ## Callback Contract
 
-GPU Burst Node serves a provider-neutral runner callback endpoint:
+NeoCloud Node serves a provider-neutral runner callback endpoint:
 
-`POST /gpu-burst-node/v1/runner/status`
+`POST /neocloud-node/v1/runner/status`
 
 Payload:
 
@@ -71,8 +71,8 @@ When a secret is configured, the runner must send:
 
 | Header | Value |
 | --- | --- |
-| `X-GPU-Burst-Runner-Timestamp` | Unix seconds at signing time |
-| `X-GPU-Burst-Runner-Signature` | `v1=<hex hmac-sha256>` |
+| `X-NeoCloud-Runner-Timestamp` | Unix seconds at signing time |
+| `X-NeoCloud-Runner-Signature` | `v1=<hex hmac-sha256>` |
 
 The signed message is:
 

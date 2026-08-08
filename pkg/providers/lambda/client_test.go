@@ -70,12 +70,12 @@ func TestClientCreateLaunchesLambdaInstance(t *testing.T) {
 	}
 	assertPayloadString(t, gotPayload, "region_name", "us-east-1")
 	assertPayloadString(t, gotPayload, "instance_type_name", "gpu_1x_h100_sxm5")
-	assertPayloadString(t, gotPayload, "name", "gpu-burst-node-default-pod-123")
+	assertPayloadString(t, gotPayload, "name", "neocloud-node-default-pod-123")
 	assertPayloadStringSlice(t, gotPayload, "ssh_key_names", []string{"job-key"})
 	assertPayloadString(t, gotPayload, "user_data", "#cloud-config")
 	assertPayloadTags(t, gotPayload, map[string]string{
-		"gpu-burst-node:aibrix:workload":   "default/pod-123",
-		"gpu-burst-node:aibrix:managed-by": "gpu-burst-node",
+		"neocloud-node:aibrix:workload":   "default/pod-123",
+		"neocloud-node:aibrix:managed-by": "neocloud-node",
 	})
 
 	image, ok := gotPayload["image"].(map[string]any)
@@ -102,7 +102,7 @@ func TestClientCreateRecoversDecodeFailureByExternalName(t *testing.T) {
 		case requests == 2 && r.Method == http.MethodGet && r.URL.Path == "/instances":
 			_, _ = w.Write([]byte(`{"data":[{
 				"id":"lambda-created",
-				"name":"gpu-burst-node-default-pod-123",
+				"name":"neocloud-node-default-pod-123",
 				"status":"active",
 				"instance_type":{"price_cents_per_hour":74}
 			}]}`))
@@ -192,7 +192,7 @@ func TestClientListBackfillsRemoteRequestShape(t *testing.T) {
 		}
 		_, _ = w.Write([]byte(`{"data":[{
 			"id":"lambda-1",
-			"name":"gpu-burst-node-default-pod-123",
+			"name":"neocloud-node-default-pod-123",
 			"status":"active",
 			"region":{"name":"us-west-1"},
 			"instance_type":{

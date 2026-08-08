@@ -72,8 +72,8 @@ func TestRunnerCommandSignsCallbackWhenSecretConfigured(t *testing.T) {
 
 	assertContains(t, command, `ts=$(date +%s)`)
 	assertContains(t, command, `SECRET='shared-secret' TS="$ts" PAYLOAD="$payload" python3 -c`)
-	assertContains(t, command, `X-GPU-Burst-Runner-Timestamp: $ts`)
-	assertContains(t, command, `X-GPU-Burst-Runner-Signature: $sig`)
+	assertContains(t, command, `X-NeoCloud-Runner-Timestamp: $ts`)
+	assertContains(t, command, `X-NeoCloud-Runner-Signature: $sig`)
 }
 
 func TestBuildCloudInitValidation(t *testing.T) {
