@@ -52,27 +52,37 @@ work before it should be treated as a production provider.
 
 ## Local Verification
 
+Development requires Go 1.25 and Kustomize 5.4 or newer. Docker is optional and
+is only needed for container builds.
+
 ```bash
-go test -count=1 ./...
-go build -o neocloud-node ./cmd/neocloud-node
+make verify
+make test-race
+make docker-build
 ```
 
-## Kubernetes Smoke Test
+## Install On Kubernetes
 
 The default deployment uses the fake provider so the control-plane path can be
-tested without cloud credentials:
+tested without cloud credentials. The Kustomize bases under `config/` are the
+canonical deployment source. `deploy/neocloud-node.yaml` is the generated,
+single-file equivalent for users who do not use Kustomize.
 
 ```bash
-kubectl apply -f deploy/neocloud-node.yaml
+kubectl apply -k config/default
 kubectl -n aibrix-system rollout status deploy/aibrix-neocloud-node
-kubectl apply -f deploy/examples/fake-pod.yaml
+kubectl apply -f config/samples/fake-pod.yaml
 kubectl get pod neocloud-node-fake-smoke -w
 kubectl get cloudpodbindings
 ```
 
+For a pinned image or environment-specific settings, create a Kustomize overlay
+that references `config/default` and patches the Deployment. Run `make manifests`
+after changing a base so the generated installation manifest stays current.
+
 To switch the deployment to RunPod, set `GPU_BURST_PROVIDER=runpod` and provide
-`RUNPOD_API_KEY` through the `aibrix-neocloud-node-runpod` Secret referenced by the
-deployment.
+`RUNPOD_API_KEY` through the `aibrix-neocloud-node-runpod` Secret referenced by
+the deployment. Provider credentials are never included in the repository.
 
 ## RunPod E2E Smoke Test
 

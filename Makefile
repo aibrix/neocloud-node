@@ -3,6 +3,7 @@ SHELL := /usr/bin/env bash
 
 GO ?= go
 CONTAINER_TOOL ?= docker
+KUSTOMIZE ?= kustomize
 
 BINARY ?= neocloud-node
 OUTPUT_DIR ?= bin
@@ -13,6 +14,7 @@ IMAGE ?= ghcr.io/aibrix/neocloud-node:$(VERSION)
 BUILDER_IMAGE ?= golang:1.25.0-bookworm
 RUNTIME_IMAGE ?= gcr.io/distroless/static-debian12:nonroot
 GO_TEST_FLAGS ?= -count=1
+INSTALL_MANIFEST ?= deploy/neocloud-node.yaml
 
 .DEFAULT_GOAL := help
 
@@ -76,8 +78,22 @@ docker-build: ## Build the controller container image.
 docker-push: ## Push IMAGE after it has been built.
 	$(CONTAINER_TOOL) push $(IMAGE)
 
+.PHONY: manifests
+manifests: ## Render the default Kustomize installation manifest.
+	@tmp="$$(mktemp)"; \
+	trap 'rm -f "$${tmp}"' EXIT; \
+	$(KUSTOMIZE) build config/default > "$${tmp}"; \
+	mv "$${tmp}" $(INSTALL_MANIFEST)
+
+.PHONY: manifests-check
+manifests-check: ## Verify Kustomize renders and the installation manifest is current.
+	@tmp="$$(mktemp)"; \
+	trap 'rm -f "$${tmp}"' EXIT; \
+	$(KUSTOMIZE) build config/default > "$${tmp}"; \
+	diff -u $(INSTALL_MANIFEST) "$${tmp}"
+
 .PHONY: verify
-verify: fmt-check tidy-check mod-verify vet test build ## Run all local presubmit checks.
+verify: fmt-check tidy-check mod-verify vet manifests-check test build ## Run all local presubmit checks.
 
 .PHONY: clean
 clean: ## Remove local build and coverage output.

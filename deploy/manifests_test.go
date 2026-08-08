@@ -56,6 +56,54 @@ func TestBaseManifestContainsRunnableControlPlaneResources(t *testing.T) {
 	requireSecretRef(t, env, "LAMBDA_API_KEY", "aibrix-neocloud-node-lambda")
 }
 
+func TestBaseManifestUsesSingletonAndRestrictedSecurityContext(t *testing.T) {
+	objects := readObjects(t, "neocloud-node.yaml")
+	deployment := requireKindName(t, objects, "Deployment", "aibrix-neocloud-node")
+	spec := deployment["spec"].(map[string]interface{})
+
+	strategy := spec["strategy"].(map[string]interface{})
+	if strategy["type"] != "Recreate" {
+		t.Fatalf("deployment strategy = %#v, want Recreate without leader election", strategy)
+	}
+
+	podSpec := spec["template"].(map[string]interface{})["spec"].(map[string]interface{})
+	securityContext := podSpec["securityContext"].(map[string]interface{})
+	if securityContext["runAsNonRoot"] != true {
+		t.Fatalf("pod securityContext = %#v, want runAsNonRoot", securityContext)
+	}
+	seccomp := securityContext["seccompProfile"].(map[string]interface{})
+	if seccomp["type"] != "RuntimeDefault" {
+		t.Fatalf("seccompProfile = %#v, want RuntimeDefault", seccomp)
+	}
+
+	container := podSpec["containers"].([]interface{})[0].(map[string]interface{})
+	containerSecurity := container["securityContext"].(map[string]interface{})
+	if containerSecurity["readOnlyRootFilesystem"] != true || containerSecurity["allowPrivilegeEscalation"] != false {
+		t.Fatalf("container securityContext = %#v, want read-only root and no privilege escalation", containerSecurity)
+	}
+}
+
+func TestBaseManifestRBACMatchesControllerOperations(t *testing.T) {
+	objects := readObjects(t, "neocloud-node.yaml")
+	role := requireKindName(t, objects, "ClusterRole", "aibrix-neocloud-node")
+	rules := role["rules"].([]interface{})
+
+	podRule := requireRule(t, rules, "", "pods")
+	requireContains(t, podRule["verbs"].([]interface{}), "delete")
+
+	nodeRule := requireRule(t, rules, "", "nodes")
+	requireSet(t, nodeRule["verbs"].([]interface{}), "create", "get")
+
+	leaseRule := requireRule(t, rules, "coordination.k8s.io", "leases")
+	requireSet(t, leaseRule["verbs"].([]interface{}), "create", "get", "update")
+
+	for _, item := range rules {
+		rule := item.(map[string]interface{})
+		requireNotContains(t, rule["verbs"].([]interface{}), "*")
+		requireNotContains(t, rule["resources"].([]interface{}), "*")
+	}
+}
+
 func TestCRDHasStatusSubresourceAndPrinterColumns(t *testing.T) {
 	objects := readObjects(t, "neocloud-node.yaml")
 	crd := requireKindName(t, objects, "CustomResourceDefinition", "cloudpodbindings.cloud.aibrix.ai")
@@ -76,7 +124,7 @@ func TestCRDHasStatusSubresourceAndPrinterColumns(t *testing.T) {
 }
 
 func TestExamplePodTargetsGpuBurstNode(t *testing.T) {
-	objects := readObjects(t, "examples/fake-pod.yaml")
+	objects := readObjects(t, "../config/samples/fake-pod.yaml")
 	pod := requireKindName(t, objects, "Pod", "neocloud-node-fake-smoke")
 	spec := pod["spec"].(map[string]interface{})
 
@@ -141,6 +189,51 @@ func requireContains(t *testing.T, values []interface{}, want string) {
 		}
 	}
 	t.Fatalf("values = %#v, want %q", values, want)
+}
+
+func requireNotContains(t *testing.T, values []interface{}, forbidden string) {
+	t.Helper()
+
+	for _, value := range values {
+		if value == forbidden {
+			t.Fatalf("values = %#v, must not contain %q", values, forbidden)
+		}
+	}
+}
+
+func requireSet(t *testing.T, values []interface{}, want ...string) {
+	t.Helper()
+
+	if len(values) != len(want) {
+		t.Fatalf("values = %#v, want exactly %#v", values, want)
+	}
+	for _, value := range want {
+		requireContains(t, values, value)
+	}
+}
+
+func requireRule(t *testing.T, rules []interface{}, apiGroup string, resource string) map[string]interface{} {
+	t.Helper()
+
+	for _, item := range rules {
+		rule := item.(map[string]interface{})
+		apiGroups := rule["apiGroups"].([]interface{})
+		resources := rule["resources"].([]interface{})
+		if contains(apiGroups, apiGroup) && contains(resources, resource) {
+			return rule
+		}
+	}
+	t.Fatalf("RBAC rule for %q/%q not found in %#v", apiGroup, resource, rules)
+	return nil
+}
+
+func contains(values []interface{}, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func requireSecretRef(t *testing.T, env []interface{}, name string, secretName string) {

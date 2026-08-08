@@ -1,270 +1,358 @@
 apiVersion: v1
 kind: Namespace
 metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/part-of: aibrix
   name: aibrix-system
 ---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/part-of: aibrix
   name: cloudpodbindings.cloud.aibrix.ai
 spec:
   group: cloud.aibrix.ai
-  scope: Namespaced
   names:
-    plural: cloudpodbindings
-    singular: cloudpodbinding
     kind: CloudPodBinding
+    plural: cloudpodbindings
     shortNames:
-      - cpb
+    - cpb
+    singular: cloudpodbinding
+  scope: Namespaced
   versions:
-    - name: v1alpha1
-      served: true
-      storage: true
-      subresources:
-        status: {}
-      additionalPrinterColumns:
-        - name: Phase
-          type: string
-          jsonPath: .status.phase
-        - name: Provider
-          type: string
-          jsonPath: .status.request.provider
-        - name: RemoteID
-          type: string
-          jsonPath: .status.remoteID
-        - name: Deleting
-          type: boolean
-          jsonPath: .status.deleting
-        - name: Age
-          type: date
-          jsonPath: .metadata.creationTimestamp
-      schema:
-        openAPIV3Schema:
-          type: object
-          required:
-            - spec
-          properties:
-            spec:
-              type: object
-              required:
-                - workloadUID
-              properties:
-                podName:
-                  type: string
-                workloadUID:
-                  type: string
-            status:
-              type: object
-              properties:
-                podName:
-                  type: string
-                workloadUID:
-                  type: string
-                phase:
-                  type: string
-                remoteID:
-                  type: string
-                deleting:
-                  type: boolean
-                lastError:
-                  type: string
-                request:
-                  type: object
-                  x-kubernetes-preserve-unknown-fields: true
-                placement:
-                  type: object
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.request.provider
+      name: Provider
+      type: string
+    - jsonPath: .status.remoteID
+      name: RemoteID
+      type: string
+    - jsonPath: .status.deleting
+      name: Deleting
+      type: boolean
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          spec:
+            properties:
+              podName:
+                type: string
+              workloadUID:
+                type: string
+            required:
+            - workloadUID
+            type: object
+          status:
+            properties:
+              attempts:
+                items:
                   properties:
+                    class:
+                      type: string
+                    fallbackAllowed:
+                      type: boolean
+                    message:
+                      type: string
                     provider:
+                      type: string
+                    reason:
                       type: string
                     region:
                       type: string
-                    gpuType:
-                      type: string
-                cost:
-                  type: object
-                  properties:
-                    hourlyUSD:
-                      type: number
-                    source:
-                      type: string
-                    observedAt:
-                      type: string
+                    retryable:
+                      type: boolean
+                    timestamp:
                       format: date-time
-                attempts:
-                  type: array
-                  items:
-                    type: object
-                    properties:
-                      provider:
-                        type: string
-                      region:
-                        type: string
-                      reason:
-                        type: string
-                      message:
-                        type: string
-                      class:
-                        type: string
-                      retryable:
-                        type: boolean
-                      fallbackAllowed:
-                        type: boolean
-                      timestamp:
-                        type: string
-                        format: date-time
-                conditions:
-                  type: array
-                  items:
-                    type: object
-                    properties:
-                      type:
-                        type: string
-                      status:
-                        type: string
-                      reason:
-                        type: string
-                      message:
-                        type: string
-                      lastTransitionTime:
-                        type: string
-                        format: date-time
+                      type: string
+                  type: object
+                type: array
+              conditions:
+                items:
+                  properties:
+                    lastTransitionTime:
+                      format: date-time
+                      type: string
+                    message:
+                      type: string
+                    reason:
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  type: object
+                type: array
+              cost:
+                properties:
+                  hourlyUSD:
+                    type: number
+                  observedAt:
+                    format: date-time
+                    type: string
+                  source:
+                    type: string
+                type: object
+              deleting:
+                type: boolean
+              lastError:
+                type: string
+              phase:
+                type: string
+              placement:
+                properties:
+                  gpuType:
+                    type: string
+                  provider:
+                    type: string
+                  region:
+                    type: string
+                type: object
+              podName:
+                type: string
+              remoteID:
+                type: string
+              request:
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
+              workloadUID:
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/part-of: aibrix
   name: aibrix-neocloud-node
   namespace: aibrix-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/part-of: aibrix
   name: aibrix-neocloud-node
 rules:
-  - apiGroups: [""]
-    resources: ["pods", "services", "secrets", "configmaps"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: [""]
-    resources: ["pods/status"]
-    verbs: ["get", "patch", "update"]
-  - apiGroups: [""]
-    resources: ["events"]
-    verbs: ["create", "patch", "update"]
-  - apiGroups: [""]
-    resources: ["nodes"]
-    verbs: ["get", "list", "watch", "create", "patch", "update"]
-  - apiGroups: [""]
-    resources: ["nodes/status"]
-    verbs: ["patch", "update"]
-  - apiGroups: ["coordination.k8s.io"]
-    resources: ["leases"]
-    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
-  - apiGroups: ["cloud.aibrix.ai"]
-    resources: ["cloudpodbindings"]
-    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
-  - apiGroups: ["cloud.aibrix.ai"]
-    resources: ["cloudpodbindings/status"]
-    verbs: ["get", "patch", "update"]
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  - secrets
+  - services
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - delete
+  - get
+  - list
+  - patch
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+  - update
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  verbs:
+  - create
+  - get
+- apiGroups:
+  - ""
+  resources:
+  - nodes/status
+  verbs:
+  - patch
+  - update
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - create
+  - get
+  - update
+- apiGroups:
+  - cloud.aibrix.ai
+  resources:
+  - cloudpodbindings
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - update
+- apiGroups:
+  - cloud.aibrix.ai
+  resources:
+  - cloudpodbindings/status
+  verbs:
+  - get
+  - update
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/part-of: aibrix
   name: aibrix-neocloud-node
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: aibrix-neocloud-node
 subjects:
-  - kind: ServiceAccount
-    name: aibrix-neocloud-node
-    namespace: aibrix-system
+- kind: ServiceAccount
+  name: aibrix-neocloud-node
+  namespace: aibrix-system
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/part-of: aibrix
   name: aibrix-neocloud-node
   namespace: aibrix-system
-  labels:
-    app.kubernetes.io/name: aibrix-neocloud-node
 spec:
   replicas: 1
+  revisionHistoryLimit: 3
   selector:
     matchLabels:
-      app.kubernetes.io/name: aibrix-neocloud-node
+      app.kubernetes.io/managed-by: kustomize
+      app.kubernetes.io/name: neocloud-node
+      app.kubernetes.io/part-of: aibrix
+  strategy:
+    type: Recreate
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: aibrix-neocloud-node
+        app.kubernetes.io/managed-by: kustomize
+        app.kubernetes.io/name: neocloud-node
+        app.kubernetes.io/part-of: aibrix
     spec:
-      serviceAccountName: aibrix-neocloud-node
       containers:
-        - name: aibrix-neocloud-node
-          image: ghcr.io/aibrix/neocloud-node:latest
-          imagePullPolicy: IfNotPresent
-          args:
-            - --node-name=$(GPU_BURST_NODE_NAME)
-            - --provider=$(GPU_BURST_PROVIDER)
-            - --binding-store=kubernetes
-            - --listen-addr=:10250
-            - --advertise-gpu-count=$(GPU_BURST_ADVERTISE_GPU_COUNT)
-            - --advertise-pod-capacity=$(GPU_BURST_ADVERTISE_POD_CAPACITY)
-            - --orphan-sweeper-interval=$(GPU_BURST_ORPHAN_SWEEPER_INTERVAL)
-            - --orphan-sweeper-dry-run=$(GPU_BURST_ORPHAN_SWEEPER_DRY_RUN)
-            - --placement-offers=$(GPU_BURST_PLACEMENT_OFFERS)
-            - --placement-offer-ttl=$(GPU_BURST_PLACEMENT_OFFER_TTL)
-            - --placement-refresh-interval=$(GPU_BURST_PLACEMENT_REFRESH_INTERVAL)
-            - --placement-signal-cooldown=$(GPU_BURST_PLACEMENT_SIGNAL_COOLDOWN)
-          env:
-            - name: GPU_BURST_NODE_NAME
-              value: neocloud-node
-            - name: GPU_BURST_PROVIDER
-              value: fake
-            - name: GPU_BURST_ADVERTISE_GPU_COUNT
-              value: "100"
-            - name: GPU_BURST_ADVERTISE_POD_CAPACITY
-              value: "1000"
-            - name: GPU_BURST_PLACEMENT_OFFERS
-              value: ""
-            - name: GPU_BURST_PLACEMENT_OFFER_TTL
-              value: 24h
-            - name: GPU_BURST_PLACEMENT_REFRESH_INTERVAL
-              value: "0"
-            - name: GPU_BURST_PLACEMENT_SIGNAL_COOLDOWN
-              value: 5m
-            - name: GPU_BURST_ORPHAN_SWEEPER_INTERVAL
-              value: "0"
-            - name: GPU_BURST_ORPHAN_SWEEPER_DRY_RUN
-              value: "true"
-            - name: RUNPOD_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: aibrix-neocloud-node-runpod
-                  key: apiKey
-                  optional: true
-            - name: LAMBDA_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: aibrix-neocloud-node-lambda
-                  key: apiKey
-                  optional: true
-            - name: GPU_BURST_LAMBDA_CALLBACK_URL
-              value: ""
-            - name: GPU_BURST_LAMBDA_REGION
-              value: ""
-            - name: GPU_BURST_LAMBDA_INSTANCE_TYPE
-              value: ""
-            - name: GPU_BURST_LAMBDA_SSH_KEY_NAMES
-              value: ""
-          resources:
-            requests:
-              cpu: 100m
-              memory: 128Mi
-            limits:
-              cpu: "1"
-              memory: 512Mi
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            runAsNonRoot: true
-            runAsUser: 65532
-            capabilities:
-              drop: ["ALL"]
+      - args:
+        - --node-name=$(GPU_BURST_NODE_NAME)
+        - --provider=$(GPU_BURST_PROVIDER)
+        - --fallback-providers=$(GPU_BURST_FALLBACK_PROVIDERS)
+        - --binding-store=kubernetes
+        - --listen-addr=:10250
+        - --advertise-gpu-count=$(GPU_BURST_ADVERTISE_GPU_COUNT)
+        - --advertise-pod-capacity=$(GPU_BURST_ADVERTISE_POD_CAPACITY)
+        - --status-sync-interval=$(GPU_BURST_STATUS_SYNC_INTERVAL)
+        - --orphan-sweeper-interval=$(GPU_BURST_ORPHAN_SWEEPER_INTERVAL)
+        - --orphan-sweeper-dry-run=$(GPU_BURST_ORPHAN_SWEEPER_DRY_RUN)
+        - --placement-offers=$(GPU_BURST_PLACEMENT_OFFERS)
+        - --placement-offer-ttl=$(GPU_BURST_PLACEMENT_OFFER_TTL)
+        - --placement-refresh-interval=$(GPU_BURST_PLACEMENT_REFRESH_INTERVAL)
+        - --placement-signal-cooldown=$(GPU_BURST_PLACEMENT_SIGNAL_COOLDOWN)
+        env:
+        - name: GPU_BURST_NODE_NAME
+          value: neocloud-node
+        - name: GPU_BURST_PROVIDER
+          value: fake
+        - name: GPU_BURST_FALLBACK_PROVIDERS
+          value: ""
+        - name: GPU_BURST_ADVERTISE_GPU_COUNT
+          value: "100"
+        - name: GPU_BURST_ADVERTISE_POD_CAPACITY
+          value: "1000"
+        - name: GPU_BURST_STATUS_SYNC_INTERVAL
+          value: 15s
+        - name: GPU_BURST_PLACEMENT_OFFERS
+          value: ""
+        - name: GPU_BURST_PLACEMENT_OFFER_TTL
+          value: 24h
+        - name: GPU_BURST_PLACEMENT_REFRESH_INTERVAL
+          value: "0"
+        - name: GPU_BURST_PLACEMENT_SIGNAL_COOLDOWN
+          value: 5m
+        - name: GPU_BURST_ORPHAN_SWEEPER_INTERVAL
+          value: "0"
+        - name: GPU_BURST_ORPHAN_SWEEPER_DRY_RUN
+          value: "true"
+        - name: RUNPOD_API_KEY
+          valueFrom:
+            secretKeyRef:
+              key: apiKey
+              name: aibrix-neocloud-node-runpod
+              optional: true
+        - name: LAMBDA_API_KEY
+          valueFrom:
+            secretKeyRef:
+              key: apiKey
+              name: aibrix-neocloud-node-lambda
+              optional: true
+        - name: GPU_BURST_LAMBDA_CALLBACK_URL
+          value: ""
+        - name: GPU_BURST_LAMBDA_REGION
+          value: ""
+        - name: GPU_BURST_LAMBDA_INSTANCE_TYPE
+          value: ""
+        - name: GPU_BURST_LAMBDA_SSH_KEY_NAMES
+          value: ""
+        image: ghcr.io/aibrix/neocloud-node:latest
+        imagePullPolicy: IfNotPresent
+        name: aibrix-neocloud-node
+        resources:
+          limits:
+            cpu: "1"
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsGroup: 65532
+          runAsNonRoot: true
+          runAsUser: 65532
+        terminationMessagePolicy: FallbackToLogsOnError
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: aibrix-neocloud-node
+      terminationGracePeriodSeconds: 30

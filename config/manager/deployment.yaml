@@ -1,0 +1,103 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aibrix-neocloud-node
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: neocloud-node
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: neocloud-node
+    spec:
+      serviceAccountName: aibrix-neocloud-node
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: aibrix-neocloud-node
+          image: ghcr.io/aibrix/neocloud-node:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - --node-name=$(GPU_BURST_NODE_NAME)
+            - --provider=$(GPU_BURST_PROVIDER)
+            - --fallback-providers=$(GPU_BURST_FALLBACK_PROVIDERS)
+            - --binding-store=kubernetes
+            - --listen-addr=:10250
+            - --advertise-gpu-count=$(GPU_BURST_ADVERTISE_GPU_COUNT)
+            - --advertise-pod-capacity=$(GPU_BURST_ADVERTISE_POD_CAPACITY)
+            - --status-sync-interval=$(GPU_BURST_STATUS_SYNC_INTERVAL)
+            - --orphan-sweeper-interval=$(GPU_BURST_ORPHAN_SWEEPER_INTERVAL)
+            - --orphan-sweeper-dry-run=$(GPU_BURST_ORPHAN_SWEEPER_DRY_RUN)
+            - --placement-offers=$(GPU_BURST_PLACEMENT_OFFERS)
+            - --placement-offer-ttl=$(GPU_BURST_PLACEMENT_OFFER_TTL)
+            - --placement-refresh-interval=$(GPU_BURST_PLACEMENT_REFRESH_INTERVAL)
+            - --placement-signal-cooldown=$(GPU_BURST_PLACEMENT_SIGNAL_COOLDOWN)
+          env:
+            - name: GPU_BURST_NODE_NAME
+              value: neocloud-node
+            - name: GPU_BURST_PROVIDER
+              value: fake
+            - name: GPU_BURST_FALLBACK_PROVIDERS
+              value: ""
+            - name: GPU_BURST_ADVERTISE_GPU_COUNT
+              value: "100"
+            - name: GPU_BURST_ADVERTISE_POD_CAPACITY
+              value: "1000"
+            - name: GPU_BURST_STATUS_SYNC_INTERVAL
+              value: 15s
+            - name: GPU_BURST_PLACEMENT_OFFERS
+              value: ""
+            - name: GPU_BURST_PLACEMENT_OFFER_TTL
+              value: 24h
+            - name: GPU_BURST_PLACEMENT_REFRESH_INTERVAL
+              value: "0"
+            - name: GPU_BURST_PLACEMENT_SIGNAL_COOLDOWN
+              value: 5m
+            - name: GPU_BURST_ORPHAN_SWEEPER_INTERVAL
+              value: "0"
+            - name: GPU_BURST_ORPHAN_SWEEPER_DRY_RUN
+              value: "true"
+            - name: RUNPOD_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: aibrix-neocloud-node-runpod
+                  key: apiKey
+                  optional: true
+            - name: LAMBDA_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: aibrix-neocloud-node-lambda
+                  key: apiKey
+                  optional: true
+            - name: GPU_BURST_LAMBDA_CALLBACK_URL
+              value: ""
+            - name: GPU_BURST_LAMBDA_REGION
+              value: ""
+            - name: GPU_BURST_LAMBDA_INSTANCE_TYPE
+              value: ""
+            - name: GPU_BURST_LAMBDA_SSH_KEY_NAMES
+              value: ""
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsGroup: 65532
+            runAsNonRoot: true
+            runAsUser: 65532
+          terminationMessagePolicy: FallbackToLogsOnError
