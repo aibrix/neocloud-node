@@ -372,7 +372,7 @@ func TestGetPodStatusSyncsRemoteProviderPhase(t *testing.T) {
 	if err := provider.CreatePod(ctx, pod); err != nil {
 		t.Fatalf("CreatePod() error = %v", err)
 	}
-	adapter.phase = core.RemoteSucceeded
+	adapter.setPhase(core.RemoteSucceeded)
 
 	status, err := provider.GetPodStatus(ctx, "default", "sync")
 	if err != nil {
@@ -417,7 +417,7 @@ func TestStatusSyncLoopUpdatesCachedPodWithoutExternalStatusRead(t *testing.T) {
 		t.Fatalf("cached phase after create = %s, want Pending", cached.Status.Phase)
 	}
 
-	adapter.phase = core.RemoteRunning
+	adapter.setPhase(core.RemoteRunning)
 	deadline := time.After(time.Second)
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
@@ -692,6 +692,7 @@ func (nopReadWriteCloser) Close() error {
 }
 
 type phaseProvider struct {
+	mu    sync.RWMutex
 	phase core.RemotePhase
 }
 
@@ -724,7 +725,7 @@ func (p *phaseProvider) Create(ctx context.Context, idempotencyKey string, reque
 		ID:             "remote-sync",
 		IdempotencyKey: idempotencyKey,
 		Provider:       "runpod",
-		Phase:          p.phase,
+		Phase:          p.currentPhase(),
 		Request:        request,
 	}, nil
 }
@@ -733,12 +734,24 @@ func (p *phaseProvider) Get(ctx context.Context, remoteID string) (core.RemoteRe
 	return core.RemoteResource{
 		ID:       remoteID,
 		Provider: "runpod",
-		Phase:    p.phase,
+		Phase:    p.currentPhase(),
 	}, nil
 }
 
 func (p *phaseProvider) Delete(ctx context.Context, remoteID string) error {
 	return nil
+}
+
+func (p *phaseProvider) setPhase(phase core.RemotePhase) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.phase = phase
+}
+
+func (p *phaseProvider) currentPhase() core.RemotePhase {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.phase
 }
 
 func (p pricedProvider) Create(ctx context.Context, idempotencyKey string, request core.WorkloadRequest) (core.RemoteResource, error) {

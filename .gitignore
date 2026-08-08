@@ -7,5 +7,9 @@ data/neocloud-trace/
 
 # Local binaries and generated runtime cache.
 neocloud-node
+gpu-burst-node
+bin/
+dist/
+coverage.out
 tools/neocloud-trace/__pycache__/
 *.pyc
