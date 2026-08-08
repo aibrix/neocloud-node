@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/core"
+	"github.com/aibrix/neocloud-node/pkg/core"
 )
 
 func TestCompositeCatalogAllowsPartialProviderErrors(t *testing.T) {

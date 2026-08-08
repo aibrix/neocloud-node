@@ -19,7 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 
-	"github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/core"
+	"github.com/aibrix/neocloud-node/pkg/core"
 )
 
 func TestProviderImplementsVirtualKubeletProvider(t *testing.T) {

@@ -15,7 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 
-	"github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/core"
+	"github.com/aibrix/neocloud-node/pkg/core"
 )
 
 const (

@@ -15,8 +15,8 @@ import (
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 
-	"github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/core"
-	burstresource "github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/resource"
+	"github.com/aibrix/neocloud-node/pkg/core"
+	burstresource "github.com/aibrix/neocloud-node/pkg/resource"
 )
 
 func TestParseOptionsDefaultsToFakeProviderAndKubernetesStore(t *testing.T) {

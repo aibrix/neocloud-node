@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/core"
+	"github.com/aibrix/neocloud-node/pkg/core"
 )
 
 func TestPlannerChoosesRiskAdjustedSpotOffer(t *testing.T) {

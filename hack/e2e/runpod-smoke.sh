@@ -8,7 +8,7 @@ PYTHON="${PYTHON:-python3}"
 
 NODE_NAME="${GPU_BURST_E2E_NODE_NAME:-aibrix-gpu-burst-runpod-e2e}"
 NAMESPACE="${GPU_BURST_E2E_NAMESPACE:-default}"
-BINARY="${GPU_BURST_E2E_BINARY:-/tmp/gpu-burst-node-e2e}"
+BINARY="${GPU_BURST_E2E_BINARY:-/tmp/neocloud-node-e2e}"
 LISTEN_ADDR="${GPU_BURST_E2E_LISTEN_ADDR:-:11251}"
 GPU_TYPE="${RUNPOD_E2E_GPU_TYPE:-NVIDIA A40}"
 SUCCESS_POD="${RUNPOD_E2E_SUCCESS_POD:-gpu-burst-runpod-e2e-success}"
@@ -164,7 +164,7 @@ apply_control_plane_prereqs() {
 
 build_binary() {
   log "building $BINARY"
-  "$GO" build -o "$BINARY" "$ROOT_DIR/cmd/gpu-burst-node"
+  "$GO" build -o "$BINARY" "$ROOT_DIR/cmd/neocloud-node"
 }
 
 start_controller() {

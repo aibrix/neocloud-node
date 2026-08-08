@@ -1,11 +1,18 @@
-# AIBrix NeoCloudNode
+# AIBrix NeoCloud Node
 
 Kubernetes bridge to elastic cloud GPUs.
 
-AIBrix NeoCloudNode exposes burst GPU capacity from specialized cloud providers
-through a Kubernetes virtual node. The code and binary names currently remain
-`gpu-burst-node`; the public project name is changing first so the code can be
-renamed deliberately in a later cleanup.
+AIBrix NeoCloud Node exposes burst GPU capacity from specialized cloud
+providers through a Kubernetes virtual node. The command source lives at
+`cmd/neocloud-node`, and release builds publish the binary as `neocloud-node`.
+
+## Project Coordinates
+
+- Project: `AIBrix NeoCloud Node`
+- Repo: `aibrix/neocloud-node`
+- Module: `github.com/aibrix/neocloud-node`
+- Binary: `neocloud-node`
+- Image: `ghcr.io/aibrix/neocloud-node`
 
 ## Status
 
@@ -33,11 +40,11 @@ create paid GPU resources.
 
 ## Current Boundaries
 
-NeoCloudNode intentionally does not claim full Kubernetes Pod semantics. The current
-provider path does not support cluster-internal Service networking, CNI/CSI,
-PVCs, hostPath, privileged workloads, sidecars, `kubectl exec`, attach, or
-port-forward. Container logs are not wired yet; provider-native console links or
-log collection are future work.
+NeoCloud Node intentionally does not claim full Kubernetes Pod semantics. The
+current provider path does not support cluster-internal Service networking,
+CNI/CSI, PVCs, hostPath, privileged workloads, sidecars, `kubectl exec`, attach,
+or port-forward. Container logs are not wired yet; provider-native console links
+or log collection are future work.
 
 Lambda Cloud support is still experimental. The adapter and smoke script exist,
 but VM runner heartbeat timeout, logs, and stronger failure recovery need more
@@ -47,7 +54,7 @@ work before it should be treated as a production provider.
 
 ```bash
 go test -count=1 ./...
-go build ./cmd/gpu-burst-node
+go build -o neocloud-node ./cmd/neocloud-node
 ```
 
 ## Kubernetes Smoke Test
@@ -85,7 +92,7 @@ Defaults:
 - GPU type: `NVIDIA A40`
 - GPU count: `1`
 - virtual node: `aibrix-gpu-burst-runpod-e2e`
-- binary: `/tmp/gpu-burst-node-e2e`
+- binary: `/tmp/neocloud-node-e2e`
 
 Optional capacity-classification check:
 
@@ -112,8 +119,8 @@ hack/e2e/lambda-smoke.sh
 
 ## Resource Broker Direction
 
-NeoCloudNode is the Kubernetes-facing runtime. The lower-level resource broker API is
-planned as a reusable layer for AIBrix batch, serving, and virtual-node
+NeoCloud Node is the Kubernetes-facing runtime. The lower-level resource broker
+API is planned as a reusable layer for AIBrix batch, serving, and virtual-node
 integrations. That broker will own catalog, planning, lease, fallback, and cost
-interfaces; NeoCloudNode will consume it rather than embedding long-term resource
-strategy directly in the Virtual Kubelet adapter.
+interfaces; NeoCloud Node will consume it rather than embedding long-term
+resource strategy directly in the Virtual Kubelet adapter.

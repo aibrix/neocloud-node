@@ -1,7 +1,7 @@
-# Contributing to AIBrix NeoCloudNode
+# Contributing to AIBrix NeoCloud Node
 
-Thanks for your interest in AIBrix NeoCloudNode. The project is experimental, so the
-best contributions are small, well-scoped fixes that improve reliability,
+Thanks for your interest in AIBrix NeoCloud Node. The project is experimental,
+so the best contributions are small, well-scoped fixes that improve reliability,
 provider compatibility, tests, and documentation.
 
 ## Development Setup
@@ -10,7 +10,7 @@ Run the local verification suite before sending changes:
 
 ```bash
 go test -count=1 ./...
-go build ./cmd/gpu-burst-node
+go build -o neocloud-node ./cmd/neocloud-node
 ```
 
 The real RunPod and Lambda Cloud smoke tests are gated because they create paid

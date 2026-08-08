@@ -9,7 +9,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	"github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/core"
+	"github.com/aibrix/neocloud-node/pkg/core"
 )
 
 func TestTransformerTransformsCoreV1Pod(t *testing.T) {

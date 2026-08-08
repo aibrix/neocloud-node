@@ -198,7 +198,7 @@ spec:
       serviceAccountName: gpu-burst-node
       containers:
         - name: gpu-burst-node
-          image: ghcr.io/vllm-project/aibrix/gpu-burst-node:latest
+          image: ghcr.io/aibrix/neocloud-node:latest
           imagePullPolicy: IfNotPresent
           args:
             - --node-name=$(GPU_BURST_NODE_NAME)

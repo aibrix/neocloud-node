@@ -9,7 +9,7 @@ CURL="${CURL:-curl}"
 
 NODE_NAME="${GPU_BURST_E2E_NODE_NAME:-aibrix-gpu-burst-lambda-e2e}"
 NAMESPACE="${GPU_BURST_E2E_NAMESPACE:-default}"
-BINARY="${GPU_BURST_E2E_BINARY:-/tmp/gpu-burst-node-e2e}"
+BINARY="${GPU_BURST_E2E_BINARY:-/tmp/neocloud-node-e2e}"
 LISTEN_ADDR="${GPU_BURST_E2E_LISTEN_ADDR:-:11252}"
 CALLBACK_ADDR="${LAMBDA_E2E_CALLBACK_ADDR:-${GPU_BURST_RUNNER_CALLBACK_ADDR:-}}"
 CALLBACK_URL="${LAMBDA_E2E_CALLBACK_URL:-${GPU_BURST_LAMBDA_CALLBACK_URL:-}}"
@@ -263,7 +263,7 @@ apply_control_plane_prereqs() {
 
 build_binary() {
   log "building $BINARY"
-  "$GO" build -o "$BINARY" "$ROOT_DIR/cmd/gpu-burst-node"
+  "$GO" build -o "$BINARY" "$ROOT_DIR/cmd/neocloud-node"
 }
 
 start_controller() {

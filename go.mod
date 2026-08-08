@@ -1,4 +1,4 @@
-module github.com/vllm-project/aibrix/pkg/gpu-burst-node
+module github.com/aibrix/neocloud-node
 
 go 1.25.0
 

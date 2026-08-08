@@ -19,11 +19,11 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	stats "k8s.io/kubelet/pkg/apis/stats/v1alpha1"
 
-	"github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/core"
-	"github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/kube"
+	"github.com/aibrix/neocloud-node/pkg/core"
+	"github.com/aibrix/neocloud-node/pkg/kube"
 )
 
-const defaultStatsNodeName = "gpu-burst-node"
+const defaultStatsNodeName = "neocloud-node"
 
 type PodTransformer interface {
 	TransformPod(pod *corev1.Pod) (core.Binding, error)

@@ -4,7 +4,7 @@ import (
 	"context"
 	"strings"
 
-	"github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/core"
+	"github.com/aibrix/neocloud-node/pkg/core"
 )
 
 // RemoteResourceOfferSource converts provider-visible remote resources into offer signals.

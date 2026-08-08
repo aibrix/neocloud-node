@@ -29,13 +29,13 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/record"
 
-	"github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/core"
-	lambdacloud "github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/providers/lambda"
-	"github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/providers/runpod"
-	burstresource "github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/resource"
-	"github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/runner"
-	kstore "github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/store/kubernetes"
-	"github.com/vllm-project/aibrix/pkg/gpu-burst-node/pkg/vk"
+	"github.com/aibrix/neocloud-node/pkg/core"
+	lambdacloud "github.com/aibrix/neocloud-node/pkg/providers/lambda"
+	"github.com/aibrix/neocloud-node/pkg/providers/runpod"
+	burstresource "github.com/aibrix/neocloud-node/pkg/resource"
+	"github.com/aibrix/neocloud-node/pkg/runner"
+	kstore "github.com/aibrix/neocloud-node/pkg/store/kubernetes"
+	"github.com/aibrix/neocloud-node/pkg/vk"
 )
 
 const (
@@ -144,7 +144,7 @@ func ParseOptions(args []string, getenv func(string) string) (Options, error) {
 		PlacementSignalCooldown:  durationEnv(getenv, "GPU_BURST_PLACEMENT_SIGNAL_COOLDOWN", burstresource.DefaultFailureSignalCooldown),
 	}
 
-	fs := flag.NewFlagSet("gpu-burst-node", flag.ContinueOnError)
+	fs := flag.NewFlagSet("neocloud-node", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.StringVar(&options.NodeName, "node-name", options.NodeName, "virtual node name")
 	fs.StringVar(&options.Provider, "provider", options.Provider, "provider adapter: fake, runpod or lambda")
@@ -252,7 +252,7 @@ func NewNode(ctx context.Context, options Options, kubeClient kubernetes.Interfa
 		LaunchGuard:      launchGuard(options),
 		NodeName:         options.NodeName,
 		EventRecorder: newEventRecorder(kubeClient,
-			"gpu-burst-node/"+options.Provider),
+			"neocloud-node/"+options.Provider),
 		StatusSyncContext:  ctx,
 		StatusSyncInterval: options.StatusSyncInterval,
 	}
@@ -510,11 +510,11 @@ func runCatalogRefresher(ctx context.Context, interval time.Duration, refresher 
 
 func logCatalogRefreshReport(report burstresource.CatalogRefreshReport) {
 	if len(report.Errors) > 0 {
-		log.Printf("gpu-burst-node placement catalog refresh completed: recorded=%d errors=%d firstError=%v",
+		log.Printf("neocloud-node placement catalog refresh completed: recorded=%d errors=%d firstError=%v",
 			report.Recorded, len(report.Errors), report.Errors[0])
 		return
 	}
-	log.Printf("gpu-burst-node placement catalog refresh completed: recorded=%d", report.Recorded)
+	log.Printf("neocloud-node placement catalog refresh completed: recorded=%d", report.Recorded)
 }
 
 func parsePlacementOffers(raw string) ([]burstresource.Offer, error) {
@@ -766,7 +766,7 @@ func startRunnerCallbackServer(ctx context.Context, listenAddr string, callbackS
 	}()
 	go func() {
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("gpu-burst-node runner callback server failed: addr=%s error=%v", listener.Addr().String(), err)
+			log.Printf("neocloud-node runner callback server failed: addr=%s error=%v", listener.Addr().String(), err)
 		}
 	}()
 	return listener.Addr().String(), server.Shutdown, nil
@@ -807,7 +807,7 @@ func runOrphanSweeper(ctx context.Context, interval time.Duration, sweeper core.
 
 func logOrphanSweepReport(report core.OrphanSweepReport, dryRun bool, err error) {
 	if err != nil {
-		log.Printf("gpu-burst-node orphan sweeper failed: dryRun=%t remote=%d activeBindings=%d orphans=%d deleted=%d deleteErrors=%d error=%v",
+		log.Printf("neocloud-node orphan sweeper failed: dryRun=%t remote=%d activeBindings=%d orphans=%d deleted=%d deleteErrors=%d error=%v",
 			dryRun,
 			report.ObservedRemoteResources,
 			report.ActiveBindings,
@@ -817,7 +817,7 @@ func logOrphanSweepReport(report core.OrphanSweepReport, dryRun bool, err error)
 			err)
 		return
 	}
-	log.Printf("gpu-burst-node orphan sweeper completed: dryRun=%t remote=%d activeBindings=%d orphans=%d deleted=%d",
+	log.Printf("neocloud-node orphan sweeper completed: dryRun=%t remote=%d activeBindings=%d orphans=%d deleted=%d",
 		dryRun,
 		report.ObservedRemoteResources,
 		report.ActiveBindings,
