@@ -1,6 +1,6 @@
 # VM Runner Bootstrap
 
-日期：2026-06-05
+Date：2026-06-05
 
 The VM runner bootstrap is the provider-neutral base for VM-backed GPU providers such as Lambda Cloud. It converts a `core.WorkloadRequest` into cloud-init that can be passed when launching a VM instance.
 

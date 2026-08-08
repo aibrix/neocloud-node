@@ -1,6 +1,6 @@
 # Kubernetes Pod Adapter
 
-日期：2026-06-05
+Date：2026-06-05
 
 GPU Burst Node now has a Kubernetes adapter layer in `pkg/kube`.
 

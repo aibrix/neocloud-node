@@ -1,6 +1,6 @@
 # AIBrix GPU Burst Node Compatibility Matrix
 
-日期：2026-06-05
+Date:2026-06-05
 
 This matrix documents the Phase 1 Pod transformation contract. GPU Burst Node accepts standard Kubernetes workload objects at the integration layer, but the core transformer supports only the subset that can be mapped honestly to remote cloud GPU providers.
 
