@@ -11,10 +11,14 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
 BUILD_DATE ?= $(shell git show -s --format=%cI HEAD 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
 IMAGE ?= ghcr.io/aibrix/neocloud-node:$(VERSION)
-BUILDER_IMAGE ?= golang:1.25.0-bookworm
+BUILDER_IMAGE ?= golang:1.25.12-bookworm
 RUNTIME_IMAGE ?= gcr.io/distroless/static-debian12:nonroot
 GO_TEST_FLAGS ?= -count=1
 INSTALL_MANIFEST ?= deploy/neocloud-node.yaml
+GOVULNCHECK_VERSION ?= v1.6.0
+ACTIONLINT_VERSION ?= v1.7.12
+RELEASE_TAG ?= $(VERSION)
+RELEASE_VERSION := $(patsubst v%,%,$(RELEASE_TAG))
 
 .DEFAULT_GOAL := help
 
@@ -55,6 +59,14 @@ test: ## Run unit and manifest tests.
 test-race: ## Run tests with the race detector.
 	$(GO) test -race $(GO_TEST_FLAGS) ./...
 
+.PHONY: vulncheck
+vulncheck: ## Scan reachable Go code with the official vulnerability database.
+	$(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
+
+.PHONY: actionlint
+actionlint: ## Validate GitHub Actions workflow syntax and expressions.
+	$(GO) run github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION)
+
 .PHONY: coverage
 coverage: ## Write a unit-test coverage profile to coverage.out.
 	$(GO) test $(GO_TEST_FLAGS) -coverprofile=coverage.out ./...
@@ -91,6 +103,10 @@ manifests-check: ## Verify Kustomize renders and the installation manifest is cu
 	trap 'rm -f "$${tmp}"' EXIT; \
 	$(KUSTOMIZE) build config/default > "$${tmp}"; \
 	diff -u $(INSTALL_MANIFEST) "$${tmp}"
+
+.PHONY: release-manifest
+release-manifest: ## Render a version-pinned install manifest into OUTPUT_DIR.
+	hack/release-manifest.sh "$(RELEASE_TAG)" "$(OUTPUT_DIR)/neocloud-node-$(RELEASE_VERSION).yaml"
 
 .PHONY: verify
 verify: fmt-check tidy-check mod-verify vet manifests-check test build ## Run all local presubmit checks.

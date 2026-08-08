@@ -1,5 +1,8 @@
 # AIBrix NeoCloud Node
 
+[![CI](https://github.com/aibrix/neocloud-node/actions/workflows/ci.yml/badge.svg)](https://github.com/aibrix/neocloud-node/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 Kubernetes bridge to elastic cloud GPUs.
 
 AIBrix NeoCloud Node exposes burst GPU capacity from specialized cloud
