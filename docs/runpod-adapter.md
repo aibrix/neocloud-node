@@ -65,8 +65,8 @@ If `Create` returns a transient error after the request may have reached RunPod,
 
 ## Current Limitations
 
-- No real RunPod integration test yet.
-- No RunPod catalog lookup for GPU type normalization, pricing or capacity.
-- No automatic creation of RunPod registry auth from Kubernetes `imagePullSecrets`; users must currently reference an existing `containerRegistryAuthId`.
+- A gated real RunPod smoke test exists in `hack/e2e/runpod-smoke.sh`; it is not run by default because it creates paid resources.
+- RunPod catalog lookup is still limited; GPU type normalization, pricing and capacity signals are mostly provided by configured or observed placement offers.
+- Kubernetes `imagePullSecrets` are not automatically converted into RunPod registry auth objects; users must currently reference an existing `containerRegistryAuthId`.
 - No logs API integration.
-- No billing history polling yet; current code only preserves fields needed to extract per-pod cost later.
+- No billing history polling yet; launch-time and provider response cost fields are preserved for binding status and burn-rate metrics.

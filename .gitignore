@@ -1,0 +1,11 @@
+data/neocloud-trace/*.db
+data/neocloud-trace/*.db-*
+
+# Local logs and cloud trace outputs.
+logs/
+data/neocloud-trace/
+
+# Local binaries and generated runtime cache.
+gpu-burst-node
+tools/neocloud-trace/__pycache__/
+*.pyc
