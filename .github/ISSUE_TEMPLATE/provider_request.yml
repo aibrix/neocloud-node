@@ -1,0 +1,52 @@
+name: Provider integration request
+description: Propose or help implement a NeoCloud provider adapter
+title: "[Provider]: "
+labels:
+  - provider
+  - enhancement
+  - triage
+body:
+  - type: input
+    id: provider
+    attributes:
+      label: Provider name
+    validations:
+      required: true
+  - type: input
+    id: docs
+    attributes:
+      label: Official API documentation
+      placeholder: https://...
+    validations:
+      required: true
+  - type: textarea
+    id: compute
+    attributes:
+      label: Compute model
+      description: Describe VM, container, serverless, cluster, GPU, region, storage, and network primitives.
+    validations:
+      required: true
+  - type: textarea
+    id: lifecycle
+    attributes:
+      label: Lifecycle API coverage
+      description: Describe create, get, list/search, delete, idempotency, interruption, and terminal-state APIs.
+    validations:
+      required: true
+  - type: textarea
+    id: supply
+    attributes:
+      label: Catalog and supply signals
+      description: Describe pricing, availability, quota, capacity, reservation, and spot APIs.
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation resources
+      description: State whether test credentials or sponsored low-cost capacity can be provided privately.
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      options:
+        - label: I can help test this provider.
+        - label: I can help implement or review the adapter.

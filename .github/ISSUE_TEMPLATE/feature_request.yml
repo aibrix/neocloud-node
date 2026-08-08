@@ -1,0 +1,38 @@
+name: Feature request
+description: Propose a provider-neutral capability or lifecycle improvement
+title: "[Feature]: "
+labels:
+  - enhancement
+  - triage
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the user problem without prescribing an implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Workload and use case
+      description: Explain the batch, serving, training, or recovery workflow that needs this capability.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the desired Pod, provider, and lifecycle behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: portability
+    attributes:
+      label: Provider portability
+      description: Explain whether this belongs in the provider-neutral contract or one provider adapter.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe workarounds or other designs you considered.

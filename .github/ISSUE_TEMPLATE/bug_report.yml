@@ -1,0 +1,79 @@
+name: Bug report
+description: Report a reproducible NeoCloud Node defect
+title: "[Bug]: "
+labels:
+  - bug
+  - triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search existing issues before filing. Never include API keys, SSH keys,
+        callback secrets, private endpoints, account IDs, or paid resource IDs.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Release tag, image digest, or git commit.
+      placeholder: v0.1.0 or 0123456789abcdef
+    validations:
+      required: true
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Provider
+      options:
+        - fake
+        - RunPod
+        - Lambda Cloud
+        - Provider-independent
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Describe the observed behavior and its impact.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Include a minimal sanitized Pod and the commands needed to reproduce the problem.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: state
+    attributes:
+      label: Kubernetes and binding state
+      description: Include sanitized Pod events, CloudPodBinding status, and relevant controller logs.
+      render: text
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: |
+        Kubernetes version:
+        Installation method:
+        Controller configuration:
+        Provider API or region:
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed credentials and private or billable resource identifiers.
+          required: true
+        - label: I checked for leaked remote resources and described any cleanup still required.
+          required: true
