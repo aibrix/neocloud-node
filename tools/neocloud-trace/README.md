@@ -1,54 +1,110 @@
 # NeoCloud Trace
 
 NeoCloud Trace is a command-line tool for measuring GPU cloud availability and
-provisioning behavior. It can:
+provisioning behavior. It collects provider catalogs, runs budget-bounded
+capacity and lease experiments, stores observations in SQLite, and exports
+analysis-ready data.
 
-- sample provider catalogs and prices without creating resources;
-- measure how much GPU capacity can be provisioned at once;
-- monitor interruptible and on-demand GPU leases over time;
-- run scheduled allocation-window experiments;
-- persist every observation, resource, cleanup action, and budget decision in
-  SQLite;
-- export analysis-ready CSV files and reconcile provider billing data.
-
-The supported providers are Lambda Cloud and RunPod. The implementation uses
-the Python standard library and SQLite; no runtime Python dependencies are
-required.
-
-## Requirements
-
-- Python 3.9 or newer
-- Provider API credentials for catalog collection or active experiments
-- A host that remains online for the full duration of long-running experiments
+The supported providers are Lambda Cloud and RunPod. The runtime uses only the
+Python standard library and SQLite.
 
 ## Installation
 
-From the repository root, install the tool in editable mode:
+Python 3.10 or newer is required. From the repository root:
 
 ```bash
 python3 -m pip install --editable tools/neocloud-trace
 ```
 
-This installs the `neocloud-trace` command while keeping it connected to the
-source checkout.
-
-For development, the package can also be run without installation:
+This installs the `neocloud-trace` command. Verify the installation with:
 
 ```bash
-cd tools/neocloud-trace
-PYTHONPATH=src python3 -m neocloud_trace --help
+neocloud-trace --help
 ```
 
-Run the test suite from the repository root with:
+To run directly from the source checkout without installing:
 
 ```bash
-python3 -m pytest tools/neocloud-trace/tests
+cd tools/neocloud-trace/src
+python3 -m neocloud_trace --help
+```
+
+## Core Concepts
+
+Every collection or experiment uses two files:
+
+- a plan JSON file describing providers, experiment types, durations, GPU
+  shapes, and budget limits;
+- a SQLite database containing run state, observations, owned resources,
+  cleanup events, and billing records.
+
+Commands place their options after the command name:
+
+```text
+neocloud-trace COMMAND [OPTIONS]
+```
+
+For example:
+
+```bash
+neocloud-trace init \
+  --plan tools/neocloud-trace/plans/research-runpod-pilot-3h.json \
+  --db data/neocloud-trace/runpod-pilot.db \
+  --vantage-id us-west-office
+```
+
+Run `neocloud-trace COMMAND --help` for command-specific options. The top-level
+commands are:
+
+| Command | Purpose |
+| --- | --- |
+| `init` | Validate a plan and initialize its database |
+| `collect` | Collect passive catalog and host observations |
+| `run` | Run all or one selected experiment from a plan |
+| `tick` | Advance one scheduled capacity epoch and exit |
+| `status` | Show persisted run status and owned resources |
+| `cleanup` | Delete and verify resources owned by a run |
+| `recover` | Close a lost run and verify remote cleanup |
+| `trial` | Show the detailed payload for a capacity trial |
+| `export` | Export survival, capacity-depth, or window CSV data |
+| `billing` | Sync, import, or reconcile provider billing |
+
+## Collector Identity
+
+Every persisted run has a `host_id` and a `vantage_id`.
+
+`host_id` identifies the machine running the collector. It is resolved in this
+order:
+
+1. `--host-id`;
+2. a non-placeholder `host_id` in the plan;
+3. the local system hostname.
+
+`vantage_id` identifies the collector's network or physical location. It is
+resolved in this order:
+
+1. `--vantage-id`;
+2. a non-placeholder `vantage_id` in the plan.
+
+There is no automatic `vantage_id`, because a hostname cannot reliably identify
+a network location. All plan-based commands reject placeholder values such as
+`replace-with-network-vantage`.
+
+Use stable, human-readable values when comparing runs from different machines
+or networks:
+
+```bash
+neocloud-trace init \
+  --plan /path/to/plan.json \
+  --db data/neocloud-trace/trace.db \
+  --host-id trace-host-01 \
+  --vantage-id us-west-office
 ```
 
 ## Credentials
 
-Set credentials only in the environment. Credentials are not written to the
-trace database.
+Provider credentials are read from environment variables and are not written to
+the trace database:
 
 ```bash
 export LAMBDA_CLOUD_API_KEY=...
@@ -56,10 +112,10 @@ export LAMBDA_CLOUD_SSH_KEYS=public-key-name
 export RUNPOD_API_KEY=...
 ```
 
-`LAMBDA_CLOUD_SSH_KEYS` is a comma-separated list and is required when the tool
-creates Lambda instances.
+`LAMBDA_CLOUD_SSH_KEYS` is a comma-separated list and is required when creating
+Lambda instances.
 
-The following endpoint overrides are optional:
+Optional endpoint overrides are:
 
 ```bash
 export LAMBDA_CLOUD_BASE_URL=https://cloud.lambda.ai/api/v1
@@ -67,492 +123,281 @@ export RUNPOD_BASE_URL=https://rest.runpod.io/v1
 export RUNPOD_GRAPHQL_URL=https://api.runpod.io/graphql
 ```
 
-## Safety Model
+## Safety
 
-Active experiments create billable cloud resources. The tool applies several
-guards:
-
-- plans must define per-provider and total budget limits;
-- active experiment commands require a real host identity and network vantage
-  identity;
-- most commands that create or delete resources require `--enable-active`;
-- a new active run is blocked while the database contains an unresolved cloud
-  resource;
-- resource deletion is not considered complete until the provider reports the
-  resource terminal or missing;
-- `SIGINT` and `SIGTERM` trigger bounded cleanup.
-
-The `capacity` command is an intentionally active scheduler entry point. It
-does not require `--enable-active`; invoking it with a due epoch may immediately
-create billable resources.
-
-Use a stable host for long-running experiments. If the host sleeps or loses
-power, remote resources may continue billing until recovery is run.
-
-## Quick Start
-
-The following example validates a RunPod plan, collects one passive snapshot,
-and then runs the configured experiment.
+Commands that can create or delete cloud resources require
+`--enable-active`. This applies consistently to `run`, `tick`, `cleanup`, and
+`recover`.
 
 ```bash
-neocloud-trace \
-  --db data/neocloud-trace/runpod-pilot.db \
-  --plan tools/neocloud-trace/plans/research-runpod-pilot-3h.json \
-  --host-id trace-host-01 \
-  --vantage-id us-west-office \
-  init
-
-neocloud-trace \
-  --db data/neocloud-trace/runpod-pilot.db \
-  --plan tools/neocloud-trace/plans/research-runpod-pilot-3h.json \
-  --host-id trace-host-01 \
-  --vantage-id us-west-office \
-  passive --once
-
-neocloud-trace \
-  --db data/neocloud-trace/runpod-pilot.db \
-  --plan tools/neocloud-trace/plans/research-runpod-pilot-3h.json \
-  --host-id trace-host-01 \
-  --vantage-id us-west-office \
-  --enable-active \
-  pilot
-```
-
-`init` validates the plan, initializes the SQLite schema, and prints the
-planned cost upper bounds. It does not create cloud resources.
-
-## Plans
-
-A plan is a JSON file that defines:
-
-- `host_id` and `vantage_id` for identifying the collector and its network
-  location;
-- experiment duration and sampling intervals;
-- GPU counts and the maximum simultaneous GPUs allowed per provider;
-- provider-specific and total budget limits;
-- capacity trials, canary trials, or scheduled cohorts.
-
-Use `--host-id` and `--vantage-id` to override those values without editing the
-plan. Active commands reject placeholder metadata.
-
-Always validate a plan before running it:
-
-```bash
-neocloud-trace \
-  --db data/neocloud-trace/trace.db \
+neocloud-trace run \
   --plan /path/to/plan.json \
-  init
+  --db data/neocloud-trace/trace.db \
+  --vantage-id us-west-office \
+  --enable-active
 ```
 
-Bundled plans provide working examples for each experiment type:
+Active operations also enforce the limits in the plan:
+
+- per-provider and total budget limits;
+- maximum simultaneous GPUs per provider;
+- no new active run while an unresolved owned resource remains;
+- verified deletion before a resource is considered cleaned up;
+- bounded cleanup after `SIGINT` or `SIGTERM`.
+
+Review provider, GPU type, region, duration, and budget fields before enabling an
+active command. A collector host that sleeps or loses power can leave remote
+resources billing until `recover` is run.
+
+## Validate a Plan
+
+`init` validates the plan, initializes the SQLite schema, and reports experiment
+counts and conservative cost bounds. It does not create cloud resources.
+
+```bash
+neocloud-trace init \
+  --plan /path/to/plan.json \
+  --db data/neocloud-trace/trace.db \
+  --vantage-id us-west-office
+```
+
+A plan defines:
+
+- protocol version and collector metadata;
+- experiment duration and sampling intervals;
+- provider budgets and the total budget;
+- GPU counts and concurrency limits;
+- static trials or scheduled cohorts;
+- provider, SKU, region, resource class, and market for each experiment cell.
+
+Bundled examples are available under `plans/`:
 
 | Plan | Purpose |
 | --- | --- |
 | `research-runpod-pilot-3h.json` | RunPod capacity and matched lease pilot |
-| `research-pilot-3h.json` | Lambda and RunPod capacity plus matched lease monitoring |
-| `research-combined-pilot-4h.json` | Combined multi-provider capacity and lease run |
-| `research-runpod-expansion-6h.json` | Repeated RunPod matched lease trials |
-| `research-runpod-survival-cohort-24h.json` | Continuous RunPod interruptible/on-demand replacement cohort |
-| `research-capacity-depth-cohort-24h.json` | Scheduled Lambda and RunPod capacity-depth cohort |
-| `research-capacity-fragmentation-d32-pilot.json` | Multi-instance and multi-GPU capacity-depth experiment |
-| `research-completion-window-cohort-24h.json` | Randomized allocation-window experiment |
-| `research-lambda-control-cohort-24h.json` | Lambda on-demand lifecycle control cohort |
+| `research-pilot-3h.json` | Lambda and RunPod capacity plus matched leases |
+| `research-combined-pilot-4h.json` | Combined multi-provider pilot |
+| `research-runpod-expansion-6h.json` | Repeated RunPod lease trials |
+| `research-runpod-survival-cohort-24h.json` | Continuous RunPod survival cohort |
+| `research-capacity-depth-cohort-24h.json` | Scheduled capacity-depth cohort |
+| `research-capacity-fragmentation-d32-pilot.json` | Capacity fragmentation up to 32 GPUs |
+| `research-completion-window-cohort-24h.json` | Randomized allocation-window cohort |
+| `research-lambda-control-cohort-24h.json` | Lambda lifecycle control cohort |
 
-Treat bundled plans as examples. Review GPU types, regions, durations, and
-budgets before enabling active execution.
+Treat these files as examples. Their placeholder metadata must be resolved with
+CLI options or replaced in a copied plan.
 
-## Passive Catalog Collection
+## Passive Collection
 
-Passive collection records provider API health, normalized catalog quotes,
-prices, and host/network health. It never creates cloud resources.
+`collect` records provider API health, normalized catalog quotes, prices, and
+collector host/network observations. It never creates cloud resources and does
+not accept `--enable-active`.
 
 Collect one snapshot:
 
 ```bash
-neocloud-trace \
-  --db data/neocloud-trace/catalog.db \
+neocloud-trace collect \
   --plan /path/to/plan.json \
-  passive --once
+  --db data/neocloud-trace/catalog.db \
+  --vantage-id us-west-office \
+  --once
 ```
 
-Collect for the duration configured in the plan:
+Collect for a fixed duration:
 
 ```bash
-neocloud-trace \
-  --db data/neocloud-trace/catalog.db \
+neocloud-trace collect \
   --plan /path/to/plan.json \
-  passive
+  --db data/neocloud-trace/catalog.db \
+  --vantage-id us-west-office \
+  --duration-seconds 3600
 ```
 
-Override the duration for a particular run:
+Without either duration option, collection uses `duration_seconds` from the
+plan.
+
+## Run Experiments
+
+`run` executes the experiment sections in a plan. The default target is `all`:
 
 ```bash
-neocloud-trace \
-  --db data/neocloud-trace/catalog.db \
+neocloud-trace run \
   --plan /path/to/plan.json \
-  passive --duration-seconds 3600
+  --db data/neocloud-trace/trace.db \
+  --vantage-id us-west-office \
+  --enable-active
 ```
 
-## Capacity Measurement
-
-Capacity trials create resources in cumulative depth stages. For example, a
-single-GPU cell targeting eight GPUs attempts cumulative depths of 1, 2, 4,
-and 8. Each resource is tracked from request through provider readiness,
-application readiness, and verified cleanup.
-
-### Run One Configured Trial
+For a focused run, use `--target` and an optional zero-based `--index`:
 
 ```bash
-neocloud-trace \
+neocloud-trace run \
+  --plan /path/to/plan.json \
   --db data/neocloud-trace/capacity.db \
-  --plan /path/to/plan.json \
-  --host-id trace-host-01 \
   --vantage-id us-west-office \
   --enable-active \
-  capacity-once --index 0
+  --target capacity-cohort \
+  --index 0
 ```
 
-`--index` selects an entry from the plan's `capacity_trials` list.
+Targets map directly to plan sections:
 
-### Run a Scheduled Capacity Cohort
+| Target | Plan section |
+| --- | --- |
+| `all` | All configured experiment sections |
+| `capacity` | `capacity_trials` |
+| `canary` | `canary_trials` |
+| `canary-cohort` | `canary_cohorts` |
+| `capacity-cohort` | `capacity_cohorts` |
+| `window-cohort` | `completion_window_cohorts` |
+| `control-cohort` | `control_cohorts` |
 
-`depth-cohort` keeps one process running and executes the full precomputed
-schedule:
+## Scheduled Capacity Ticks
 
-```bash
-neocloud-trace \
-  --db data/neocloud-trace/capacity-cohort.db \
-  --plan tools/neocloud-trace/plans/research-capacity-depth-cohort-24h.json \
-  --host-id trace-host-01 \
-  --vantage-id us-west-office \
-  --enable-active \
-  depth-cohort
-```
-
-Only one provider is active at a time. Cleanup must be verified before the next
-scheduled epoch can start.
-
-### Advance Capacity from Cron or Another Scheduler
-
-The `capacity` command is the idempotent entry point for external schedulers.
-The first invocation persists the complete schedule. Every invocation samples
-the catalog, claims at most one due epoch, executes it through cleanup, and
-exits.
+`tick` is for cron, systemd timers, Kubernetes CronJobs, or another external
+scheduler. Each invocation claims at most one due capacity epoch, executes it,
+persists the result, verifies cleanup, and exits.
 
 ```bash
-neocloud-trace capacity \
-  --experiment /path/to/capacity-experiment.json \
-  --db data/neocloud-trace/capacity-experiment.db
-```
-
-Run exactly the same command on every scheduler invocation. Possible statuses
-include:
-
-- `idle`: no epoch is currently due;
-- `busy`: another invocation owns the due epoch;
-- `cleanup_blocked`: an earlier resource has not been verified deleted;
-- `executed`: one epoch ran;
-- `complete`: no scheduled epochs remain.
-
-An external-scheduler experiment must contain exactly one `capacity_cohorts`
-entry and no other active experiment type. Use one database per experiment.
-The tool detects the collector hostname for this command, but `vantage_id` must
-be set to a real value in the experiment file.
-
-`capacity-tick` exposes the same mechanism with an explicit campaign ID and is
-available for integrations that manage campaign identities themselves:
-
-```bash
-neocloud-trace \
+neocloud-trace tick \
+  --plan /path/to/capacity-plan.json \
   --db data/neocloud-trace/capacity.db \
-  --plan /path/to/plan.json \
-  --host-id trace-host-01 \
   --vantage-id us-west-office \
-  --enable-active \
-  capacity-tick --campaign-id capacity-2026-01 --index 0
+  --enable-active
 ```
 
-## Lease Survival Monitoring
+Use the same plan and database on every invocation. The campaign identity is
+reused from the database; `--campaign-id` can set an explicit stable identity.
+`--index` selects a capacity cohort when the plan contains more than one.
 
-A matched canary starts two leases for the same provider and GPU cell:
-
-- one interruptible lease;
-- one on-demand control lease.
-
-The tool records provider state, machine identity, runtime uptime, application
-heartbeat, readiness times, terminal events, and verified cleanup.
-
-Run one configured pair:
-
-```bash
-neocloud-trace \
-  --db data/neocloud-trace/canary.db \
-  --plan /path/to/plan.json \
-  --host-id trace-host-01 \
-  --vantage-id us-west-office \
-  --enable-active \
-  canary --index 0
-```
-
-Run a continuous replacement cohort:
-
-```bash
-neocloud-trace \
-  --db data/neocloud-trace/survival.db \
-  --plan tools/neocloud-trace/plans/research-runpod-survival-cohort-24h.json \
-  --host-id trace-host-01 \
-  --vantage-id us-west-office \
-  --enable-active \
-  cohort
-```
-
-When a pair ends, the cohort cleans it and starts a replacement until the
-deadline, pair limit, stop request, or budget limit is reached.
-
-## Completion-Window Experiments
-
-A completion-window cohort assigns provider/GPU cells to configured launch-time
-arms. It records catalog state at release and decision time, the actual launch
-delay, provisioning outcome, readiness SLA outcome, cost estimate, and cleanup
-status.
-
-```bash
-neocloud-trace \
-  --db data/neocloud-trace/completion-window.db \
-  --plan tools/neocloud-trace/plans/research-completion-window-cohort-24h.json \
-  --host-id trace-host-01 \
-  --vantage-id us-west-office \
-  --enable-active \
-  window-cohort
-```
-
-## On-Demand Control Cohorts
-
-Use a control cohort when a provider does not expose a comparable interruptible
-market. Each epoch runs one on-demand lease and records the same lifecycle and
-readiness signals used by the survival exports.
-
-```bash
-neocloud-trace \
-  --db data/neocloud-trace/lambda-control.db \
-  --plan tools/neocloud-trace/plans/research-lambda-control-cohort-24h.json \
-  --host-id trace-host-01 \
-  --vantage-id us-west-office \
-  --enable-active \
-  control-cohort
-```
-
-## Combined Plans
-
-`pilot` executes the active work contained in a plan while host and catalog
-sampling continue in background threads.
-
-```bash
-neocloud-trace \
-  --db data/neocloud-trace/combined.db \
-  --plan tools/neocloud-trace/plans/research-combined-pilot-4h.json \
-  --host-id trace-host-01 \
-  --vantage-id us-west-office \
-  --enable-active \
-  pilot
-```
+Possible statuses include `idle`, `busy`, `cleanup_blocked`, `executed`, and
+`complete`.
 
 ## Status, Cleanup, and Recovery
 
-### Inspect a Run
-
-`status` is read-only and does not require provider credentials:
+Show the latest run or a specific run:
 
 ```bash
-neocloud-trace \
-  --db data/neocloud-trace/trace.db \
-  status
+neocloud-trace status --db data/neocloud-trace/trace.db
+neocloud-trace status --db data/neocloud-trace/trace.db --run-id RUN_ID
 ```
 
-Use `--run-id` to inspect an earlier run. Without it, the latest run is used.
-The output includes run state, observation counts, budget exposure, and owned
-resources.
-
-### Clean Up a Stopped Run
+Delete and verify resources still owned by a run:
 
 ```bash
-neocloud-trace \
+neocloud-trace cleanup \
   --db data/neocloud-trace/trace.db \
-  --enable-active \
-  cleanup
+  --run-id RUN_ID \
+  --enable-active
 ```
 
-Cleanup sends delete requests and verifies that every resource is terminal or
-missing. A failed verification leaves the resource in the owned-resource set
-and blocks future active runs.
-
-### Recover After Collector Loss
-
-Use recovery when the collector exited without completing its normal shutdown
-path:
+Use `recover` after the original collector process was lost. It right-censors
+open observations, records a recovery termination reason, and verifies remote
+cleanup:
 
 ```bash
-neocloud-trace \
+neocloud-trace recover \
   --db data/neocloud-trace/trace.db \
-  --enable-active \
-  recover
+  --run-id RUN_ID \
+  --enable-active
 ```
 
-Recovery marks unfinished lease observations as collector loss before deleting
-and verifying remote resources. This prevents collector downtime from being
-reported as a provider interruption.
+If `--run-id` is omitted, these commands select the most recent run.
 
-## Data Export
+## Inspect and Export Data
 
-Export commands are read-only and do not require provider credentials. If
-`--run-id` is omitted, they use the latest run in the database.
-
-### Lease Survival Data
+Show a detailed capacity trial as JSON:
 
 ```bash
-neocloud-trace \
-  --db data/neocloud-trace/survival.db \
-  export-survival \
+neocloud-trace trial \
+  --db data/neocloud-trace/trace.db \
+  --trial-id TRIAL_ID
+```
+
+Without `--trial-id`, the most recent capacity trial is selected.
+
+Export analysis-ready CSV files:
+
+```bash
+neocloud-trace export survival \
+  --db data/neocloud-trace/trace.db \
   --output data/neocloud-trace/survival.csv
-```
 
-The CSV contains one row per lease, including pair establishment, readiness
-times, pre-ready failures, post-ready interruption events, application
-failures, exposure times, and censoring status.
-
-### Capacity-Depth Data
-
-```bash
-neocloud-trace \
-  --db data/neocloud-trace/capacity.db \
-  export-depth \
+neocloud-trace export depth \
+  --db data/neocloud-trace/trace.db \
   --output data/neocloud-trace/capacity-depth.csv
-```
 
-The CSV contains one row per scheduled epoch, including skipped epochs,
-selection metadata, advertised availability, delivered depth, readiness,
-failure class, retry count, cost estimate, and cleanup status.
-
-Inspect a complete JSON payload for one capacity trial with:
-
-```bash
-neocloud-trace \
-  --db data/neocloud-trace/capacity.db \
-  show-depth-trial --trial-id TRIAL_ID
-```
-
-Without `--trial-id`, the latest capacity trial is shown.
-
-### Completion-Window Data
-
-```bash
-neocloud-trace \
-  --db data/neocloud-trace/completion-window.db \
-  export-window \
+neocloud-trace export window \
+  --db data/neocloud-trace/trace.db \
   --output data/neocloud-trace/completion-window.csv
 ```
 
-The CSV contains one row per opportunity, including assignment probability,
-release and decision catalog snapshots, launch timing, provisioning outcome,
-SLA indicators, cost estimate, and cleanup status.
+Each export accepts `--run-id`; otherwise it uses the most recent run. Reusable
+SQL queries are available in `sql/research-trace-queries.sql`.
 
-Additional SQLite query examples are available in
-`tools/neocloud-trace/sql/research-trace-queries.sql`.
+## Billing
 
-## Billing Reconciliation
-
-### Synchronize RunPod Billing
-
-RunPod billing records can be fetched by Pod ID:
+Sync RunPod billing records that can be attributed to resources in a run:
 
 ```bash
-neocloud-trace \
+neocloud-trace billing sync \
   --db data/neocloud-trace/trace.db \
-  sync-billing --provider runpod
+  --provider runpod
 ```
 
-Use `--start-time` to override the default start time taken from the run.
-
-### Import Provider Billing
-
-Import normalized CSV or JSON billing data when a provider does not expose a
-suitable API:
+Lambda does not expose a public usage endpoint. Import an invoice or console
+export instead:
 
 ```bash
-neocloud-trace \
+neocloud-trace billing import \
   --db data/neocloud-trace/trace.db \
-  import-billing \
   --provider lambda \
-  --source lambda-invoice-2026-08 \
-  --input /path/to/lambda-invoice.csv
+  --source invoice-2026-08 \
+  --input /path/to/lambda-usage.csv
 ```
 
-The expected CSV columns are shown in
-`tools/neocloud-trace/billing-import-template.csv`.
-
-### Reconcile Costs
+The expected CSV columns are shown in `billing-import-template.csv`. Reconcile
+recorded or imported charges with trace resources using:
 
 ```bash
-neocloud-trace \
-  --db data/neocloud-trace/trace.db \
-  reconcile-cost
+neocloud-trace billing reconcile \
+  --db data/neocloud-trace/trace.db
 ```
 
-Billing rows with an exact provider resource ID are attributed to their
-capacity replica or canary lease. Aggregate rows without a resource ID remain
-unattributed rather than being distributed across experiments.
+Billing commands accept `--run-id`; otherwise they use the most recent run.
 
-## Command Reference
+## Stored Data
 
-Global options must appear before the command name.
+SQLite records include:
 
-| Command | Creates or deletes resources | Purpose |
-| --- | --- | --- |
-| `init` | No | Validate a plan and initialize SQLite |
-| `passive` | No | Collect catalog and host observations |
-| `capacity-once` | Yes | Run one static capacity trial |
-| `capacity` | Yes | Advance an externally scheduled capacity experiment |
-| `capacity-tick` | Yes | Advance a named capacity campaign |
-| `canary` | Yes | Run one matched lease pair |
-| `cohort` | Yes | Run a continuous matched lease cohort |
-| `depth-cohort` | Yes | Run a scheduled capacity cohort in one process |
-| `window-cohort` | Yes | Run a randomized completion-window cohort |
-| `control-cohort` | Yes | Run an on-demand lifecycle control cohort |
-| `pilot` | Yes | Run all static trials in a plan |
-| `status` | No | Show run state and unresolved resources |
-| `cleanup` | Deletes only | Clean and verify resources from a run |
-| `recover` | Deletes only | Recover after collector loss |
-| `export-survival` | No | Export lease survival data |
-| `export-depth` | No | Export capacity-depth data |
-| `show-depth-trial` | No | Show one detailed capacity trial |
-| `export-window` | No | Export completion-window data |
-| `sync-billing` | No | Fetch provider billing records |
-| `import-billing` | No | Import billing CSV or JSON |
-| `reconcile-cost` | No | Attribute billing to trace resources |
+- experiment configuration and run lifecycle;
+- provider API observations and normalized catalog quotes;
+- collector host and network observations;
+- capacity campaigns, epochs, trials, stages, and replicas;
+- canary leases and lease observations;
+- budget reservations, settlements, and exposure;
+- owned resources and cleanup verification;
+- provider billing records and cost reconciliation.
 
-Run `neocloud-trace COMMAND --help` for command-specific options.
+Database files and their `-wal` and `-shm` companions are runtime data and are
+excluded from Git.
 
-## Output and Storage
+## Development
 
-Commands print JSON results to standard output and errors to standard error.
-Experiment state is stored in the SQLite database selected by `--db`.
+Run the full test suite from the repository root:
 
-The database includes:
+```bash
+python3 -m pytest tools/neocloud-trace/tests
+```
 
-- run configuration and identity;
-- host and network health samples;
-- provider API observations and catalog quotes;
-- capacity schedules, trials, replicas, and readiness states;
-- lease cohorts, leases, heartbeats, and terminal classifications;
-- cleanup attempts and verified ownership state;
-- budget commitments, settlements, billing records, and reconciliations.
+Check the CLI from source:
 
-Raw provider payloads are retained for auditability. Fields whose keys match
-known secret names are redacted before persistence.
+```bash
+cd tools/neocloud-trace/src
+python3 -m neocloud_trace --help
+python3 -m neocloud_trace run --help
+```
 
-## Legacy Collector
-
-The original standalone collector is retained under
-`tools/neocloud-trace/legacy/` for existing databases and legacy workflows. New
-collection and experiment work should use the `neocloud-trace` command
-documented above.
+The original single-file collector remains under `legacy/` for existing
+databases and historical workflows. New work should use the packaged
+`neocloud-trace` command.

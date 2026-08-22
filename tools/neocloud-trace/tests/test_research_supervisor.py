@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import datetime as dt
 import pathlib
@@ -287,114 +289,142 @@ class ResearchSupervisorTest(unittest.TestCase):
     def test_cli_marks_every_billable_command_as_active(self):
         module = trace_cli
         parser = module.build_parser()
+        database = str(self.root / "trace.db")
+        plan = str(self.plan_path)
 
-        for command in (
-            "capacity-once",
-            "canary",
-            "cohort",
-            "depth-cohort",
-            "window-cohort",
-            "control-cohort",
-            "pilot",
-            "cleanup",
-            "recover",
-        ):
-            args = parser.parse_args(["--db", str(self.root / "trace.db"), command])
+        for command in ("run", "tick"):
+            args = parser.parse_args(
+                [command, "--db", database, "--plan", plan]
+            )
             with self.assertRaises(ActiveRunDisabled):
                 module.require_active(args)
 
-        capacity_tick = parser.parse_args(
-            [
-                "--db",
-                str(self.root / "trace.db"),
-                "capacity-tick",
-                "--campaign-id",
-                "capacity-60d",
-            ]
-        )
-        with self.assertRaises(ActiveRunDisabled):
-            module.require_active(capacity_tick)
+        for command in ("cleanup", "recover"):
+            args = parser.parse_args([command, "--db", database])
+            with self.assertRaises(ActiveRunDisabled):
+                module.require_active(args)
 
-        passive = parser.parse_args(["--db", str(self.root / "trace.db"), "passive"])
-        module.require_active(passive)
+        collect = parser.parse_args(
+            ["collect", "--db", database, "--plan", plan]
+        )
+        module.require_active(collect)
         export = parser.parse_args(
             [
+                "export",
+                "survival",
                 "--db",
-                str(self.root / "trace.db"),
-                "export-survival",
+                database,
                 "--output",
                 str(self.root / "survival.csv"),
             ]
         )
         module.require_active(export)
-        depth_export = parser.parse_args(
-            [
-                "--db",
-                str(self.root / "trace.db"),
-                "export-depth",
-                "--output",
-                str(self.root / "depth.csv"),
-            ]
-        )
-        module.require_active(depth_export)
-        window_export = parser.parse_args(
-            [
-                "--db",
-                str(self.root / "trace.db"),
-                "export-window",
-                "--output",
-                str(self.root / "completion-window.csv"),
-            ]
-        )
-        module.require_active(window_export)
         sync_billing = parser.parse_args(
             [
+                "billing",
+                "sync",
                 "--db",
-                str(self.root / "trace.db"),
-                "sync-billing",
+                database,
                 "--provider",
                 "runpod",
             ]
         )
         module.require_active(sync_billing)
         reconcile = parser.parse_args(
-            ["--db", str(self.root / "trace.db"), "reconcile-cost"]
+            ["billing", "reconcile", "--db", database]
         )
         module.require_active(reconcile)
 
         identified = parser.parse_args(
             [
+                "run",
                 "--db",
-                str(self.root / "trace.db"),
+                database,
+                "--plan",
+                plan,
                 "--host-id",
                 "stable-host-1",
                 "--vantage-id",
                 "us-west-office",
-                "pilot",
+                "--enable-active",
             ]
         )
         self.assertEqual(identified.host_id, "stable-host-1")
         self.assertEqual(identified.vantage_id, "us-west-office")
 
-    def test_capacity_cli_only_requires_experiment_and_database(self):
+    def test_cli_help_keeps_operational_options_with_their_command(self):
+        parser = trace_cli.build_parser()
+        top_level_help = parser.format_help()
+
+        self.assertIn("run", top_level_help)
+        self.assertIn("tick", top_level_help)
+        self.assertNotIn("capacity-once", top_level_help)
+        self.assertNotIn("capacity-tick", top_level_help)
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), self.assertRaises(SystemExit):
+            parser.parse_args(["run", "--help"])
+        run_help = output.getvalue()
+        for option in (
+            "--db",
+            "--plan",
+            "--host-id",
+            "--vantage-id",
+            "--enable-active",
+            "--target",
+            "--index",
+        ):
+            self.assertIn(option, run_help)
+
+    def test_cli_metadata_has_one_resolution_rule_for_every_plan_command(self):
+        document = plan_document()
+        document["host_id"] = "replace-with-stable-host-id"
+        document["vantage_id"] = "replace-with-network-vantage"
+        self.plan_path.write_text(json.dumps(document), encoding="utf-8")
+        parser = trace_cli.build_parser()
+        database = str(self.root / "trace.db")
+
+        args = parser.parse_args(
+            [
+                "init",
+                "--db",
+                database,
+                "--plan",
+                str(self.plan_path),
+                "--vantage-id",
+                "us-west-office",
+            ]
+        )
+        result = trace_cli.execute(args)
+        self.assertEqual(result["host_id"], socket.gethostname())
+        self.assertEqual(result["vantage_id"], "us-west-office")
+
+        unresolved = parser.parse_args(
+            ["init", "--db", database, "--plan", str(self.plan_path)]
+        )
+        with self.assertRaisesRegex(ValueError, "vantage_id must identify"):
+            trace_cli.execute(unresolved)
+
+    def test_tick_cli_uses_plan_interface_and_requires_active_opt_in(self):
         module = trace_cli
 
         args = module.build_parser().parse_args(
             [
-                "capacity",
-                "--experiment",
-                str(self.plan_path),
+                "tick",
                 "--db",
                 str(self.root / "capacity.db"),
+                "--plan",
+                str(self.plan_path),
             ]
         )
 
-        self.assertEqual(args.command, "capacity")
-        self.assertEqual(args.experiment, str(self.plan_path))
-        self.assertEqual(args.capacity_db, str(self.root / "capacity.db"))
-        self.assertFalse(hasattr(args, "campaign_id"))
-        self.assertFalse(hasattr(args, "index"))
-        module.require_active(args)
+        self.assertEqual(args.command, "tick")
+        self.assertEqual(args.plan, str(self.plan_path))
+        self.assertEqual(args.db, str(self.root / "capacity.db"))
+        self.assertIsNone(args.campaign_id)
+        self.assertEqual(args.index, 0)
+        with self.assertRaises(ActiveRunDisabled):
+            module.require_active(args)
 
     def test_capacity_cli_auto_identifies_host_and_reuses_database_experiment(self):
         document = plan_document()
@@ -438,14 +468,15 @@ class ResearchSupervisorTest(unittest.TestCase):
         provider = ReadyCapacityProvider()
         provider.provider = "lambda"
 
-        def invoke(experiment_path):
+        def invoke(plan_path):
             args = module.build_parser().parse_args(
                 [
-                    "capacity",
-                    "--experiment",
-                    str(experiment_path),
+                    "tick",
                     "--db",
                     str(db_path),
+                    "--plan",
+                    str(plan_path),
+                    "--enable-active",
                 ]
             )
             with mock.patch.object(
@@ -462,14 +493,12 @@ class ResearchSupervisorTest(unittest.TestCase):
         second = invoke(renamed)
 
         self.assertEqual(first["status"], "executed")
-        self.assertTrue(first["experiment_initialized"])
-        self.assertTrue(first["experiment_complete"])
-        self.assertEqual(first["experiment_name"], "atomic-depth")
-        self.assertNotIn("campaign_id", first)
-        self.assertNotIn("campaign_complete", first)
-        self.assertNotIn("cohort_name", first)
+        self.assertTrue(first["campaign_created"])
+        self.assertTrue(first["campaign_complete"])
+        self.assertEqual(first["cohort_name"], "atomic-depth")
+        self.assertEqual(first["campaign_id"], "capacity-experiment")
         self.assertEqual(second["status"], "complete")
-        self.assertFalse(second["experiment_initialized"])
+        self.assertFalse(second["campaign_created"])
         self.assertEqual(first["run_id"], second["run_id"])
         self.assertEqual(len(provider.created), 1)
         store = ResearchStore(db_path)
@@ -484,7 +513,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "different experiment"):
             invoke(renamed)
 
-    def test_capacity_cli_requires_exactly_one_capacity_experiment(self):
+    def test_tick_cli_requires_a_capacity_cohort(self):
         document = plan_document()
         document.update(
             {
@@ -497,15 +526,16 @@ class ResearchSupervisorTest(unittest.TestCase):
         module = trace_cli
         args = module.build_parser().parse_args(
             [
-                "capacity",
-                "--experiment",
-                str(self.plan_path),
+                "tick",
                 "--db",
                 str(self.root / "capacity.db"),
+                "--plan",
+                str(self.plan_path),
+                "--enable-active",
             ]
         )
 
-        with self.assertRaisesRegex(ValueError, "exactly one capacity cohort"):
+        with self.assertRaisesRegex(ValueError, "capacity cohort index"):
             module.execute(args)
 
     def test_init_reports_dynamic_cohort_pair_cost_bounds(self):
@@ -550,11 +580,11 @@ class ResearchSupervisorTest(unittest.TestCase):
         module = trace_cli
         args = module.build_parser().parse_args(
             [
+                "init",
                 "--db",
                 str(self.root / "trace.db"),
                 "--plan",
                 str(self.plan_path),
-                "init",
             ]
         )
 
@@ -574,11 +604,13 @@ class ResearchSupervisorTest(unittest.TestCase):
         module = trace_cli
         args = module.build_parser().parse_args(
             [
+                "init",
                 "--db",
                 str(self.root / "d32.db"),
                 "--plan",
                 str(plan_path),
-                "init",
+                "--vantage-id",
+                "test-vantage",
             ]
         )
 
@@ -615,9 +647,9 @@ class ResearchSupervisorTest(unittest.TestCase):
         module = trace_cli
         args = module.build_parser().parse_args(
             [
+                "trial",
                 "--db",
                 str(db_path),
-                "show-depth-trial",
                 "--trial-id",
                 trial_id,
             ]

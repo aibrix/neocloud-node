@@ -7,7 +7,7 @@ name = "neocloud-trace"
 version = "0.1.0"
 description = "Budget-bounded NeoCloud availability and capacity trace runner"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = []
 
 [project.scripts]
