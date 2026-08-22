@@ -1,9 +1,32 @@
-data/neocloud-trace/*.db
-data/neocloud-trace/*.db-*
+# OS metadata.
+.DS_Store
 
 # Local logs and cloud trace outputs.
 logs/
 data/neocloud-trace/
+tools/neocloud-trace/output/
+tools/neocloud-trace/outputs/
+tools/neocloud-trace/exports/
+tools/neocloud-trace/.artifacts/
+tools/neocloud-trace/**/*.log
+tools/neocloud-trace/**/*.tmp
+
+# NeoCloud Trace runtime databases.
+tools/neocloud-trace/**/*.db
+tools/neocloud-trace/**/*.db-*
+tools/neocloud-trace/**/*.sqlite
+tools/neocloud-trace/**/*.sqlite-*
+tools/neocloud-trace/**/*.sqlite3
+tools/neocloud-trace/**/*.sqlite3-*
+
+# Local NeoCloud credentials and private keys.
+tools/neocloud-trace/**/.env
+tools/neocloud-trace/**/.env.*
+!tools/neocloud-trace/**/.env.example
+tools/neocloud-trace/**/*.pem
+tools/neocloud-trace/**/*.key
+tools/neocloud-trace/**/*.token
+tools/neocloud-trace/**/*.credentials
 
 # Local binaries and generated runtime cache.
 neocloud-node
@@ -11,5 +34,9 @@ gpu-burst-node
 bin/
 dist/
 coverage.out
-tools/neocloud-trace/__pycache__/
-*.pyc
+__pycache__/
+.pytest_cache/
+*.py[cod]
+*.egg-info/
+tools/neocloud-trace/.venv/
+tools/neocloud-trace/build/
