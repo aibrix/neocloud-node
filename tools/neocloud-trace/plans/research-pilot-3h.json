@@ -1,0 +1,62 @@
+{
+  "protocol_version": "2.0",
+  "host_id": "replace-with-stable-host-id",
+  "vantage_id": "replace-with-network-vantage",
+  "duration_seconds": 10800,
+  "passive_interval_seconds": 300,
+  "host_interval_seconds": 30,
+  "canary_interval_seconds": 60,
+  "network_control_url": "https://example.com/",
+  "gpu_counts": [1, 2, 4, 8],
+  "max_active_gpus_per_provider": 8,
+  "provider_budgets_usd": {
+    "lambda": 3.5,
+    "runpod": 6.5
+  },
+  "total_budget_usd": 10.0,
+  "capacity_trials": [
+    {
+      "provider": "lambda",
+      "sku": "gpu_1x_a10",
+      "gpu_type": "A10",
+      "region": "us-east-1",
+      "resource_class": "on-demand",
+      "market": "on-demand",
+      "gpu_count": 1,
+      "target_depth": 8,
+      "ready_timeout_seconds": 600,
+      "max_lease_seconds": 900,
+      "estimated_price_usd_hr": 1.5,
+      "require_application_ready": false
+    },
+    {
+      "provider": "runpod",
+      "sku": "NVIDIA A40",
+      "gpu_type": "A40",
+      "resource_class": "secure",
+      "market": "on-demand",
+      "gpu_count": 1,
+      "image": "python:3.12-slim",
+      "target_depth": 8,
+      "ready_timeout_seconds": 600,
+      "max_lease_seconds": 900,
+      "estimated_price_usd_hr": 0.75,
+      "require_application_ready": true
+    }
+  ],
+  "canary_trials": [
+    {
+      "provider": "runpod",
+      "sku": "NVIDIA A40",
+      "gpu_type": "A40",
+      "resource_class": "secure",
+      "market": "on-demand",
+      "gpu_count": 1,
+      "image": "python:3.12-slim",
+      "duration_seconds": 10800,
+      "interval_seconds": 60,
+      "interruptible_price_usd_hr": 0.75,
+      "on_demand_price_usd_hr": 0.75
+    }
+  ]
+}

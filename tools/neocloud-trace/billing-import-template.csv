@@ -1,0 +1,2 @@
+provider_resource_id,period_start,amount_usd,billed_duration_ms,currency,gpu_type,disk_space_billed_gb,source_record_id,description
+,2026-08-10T00:00:00Z,0.00,,USD,,,,replace-with-provider-invoice-row

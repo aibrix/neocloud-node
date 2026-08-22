@@ -1,0 +1,63 @@
+{
+  "protocol_version": "3.0-cross-provider-control",
+  "host_id": "replace-with-stable-host-id",
+  "vantage_id": "replace-with-network-vantage",
+  "duration_seconds": 86400,
+  "passive_interval_seconds": 300,
+  "host_interval_seconds": 30,
+  "canary_interval_seconds": 30,
+  "network_control_url": "https://example.com/",
+  "gpu_counts": [1],
+  "max_active_gpus_per_provider": 1,
+  "provider_budgets_usd": {
+    "lambda": 11.0
+  },
+  "total_budget_usd": 11.0,
+  "capacity_trials": [],
+  "capacity_cohorts": [],
+  "completion_window_cohorts": [],
+  "canary_trials": [],
+  "canary_cohorts": [],
+  "control_cohorts": [
+    {
+      "name": "lambda-on-demand-control",
+      "max_leases": 12,
+      "selection_seed": 20260813,
+      "selection_strategy": "balanced_cycle",
+      "replacement_delay_seconds": 5400,
+      "min_remaining_seconds": 300,
+      "cells": [
+        {
+          "provider": "lambda",
+          "sku": "gpu_1x_a10",
+          "gpu_type": "A10",
+          "region": "us-east-1",
+          "resource_class": "on-demand",
+          "market": "on-demand",
+          "gpu_count": 1,
+          "duration_seconds": 1800,
+          "interval_seconds": 30,
+          "estimated_price_usd_hr": 1.5,
+          "weight": 1,
+          "billing_minimum_seconds": 60,
+          "settlement_safety_multiplier": 1.15
+        },
+        {
+          "provider": "lambda",
+          "sku": "gpu_1x_a10",
+          "gpu_type": "A10",
+          "region": "us-west-1",
+          "resource_class": "on-demand",
+          "market": "on-demand",
+          "gpu_count": 1,
+          "duration_seconds": 1800,
+          "interval_seconds": 30,
+          "estimated_price_usd_hr": 1.5,
+          "weight": 1,
+          "billing_minimum_seconds": 60,
+          "settlement_safety_multiplier": 1.15
+        }
+      ]
+    }
+  ]
+}

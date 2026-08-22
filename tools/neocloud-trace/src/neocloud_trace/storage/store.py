@@ -1,0 +1,2063 @@
+from __future__ import annotations
+
+import dataclasses
+import datetime as dt
+import hashlib
+import json
+import pathlib
+import sqlite3
+import threading
+import uuid
+from typing import Any
+
+from ..model import (
+    CatalogQuote,
+    ExperimentConfig,
+    OwnedResource,
+    TrialCell,
+    validate_capacity_target,
+)
+from ..providers import ProviderBillingRecord
+
+
+SECRET_KEYS = {
+    "api_key",
+    "apikey",
+    "authorization",
+    "callback_secret",
+    "env",
+    "jupyter_token",
+    "jupyter_url",
+    "password",
+    "private_key",
+    "secret",
+    "token",
+}
+
+
+def utc_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat()
+
+
+def redact(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: "[REDACTED]" if key.lower() in SECRET_KEYS else redact(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [redact(item) for item in value]
+    if isinstance(value, tuple):
+        return [redact(item) for item in value]
+    return value
+
+
+def json_text(value: Any) -> str:
+    return json.dumps(redact(value), sort_keys=True, separators=(",", ":"), default=str)
+
+
+def merge_json_text(existing: str, updates: dict[str, Any] | None) -> str:
+    merged = json.loads(existing) if existing else {}
+    merged.update(updates or {})
+    return json_text(merged)
+
+
+SCHEMA = """
+PRAGMA foreign_keys=ON;
+
+CREATE TABLE IF NOT EXISTS experiment_runs (
+    id TEXT PRIMARY KEY,
+    protocol_version TEXT NOT NULL,
+    config_hash TEXT NOT NULL,
+    config_json TEXT NOT NULL,
+    host_id TEXT NOT NULL,
+    vantage_id TEXT NOT NULL,
+    collector_revision TEXT,
+    python_version TEXT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    status TEXT NOT NULL,
+    termination_reason TEXT,
+    total_budget_usd REAL NOT NULL,
+    max_active_gpus_per_provider INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS host_observations (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES experiment_runs(id),
+    observed_at TEXT NOT NULL,
+    expected_monotonic REAL,
+    actual_monotonic REAL,
+    scheduler_drift_ms INTEGER,
+    healthy INTEGER NOT NULL,
+    network_status TEXT,
+    network_latency_ms INTEGER,
+    db_write_ok INTEGER NOT NULL,
+    details_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS provider_api_observations_v2 (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES experiment_runs(id),
+    observed_at TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    status TEXT NOT NULL,
+    latency_ms INTEGER,
+    failure_class TEXT,
+    host_observation_id TEXT REFERENCES host_observations(id),
+    response_hash TEXT,
+    raw_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS catalog_quotes_v2 (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES experiment_runs(id),
+    observed_at TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    sku TEXT NOT NULL,
+    gpu_type TEXT NOT NULL,
+    gpu_count INTEGER NOT NULL,
+    region TEXT,
+    datacenter TEXT,
+    resource_class TEXT NOT NULL,
+    market TEXT NOT NULL,
+    stock_status TEXT,
+    available_gpu_counts_json TEXT NOT NULL,
+    available INTEGER,
+    quoted_price_usd_hr REAL,
+    spot_price_usd_hr REAL,
+    vcpus INTEGER,
+    memory_gib REAL,
+    storage_gib REAL,
+    query_json TEXT NOT NULL,
+    raw_hash TEXT NOT NULL,
+    raw_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS capacity_trials (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES experiment_runs(id),
+    provider TEXT NOT NULL,
+    sku TEXT NOT NULL,
+    gpu_type TEXT NOT NULL,
+    gpu_count INTEGER NOT NULL,
+    region TEXT,
+    datacenter TEXT,
+    resource_class TEXT NOT NULL,
+    market TEXT NOT NULL,
+    image TEXT,
+    target_depth INTEGER NOT NULL,
+    requested_depth INTEGER NOT NULL DEFAULT 0,
+    accepted_depth INTEGER NOT NULL DEFAULT 0,
+    provider_ready_depth INTEGER NOT NULL DEFAULT 0,
+    application_ready_depth INTEGER NOT NULL DEFAULT 0,
+    cleaned_depth INTEGER NOT NULL DEFAULT 0,
+    first_failed_stage INTEGER,
+    failure_class TEXT,
+    catalog_quote_id TEXT REFERENCES catalog_quotes_v2(id),
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    status TEXT NOT NULL,
+    details_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS capacity_replicas (
+    id TEXT PRIMARY KEY,
+    trial_id TEXT NOT NULL REFERENCES capacity_trials(id),
+    stage_target INTEGER NOT NULL,
+    ordinal INTEGER NOT NULL,
+    attempt INTEGER NOT NULL DEFAULT 0,
+    requested_at TEXT NOT NULL,
+    accepted_at TEXT,
+    provider_ready_at TEXT,
+    application_ready_at TEXT,
+    failed_at TEXT,
+    cleaned_at TEXT,
+    provider_resource_id TEXT,
+    provider_location TEXT,
+    machine_id TEXT,
+    failure_class TEXT,
+    failure_message TEXT,
+    realized_price_usd_hr REAL,
+    status TEXT NOT NULL,
+    retry_of TEXT REFERENCES capacity_replicas(id),
+    details_json TEXT NOT NULL,
+    UNIQUE(trial_id, stage_target, ordinal, attempt)
+);
+
+CREATE TABLE IF NOT EXISTS capacity_epochs (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES experiment_runs(id),
+    cohort_name TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    provider TEXT NOT NULL,
+    sku TEXT NOT NULL,
+    gpu_type TEXT NOT NULL,
+    region TEXT,
+    datacenter TEXT,
+    resource_class TEXT NOT NULL,
+    target_depth INTEGER NOT NULL,
+    scheduled_offset_seconds REAL NOT NULL,
+    scheduled_at TEXT NOT NULL,
+    selection_probability REAL NOT NULL,
+    selection_seed INTEGER NOT NULL,
+    started_at TEXT,
+    started_lag_seconds REAL,
+    finished_at TEXT,
+    trial_id TEXT,
+    status TEXT NOT NULL,
+    stop_reason TEXT,
+    details_json TEXT NOT NULL,
+    UNIQUE(run_id, cohort_name, sequence)
+);
+
+CREATE TABLE IF NOT EXISTS capacity_campaigns (
+    campaign_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL UNIQUE REFERENCES experiment_runs(id),
+    cohort_name TEXT NOT NULL,
+    config_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    finished_at TEXT,
+    status TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS completion_window_epochs (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES experiment_runs(id),
+    cohort_name TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    provider TEXT NOT NULL,
+    sku TEXT NOT NULL,
+    gpu_type TEXT NOT NULL,
+    region TEXT,
+    datacenter TEXT,
+    resource_class TEXT NOT NULL,
+    market TEXT NOT NULL,
+    target_depth INTEGER NOT NULL,
+    arm_name TEXT NOT NULL,
+    launch_fraction REAL NOT NULL,
+    assignment_probability REAL NOT NULL,
+    assignment_seed INTEGER NOT NULL,
+    release_offset_seconds REAL NOT NULL,
+    release_at TEXT NOT NULL,
+    allocation_deadline_at TEXT NOT NULL,
+    planned_launch_at TEXT NOT NULL,
+    released_at TEXT,
+    actual_decision_at TEXT,
+    decision_lag_seconds REAL,
+    release_quote_id TEXT REFERENCES catalog_quotes_v2(id),
+    decision_quote_id TEXT REFERENCES catalog_quotes_v2(id),
+    capacity_epoch_id TEXT,
+    provider_sla_met INTEGER,
+    application_sla_met INTEGER,
+    finished_at TEXT,
+    status TEXT NOT NULL,
+    stop_reason TEXT,
+    details_json TEXT NOT NULL,
+    UNIQUE(run_id, cohort_name, sequence)
+);
+
+CREATE TABLE IF NOT EXISTS canary_leases (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES experiment_runs(id),
+    provider TEXT NOT NULL,
+    sku TEXT NOT NULL,
+    gpu_type TEXT NOT NULL,
+    region TEXT,
+    datacenter TEXT,
+    resource_class TEXT NOT NULL,
+    market TEXT NOT NULL,
+    interruptible INTEGER NOT NULL,
+    pair_id TEXT,
+    provider_resource_id TEXT,
+    machine_id TEXT,
+    planned_end_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    provider_ready_at TEXT,
+    application_ready_at TEXT,
+    last_heartbeat_at TEXT,
+    event_at TEXT,
+    censor_reason TEXT,
+    operator_cleanup_at TEXT,
+    cleaned_at TEXT,
+    status TEXT NOT NULL,
+    details_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS canary_epochs (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES experiment_runs(id),
+    cohort_name TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    provider TEXT NOT NULL,
+    sku TEXT NOT NULL,
+    gpu_type TEXT NOT NULL,
+    region TEXT,
+    datacenter TEXT,
+    resource_class TEXT NOT NULL,
+    planned_duration_seconds REAL NOT NULL,
+    interval_seconds REAL NOT NULL,
+    selection_probability REAL NOT NULL,
+    selection_seed INTEGER,
+    selected_at TEXT NOT NULL,
+    started_at TEXT,
+    planned_end_at TEXT,
+    finished_at TEXT,
+    status TEXT NOT NULL,
+    stop_reason TEXT,
+    details_json TEXT NOT NULL,
+    UNIQUE(run_id, cohort_name, sequence)
+);
+
+CREATE TABLE IF NOT EXISTS canary_observations (
+    id TEXT PRIMARY KEY,
+    lease_id TEXT NOT NULL REFERENCES canary_leases(id),
+    observed_at TEXT NOT NULL,
+    provider_state TEXT,
+    machine_id TEXT,
+    runtime_uptime_seconds REAL,
+    realized_price_usd_hr REAL,
+    provider_location TEXT,
+    heartbeat_ok INTEGER,
+    heartbeat_latency_ms INTEGER,
+    heartbeat_version TEXT,
+    host_observation_id TEXT REFERENCES host_observations(id),
+    raw_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS cleanup_events (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES experiment_runs(id),
+    owner_type TEXT NOT NULL,
+    owner_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    provider_resource_id TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    action TEXT NOT NULL,
+    status TEXT NOT NULL,
+    failure_class TEXT,
+    details_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS budget_ledger_v2 (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES experiment_runs(id),
+    observed_at TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    amount_usd REAL NOT NULL,
+    kind TEXT NOT NULL,
+    reference TEXT,
+    details_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS provider_billing_records (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES experiment_runs(id),
+    provider TEXT NOT NULL,
+    provider_resource_id TEXT,
+    period_start TEXT NOT NULL,
+    amount_usd REAL NOT NULL,
+    billed_duration_ms INTEGER,
+    currency TEXT NOT NULL,
+    source TEXT NOT NULL,
+    source_record_id TEXT NOT NULL,
+    gpu_type TEXT,
+    disk_space_billed_gb REAL,
+    imported_at TEXT NOT NULL,
+    raw_json TEXT NOT NULL,
+    UNIQUE(run_id, provider, source, source_record_id)
+);
+
+CREATE TABLE IF NOT EXISTS cost_reconciliations (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES experiment_runs(id),
+    provider TEXT NOT NULL,
+    provider_resource_id TEXT NOT NULL,
+    owner_type TEXT,
+    owner_id TEXT,
+    estimated_amount_usd REAL,
+    billed_amount_usd REAL,
+    variance_usd REAL,
+    billing_record_count INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    method TEXT NOT NULL,
+    reconciled_at TEXT NOT NULL,
+    details_json TEXT NOT NULL,
+    UNIQUE(run_id, provider, provider_resource_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_quotes_run_cell_time
+    ON catalog_quotes_v2(run_id, provider, sku, resource_class, observed_at);
+CREATE INDEX IF NOT EXISTS idx_replicas_provider_resource
+    ON capacity_replicas(provider_resource_id, cleaned_at);
+CREATE INDEX IF NOT EXISTS idx_capacity_epochs_run_cohort
+    ON capacity_epochs(run_id, cohort_name, sequence);
+CREATE INDEX IF NOT EXISTS idx_completion_window_epochs_run_cohort
+    ON completion_window_epochs(run_id, cohort_name, sequence);
+CREATE INDEX IF NOT EXISTS idx_canaries_provider_resource
+    ON canary_leases(provider_resource_id, cleaned_at);
+CREATE INDEX IF NOT EXISTS idx_canaries_pair
+    ON canary_leases(pair_id);
+CREATE INDEX IF NOT EXISTS idx_canary_epochs_run_cohort
+    ON canary_epochs(run_id, cohort_name, sequence);
+CREATE INDEX IF NOT EXISTS idx_budget_run_provider
+    ON budget_ledger_v2(run_id, provider);
+CREATE INDEX IF NOT EXISTS idx_billing_run_resource
+    ON provider_billing_records(run_id, provider, provider_resource_id);
+CREATE INDEX IF NOT EXISTS idx_reconciliation_run_status
+    ON cost_reconciliations(run_id, status);
+"""
+
+
+class ResearchStore:
+    def __init__(self, path: str | pathlib.Path):
+        self.path = str(path)
+        if self.path != ":memory:":
+            pathlib.Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        self.connection = sqlite3.connect(self.path, check_same_thread=False)
+        self.connection.row_factory = sqlite3.Row
+        self._lock = threading.RLock()
+        with self._lock:
+            if self.path != ":memory:":
+                self.connection.execute("PRAGMA journal_mode=WAL")
+            self.connection.executescript(SCHEMA)
+            self.connection.commit()
+
+    def close(self) -> None:
+        with self._lock:
+            self.connection.close()
+
+    def start_run(
+        self,
+        config: ExperimentConfig,
+        config_document: dict[str, Any],
+        *,
+        collector_revision: str | None = None,
+        python_version: str | None = None,
+    ) -> str:
+        run_id = str(uuid.uuid4())
+        config_json = json_text({"experiment": dataclasses.asdict(config), "document": config_document})
+        config_hash = hashlib.sha256(config_json.encode()).hexdigest()
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO experiment_runs
+                  (id, protocol_version, config_hash, config_json, host_id, vantage_id,
+                   collector_revision, python_version, started_at, status,
+                   total_budget_usd, max_active_gpus_per_provider)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)
+                """,
+                (
+                    run_id,
+                    config.protocol_version,
+                    config_hash,
+                    config_json,
+                    config.host_id,
+                    config.vantage_id,
+                    collector_revision,
+                    python_version,
+                    utc_now(),
+                    config.total_budget_usd,
+                    config.max_active_gpus_per_provider,
+                ),
+            )
+        return run_id
+
+    def ensure_capacity_campaign(
+        self,
+        config: ExperimentConfig,
+        config_document: dict[str, Any],
+        *,
+        campaign_id: str,
+        cohort_name: str,
+        started_at: str,
+        epochs: list[dict[str, Any]],
+        collector_revision: str | None = None,
+        python_version: str | None = None,
+    ) -> tuple[str, bool]:
+        if not campaign_id.strip() or not cohort_name.strip():
+            raise ValueError("capacity campaign ID and cohort name are required")
+        if not epochs:
+            raise ValueError("capacity campaign requires scheduled epochs")
+        config_json = json_text(
+            {"experiment": dataclasses.asdict(config), "document": config_document}
+        )
+        config_hash = hashlib.sha256(config_json.encode()).hexdigest()
+        with self._lock:
+            self.connection.execute("BEGIN IMMEDIATE")
+            try:
+                existing = self.connection.execute(
+                    "SELECT * FROM capacity_campaigns WHERE campaign_id=?",
+                    (campaign_id,),
+                ).fetchone()
+                if existing is not None:
+                    if (
+                        existing["config_hash"] != config_hash
+                        or existing["cohort_name"] != cohort_name
+                    ):
+                        raise ValueError(
+                            "capacity database already uses a different "
+                            "experiment definition"
+                        )
+                    self.connection.commit()
+                    return str(existing["run_id"]), False
+
+                run_id = str(uuid.uuid4())
+                self.connection.execute(
+                    """
+                    INSERT INTO experiment_runs
+                      (id, protocol_version, config_hash, config_json, host_id,
+                       vantage_id, collector_revision, python_version, started_at,
+                       status, total_budget_usd, max_active_gpus_per_provider)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)
+                    """,
+                    (
+                        run_id,
+                        config.protocol_version,
+                        config_hash,
+                        config_json,
+                        config.host_id,
+                        config.vantage_id,
+                        collector_revision,
+                        python_version,
+                        started_at,
+                        config.total_budget_usd,
+                        config.max_active_gpus_per_provider,
+                    ),
+                )
+                self.connection.execute(
+                    """
+                    INSERT INTO capacity_campaigns
+                      (campaign_id, run_id, cohort_name, config_hash, created_at,
+                       status)
+                    VALUES (?, ?, ?, ?, ?, 'running')
+                    """,
+                    (campaign_id, run_id, cohort_name, config_hash, started_at),
+                )
+                for epoch in epochs:
+                    cell = epoch["cell"]
+                    validate_capacity_target(int(epoch["target_depth"]), cell.gpu_count)
+                    self.connection.execute(
+                        """
+                        INSERT INTO capacity_epochs
+                          (id, run_id, cohort_name, sequence, provider, sku,
+                           gpu_type, region, datacenter, resource_class,
+                           target_depth, scheduled_offset_seconds, scheduled_at,
+                           selection_probability, selection_seed, status,
+                           details_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                                'scheduled', ?)
+                        """,
+                        (
+                            str(uuid.uuid4()),
+                            run_id,
+                            cohort_name,
+                            int(epoch["sequence"]),
+                            cell.provider,
+                            cell.sku,
+                            cell.gpu_type,
+                            cell.region,
+                            cell.datacenter,
+                            cell.resource_class,
+                            int(epoch["target_depth"]),
+                            float(epoch["scheduled_offset_seconds"]),
+                            str(epoch["scheduled_at"]),
+                            float(epoch["selection_probability"]),
+                            int(epoch["selection_seed"]),
+                            json_text(epoch.get("details") or {}),
+                        ),
+                    )
+                self.connection.commit()
+                return run_id, True
+            except Exception:
+                self.connection.rollback()
+                raise
+
+    def capacity_campaign_row(self, campaign_id: str) -> sqlite3.Row:
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT * FROM capacity_campaigns WHERE campaign_id=?",
+                (campaign_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(campaign_id)
+        return row
+
+    def capacity_campaign_for_run(self, run_id: str) -> sqlite3.Row | None:
+        with self._lock:
+            return self.connection.execute(
+                "SELECT * FROM capacity_campaigns WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+
+    def resume_capacity_campaign(self, run_id: str) -> None:
+        with self._lock, self.connection:
+            campaign = self.connection.execute(
+                "SELECT * FROM capacity_campaigns WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+            if campaign is None:
+                raise KeyError(run_id)
+            self.connection.execute(
+                """
+                UPDATE capacity_campaigns
+                SET status='running', finished_at=NULL WHERE run_id=?
+                """,
+                (run_id,),
+            )
+            self.connection.execute(
+                """
+                UPDATE experiment_runs
+                SET status='running', finished_at=NULL,
+                    termination_reason='resumed_after_collector_loss'
+                WHERE id=?
+                """,
+                (run_id,),
+            )
+
+    def claim_due_capacity_epoch(
+        self,
+        campaign_id: str,
+        *,
+        due_at: str,
+        expired_before: str,
+    ) -> tuple[str, sqlite3.Row | None]:
+        with self._lock:
+            self.connection.execute("BEGIN IMMEDIATE")
+            try:
+                campaign = self.connection.execute(
+                    "SELECT * FROM capacity_campaigns WHERE campaign_id=?",
+                    (campaign_id,),
+                ).fetchone()
+                if campaign is None:
+                    raise KeyError(campaign_id)
+                if campaign["status"] != "running":
+                    self.connection.commit()
+                    return "complete", None
+                active = self.connection.execute(
+                    """
+                    SELECT * FROM capacity_epochs
+                    WHERE run_id=? AND cohort_name=?
+                      AND status IN ('claimed', 'running')
+                    ORDER BY sequence LIMIT 1
+                    """,
+                    (campaign["run_id"], campaign["cohort_name"]),
+                ).fetchone()
+                if active is not None:
+                    self.connection.commit()
+                    return "busy", active
+                unresolved = self.connection.execute(
+                    """
+                    SELECT
+                      (SELECT COUNT(*) FROM capacity_replicas
+                       WHERE provider_resource_id IS NOT NULL AND cleaned_at IS NULL)
+                      +
+                      (SELECT COUNT(*) FROM canary_leases
+                       WHERE provider_resource_id IS NOT NULL AND cleaned_at IS NULL)
+                    """
+                ).fetchone()[0]
+                if unresolved:
+                    self.connection.commit()
+                    return "cleanup_blocked", None
+                finished_at = utc_now()
+                self.connection.execute(
+                    """
+                    UPDATE capacity_epochs
+                    SET status='not_run_missed_slot',
+                        stop_reason='external_scheduler_late',
+                        finished_at=?
+                    WHERE run_id=? AND cohort_name=? AND status='scheduled'
+                      AND scheduled_at<?
+                    """,
+                    (
+                        finished_at,
+                        campaign["run_id"],
+                        campaign["cohort_name"],
+                        expired_before,
+                    ),
+                )
+                epoch = self.connection.execute(
+                    """
+                    SELECT * FROM capacity_epochs
+                    WHERE run_id=? AND cohort_name=? AND status='scheduled'
+                      AND scheduled_at<=?
+                    ORDER BY scheduled_at, sequence LIMIT 1
+                    """,
+                    (campaign["run_id"], campaign["cohort_name"], due_at),
+                ).fetchone()
+                if epoch is None:
+                    remaining = self.connection.execute(
+                        """
+                        SELECT COUNT(*) FROM capacity_epochs
+                        WHERE run_id=? AND cohort_name=? AND status='scheduled'
+                        """,
+                        (campaign["run_id"], campaign["cohort_name"]),
+                    ).fetchone()[0]
+                    self.connection.commit()
+                    return ("idle" if remaining else "complete"), None
+                updated = self.connection.execute(
+                    """
+                    UPDATE capacity_epochs SET status='claimed', started_at=?
+                    WHERE id=? AND status='scheduled'
+                    """,
+                    (utc_now(), epoch["id"]),
+                )
+                if updated.rowcount != 1:
+                    self.connection.rollback()
+                    return "busy", None
+                claimed = self.connection.execute(
+                    "SELECT * FROM capacity_epochs WHERE id=?",
+                    (epoch["id"],),
+                ).fetchone()
+                self.connection.commit()
+                return "claimed", claimed
+            except Exception:
+                self.connection.rollback()
+                raise
+
+    def finish_capacity_campaign_if_complete(self, campaign_id: str) -> bool:
+        with self._lock, self.connection:
+            campaign = self.connection.execute(
+                "SELECT * FROM capacity_campaigns WHERE campaign_id=?",
+                (campaign_id,),
+            ).fetchone()
+            if campaign is None:
+                raise KeyError(campaign_id)
+            remaining = self.connection.execute(
+                """
+                SELECT COUNT(*) FROM capacity_epochs
+                WHERE run_id=? AND cohort_name=?
+                  AND status IN ('scheduled', 'claimed', 'running')
+                """,
+                (campaign["run_id"], campaign["cohort_name"]),
+            ).fetchone()[0]
+            if remaining:
+                return False
+            finished_at = utc_now()
+            self.connection.execute(
+                """
+                UPDATE capacity_campaigns
+                SET status='complete', finished_at=? WHERE campaign_id=?
+                """,
+                (finished_at, campaign_id),
+            )
+            self.connection.execute(
+                """
+                UPDATE experiment_runs
+                SET status='complete', finished_at=?, termination_reason=NULL
+                WHERE id=?
+                """,
+                (finished_at, campaign["run_id"]),
+            )
+        return True
+
+    def finish_run(self, run_id: str, status: str, reason: str | None = None) -> None:
+        with self._lock, self.connection:
+            self.connection.execute(
+                "UPDATE experiment_runs SET finished_at=?, status=?, termination_reason=? WHERE id=?",
+                (utc_now(), status, reason, run_id),
+            )
+
+    def record_provider_billing(
+        self,
+        run_id: str,
+        record: ProviderBillingRecord,
+    ) -> str:
+        billing_id = str(uuid.uuid4())
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO provider_billing_records
+                  (id, run_id, provider, provider_resource_id, period_start,
+                   amount_usd, billed_duration_ms, currency, source,
+                   source_record_id, gpu_type, disk_space_billed_gb,
+                   imported_at, raw_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id, provider, source, source_record_id) DO NOTHING
+                """,
+                (
+                    billing_id,
+                    run_id,
+                    record.provider,
+                    record.provider_resource_id,
+                    record.period_start,
+                    record.amount_usd,
+                    record.billed_duration_ms,
+                    record.currency,
+                    record.source,
+                    record.source_record_id,
+                    record.gpu_type,
+                    record.disk_space_billed_gb,
+                    utc_now(),
+                    json_text(record.raw or {}),
+                ),
+            )
+            row = self.connection.execute(
+                """
+                SELECT id FROM provider_billing_records
+                WHERE run_id=? AND provider=? AND source=? AND source_record_id=?
+                """,
+                (
+                    run_id,
+                    record.provider,
+                    record.source,
+                    record.source_record_id,
+                ),
+            ).fetchone()
+        return str(row["id"])
+
+    def provider_billing_rows(self, run_id: str) -> list[sqlite3.Row]:
+        with self._lock:
+            return self.connection.execute(
+                """
+                SELECT * FROM provider_billing_records
+                WHERE run_id=? ORDER BY provider, period_start, source_record_id
+                """,
+                (run_id,),
+            ).fetchall()
+
+    def upsert_cost_reconciliation(
+        self,
+        run_id: str,
+        *,
+        provider: str,
+        provider_resource_id: str,
+        owner_type: str | None,
+        owner_id: str | None,
+        estimated_amount_usd: float | None,
+        billed_amount_usd: float | None,
+        billing_record_count: int,
+        status: str,
+        method: str,
+        details: dict[str, Any] | None = None,
+    ) -> str:
+        reconciliation_id = str(uuid.uuid4())
+        variance = (
+            billed_amount_usd - estimated_amount_usd
+            if billed_amount_usd is not None and estimated_amount_usd is not None
+            else None
+        )
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO cost_reconciliations
+                  (id, run_id, provider, provider_resource_id, owner_type, owner_id,
+                   estimated_amount_usd, billed_amount_usd, variance_usd,
+                   billing_record_count, status, method, reconciled_at, details_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id, provider, provider_resource_id) DO UPDATE SET
+                  owner_type=excluded.owner_type,
+                  owner_id=excluded.owner_id,
+                  estimated_amount_usd=excluded.estimated_amount_usd,
+                  billed_amount_usd=excluded.billed_amount_usd,
+                  variance_usd=excluded.variance_usd,
+                  billing_record_count=excluded.billing_record_count,
+                  status=excluded.status,
+                  method=excluded.method,
+                  reconciled_at=excluded.reconciled_at,
+                  details_json=excluded.details_json
+                """,
+                (
+                    reconciliation_id,
+                    run_id,
+                    provider,
+                    provider_resource_id,
+                    owner_type,
+                    owner_id,
+                    estimated_amount_usd,
+                    billed_amount_usd,
+                    variance,
+                    billing_record_count,
+                    status,
+                    method,
+                    utc_now(),
+                    json_text(details or {}),
+                ),
+            )
+            row = self.connection.execute(
+                """
+                SELECT id FROM cost_reconciliations
+                WHERE run_id=? AND provider=? AND provider_resource_id=?
+                """,
+                (run_id, provider, provider_resource_id),
+            ).fetchone()
+        return str(row["id"])
+
+    def cost_reconciliation_rows(self, run_id: str) -> list[sqlite3.Row]:
+        with self._lock:
+            return self.connection.execute(
+                """
+                SELECT * FROM cost_reconciliations
+                WHERE run_id=? ORDER BY provider, provider_resource_id
+                """,
+                (run_id,),
+            ).fetchall()
+
+    def record_quote(self, run_id: str, quote: CatalogQuote, observed_at: str | None = None) -> str:
+        quote_id = str(uuid.uuid4())
+        raw_json = json_text(quote.raw)
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO catalog_quotes_v2
+                  (id, run_id, observed_at, provider, sku, gpu_type, gpu_count,
+                   region, datacenter, resource_class, market, stock_status,
+                   available_gpu_counts_json, available, quoted_price_usd_hr,
+                   spot_price_usd_hr, vcpus, memory_gib, storage_gib, query_json,
+                   raw_hash, raw_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    quote_id,
+                    run_id,
+                    observed_at or utc_now(),
+                    quote.provider,
+                    quote.sku,
+                    quote.gpu_type,
+                    quote.gpu_count,
+                    quote.region,
+                    quote.datacenter,
+                    quote.resource_class,
+                    quote.market,
+                    quote.stock_status,
+                    json_text(quote.available_gpu_counts),
+                    None if quote.available is None else int(quote.available),
+                    quote.quoted_price_usd_hr,
+                    quote.spot_price_usd_hr,
+                    quote.vcpus,
+                    quote.memory_gib,
+                    quote.storage_gib,
+                    json_text(quote.query),
+                    hashlib.sha256(raw_json.encode()).hexdigest(),
+                    raw_json,
+                ),
+            )
+        return quote_id
+
+    def latest_quote_id(
+        self,
+        run_id: str,
+        cell: TrialCell,
+        *,
+        observed_at_or_before: str | None = None,
+    ) -> str | None:
+        cutoff_clause = "AND observed_at<=?" if observed_at_or_before else ""
+        parameters: list[Any] = [
+            run_id,
+            cell.provider,
+            cell.sku,
+            cell.gpu_count,
+            cell.resource_class,
+            cell.market,
+            cell.region,
+            cell.region,
+            cell.datacenter,
+            cell.datacenter,
+        ]
+        if observed_at_or_before:
+            parameters.append(observed_at_or_before)
+        with self._lock:
+            row = self.connection.execute(
+                f"""
+                SELECT id FROM catalog_quotes_v2
+                WHERE run_id=? AND provider=? AND sku=? AND gpu_count=?
+                  AND resource_class=? AND market=?
+                  AND ((? IS NULL AND region IS NULL) OR region=?)
+                  AND ((? IS NULL AND datacenter IS NULL) OR datacenter=?)
+                  {cutoff_clause}
+                ORDER BY observed_at DESC, rowid DESC LIMIT 1
+                """,
+                parameters,
+            ).fetchone()
+        return row["id"] if row else None
+
+    def start_capacity_trial(
+        self,
+        run_id: str,
+        cell: TrialCell,
+        target_depth: int,
+        *,
+        trial_id: str | None = None,
+    ) -> str:
+        validate_capacity_target(target_depth, cell.gpu_count)
+        trial_id = trial_id or str(uuid.uuid4())
+        catalog_quote_id = self.latest_quote_id(run_id, cell)
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO capacity_trials
+                  (id, run_id, provider, sku, gpu_type, gpu_count, region, datacenter,
+                   resource_class, market, image, target_depth, started_at, status,
+                   catalog_quote_id, details_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, '{}')
+                """,
+                (
+                    trial_id,
+                    run_id,
+                    cell.provider,
+                    cell.sku,
+                    cell.gpu_type,
+                    cell.gpu_count,
+                    cell.region,
+                    cell.datacenter,
+                    cell.resource_class,
+                    cell.market,
+                    cell.image,
+                    target_depth,
+                    utc_now(),
+                    catalog_quote_id,
+                ),
+            )
+        return trial_id
+
+    def schedule_capacity_epoch(
+        self,
+        run_id: str,
+        *,
+        cohort_name: str,
+        sequence: int,
+        cell: TrialCell,
+        target_depth: int,
+        scheduled_offset_seconds: float,
+        scheduled_at: str,
+        selection_probability: float,
+        selection_seed: int,
+        details: dict[str, Any] | None = None,
+    ) -> str:
+        if not cohort_name.strip():
+            raise ValueError("capacity cohort name is required")
+        if sequence < 0 or scheduled_offset_seconds < 0:
+            raise ValueError("capacity epoch sequence and offset must not be negative")
+        validate_capacity_target(target_depth, cell.gpu_count)
+        if not 0 < selection_probability <= 1:
+            raise ValueError("selection_probability must be in (0, 1]")
+        epoch_id = str(uuid.uuid4())
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO capacity_epochs
+                  (id, run_id, cohort_name, sequence, provider, sku, gpu_type,
+                   region, datacenter, resource_class, target_depth,
+                   scheduled_offset_seconds, scheduled_at, selection_probability,
+                   selection_seed, status, details_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?)
+                """,
+                (
+                    epoch_id,
+                    run_id,
+                    cohort_name,
+                    sequence,
+                    cell.provider,
+                    cell.sku,
+                    cell.gpu_type,
+                    cell.region,
+                    cell.datacenter,
+                    cell.resource_class,
+                    target_depth,
+                    scheduled_offset_seconds,
+                    scheduled_at,
+                    selection_probability,
+                    selection_seed,
+                    json_text(details or {}),
+                ),
+            )
+        return epoch_id
+
+    def mark_capacity_epoch_started(
+        self,
+        epoch_id: str,
+        *,
+        trial_id: str,
+        started_lag_seconds: float,
+    ) -> None:
+        with self._lock, self.connection:
+            updated = self.connection.execute(
+                """
+                UPDATE capacity_epochs
+                SET started_at=?, started_lag_seconds=?, trial_id=?, status='running'
+                WHERE id=? AND status IN ('scheduled', 'claimed')
+                """,
+                (utc_now(), started_lag_seconds, trial_id, epoch_id),
+            )
+            if updated.rowcount != 1:
+                raise ValueError(f"capacity epoch {epoch_id} is not claimable")
+
+    def finish_capacity_epoch(
+        self,
+        epoch_id: str,
+        *,
+        status: str,
+        stop_reason: str,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        with self._lock, self.connection:
+            row = self.connection.execute(
+                "SELECT details_json FROM capacity_epochs WHERE id=?", (epoch_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(epoch_id)
+            merged_details = json.loads(row["details_json"])
+            merged_details.update(details or {})
+            self.connection.execute(
+                """
+                UPDATE capacity_epochs
+                SET finished_at=?, status=?, stop_reason=?, details_json=?
+                WHERE id=?
+                """,
+                (utc_now(), status, stop_reason, json_text(merged_details), epoch_id),
+            )
+
+    def capacity_epoch_rows(self, run_id: str) -> list[sqlite3.Row]:
+        with self._lock:
+            return self.connection.execute(
+                """
+                SELECT * FROM capacity_epochs
+                WHERE run_id=? ORDER BY cohort_name, sequence
+                """,
+                (run_id,),
+            ).fetchall()
+
+    def schedule_completion_window_epoch(
+        self,
+        run_id: str,
+        *,
+        cohort_name: str,
+        sequence: int,
+        cell: TrialCell,
+        target_depth: int,
+        arm_name: str,
+        launch_fraction: float,
+        assignment_probability: float,
+        assignment_seed: int,
+        release_offset_seconds: float,
+        release_at: str,
+        allocation_deadline_at: str,
+        planned_launch_at: str,
+        details: dict[str, Any] | None = None,
+    ) -> str:
+        if not cohort_name.strip() or not arm_name.strip():
+            raise ValueError("completion-window cohort and arm names are required")
+        if sequence < 0 or release_offset_seconds < 0:
+            raise ValueError("completion-window sequence and offset must not be negative")
+        validate_capacity_target(target_depth, cell.gpu_count)
+        if not 0 <= launch_fraction <= 1:
+            raise ValueError("completion-window launch fraction must be in [0, 1]")
+        if not 0 < assignment_probability <= 1:
+            raise ValueError("assignment_probability must be in (0, 1]")
+        epoch_id = str(uuid.uuid4())
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO completion_window_epochs
+                  (id, run_id, cohort_name, sequence, provider, sku, gpu_type,
+                   region, datacenter, resource_class, market, target_depth,
+                   arm_name, launch_fraction, assignment_probability,
+                   assignment_seed, release_offset_seconds, release_at,
+                   allocation_deadline_at, planned_launch_at, status, details_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        'scheduled', ?)
+                """,
+                (
+                    epoch_id,
+                    run_id,
+                    cohort_name,
+                    sequence,
+                    cell.provider,
+                    cell.sku,
+                    cell.gpu_type,
+                    cell.region,
+                    cell.datacenter,
+                    cell.resource_class,
+                    cell.market,
+                    target_depth,
+                    arm_name,
+                    launch_fraction,
+                    assignment_probability,
+                    assignment_seed,
+                    release_offset_seconds,
+                    release_at,
+                    allocation_deadline_at,
+                    planned_launch_at,
+                    json_text(details or {}),
+                ),
+            )
+        return epoch_id
+
+    def mark_completion_window_released(
+        self,
+        epoch_id: str,
+        release_quote_id: str | None,
+    ) -> None:
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                UPDATE completion_window_epochs
+                SET released_at=?, release_quote_id=?, status='released'
+                WHERE id=?
+                """,
+                (utc_now(), release_quote_id, epoch_id),
+            )
+
+    def mark_completion_window_decided(
+        self,
+        epoch_id: str,
+        *,
+        decision_quote_id: str | None,
+        decision_lag_seconds: float,
+        capacity_epoch_id: str,
+    ) -> None:
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                UPDATE completion_window_epochs
+                SET actual_decision_at=?, decision_quote_id=?, decision_lag_seconds=?,
+                    capacity_epoch_id=?, status='decided'
+                WHERE id=?
+                """,
+                (
+                    utc_now(),
+                    decision_quote_id,
+                    decision_lag_seconds,
+                    capacity_epoch_id,
+                    epoch_id,
+                ),
+            )
+
+    def finish_completion_window_epoch(
+        self,
+        epoch_id: str,
+        *,
+        status: str,
+        stop_reason: str,
+        provider_sla_met: bool | None = None,
+        application_sla_met: bool | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        with self._lock, self.connection:
+            row = self.connection.execute(
+                "SELECT details_json FROM completion_window_epochs WHERE id=?",
+                (epoch_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(epoch_id)
+            merged_details = json.loads(row["details_json"])
+            merged_details.update(details or {})
+            self.connection.execute(
+                """
+                UPDATE completion_window_epochs
+                SET finished_at=?, status=?, stop_reason=?, provider_sla_met=?,
+                    application_sla_met=?, details_json=?
+                WHERE id=?
+                """,
+                (
+                    utc_now(),
+                    status,
+                    stop_reason,
+                    None if provider_sla_met is None else int(provider_sla_met),
+                    None if application_sla_met is None else int(application_sla_met),
+                    json_text(merged_details),
+                    epoch_id,
+                ),
+            )
+
+    def completion_window_epoch_rows(self, run_id: str) -> list[sqlite3.Row]:
+        with self._lock:
+            return self.connection.execute(
+                """
+                SELECT * FROM completion_window_epochs
+                WHERE run_id=? ORDER BY cohort_name, sequence
+                """,
+                (run_id,),
+            ).fetchall()
+
+    def start_replica(
+        self,
+        trial_id: str,
+        stage_target: int,
+        ordinal: int,
+        *,
+        attempt: int = 0,
+        retry_of: str | None = None,
+    ) -> str:
+        replica_id = str(uuid.uuid4())
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO capacity_replicas
+                  (id, trial_id, stage_target, ordinal, attempt, requested_at,
+                   status, retry_of, details_json)
+                VALUES (?, ?, ?, ?, ?, ?, 'requested', ?, '{}')
+                """,
+                (replica_id, trial_id, stage_target, ordinal, attempt, utc_now(), retry_of),
+            )
+            if retry_of is None:
+                self.connection.execute(
+                    "UPDATE capacity_trials SET requested_depth=requested_depth+1 WHERE id=?",
+                    (trial_id,),
+                )
+        return replica_id
+
+    def mark_replica_created(
+        self,
+        replica_id: str,
+        provider_resource_id: str,
+        realized_price_usd_hr: float | None = None,
+        *,
+        provider_location: str | None = None,
+        machine_id: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        with self._lock, self.connection:
+            row = self.connection.execute(
+                "SELECT trial_id, accepted_at, details_json "
+                "FROM capacity_replicas WHERE id=?",
+                (replica_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(replica_id)
+            newly_accepted = row["accepted_at"] is None
+            self.connection.execute(
+                """
+                UPDATE capacity_replicas
+                SET accepted_at=COALESCE(accepted_at, ?), provider_resource_id=?,
+                    provider_location=?, machine_id=?, realized_price_usd_hr=?,
+                    status='accepted', details_json=?
+                WHERE id=?
+                """,
+                (
+                    utc_now(),
+                    provider_resource_id,
+                    provider_location,
+                    machine_id,
+                    realized_price_usd_hr,
+                    merge_json_text(row["details_json"], details),
+                    replica_id,
+                ),
+            )
+            if newly_accepted:
+                self.connection.execute(
+                    "UPDATE capacity_trials SET accepted_depth=accepted_depth+1 WHERE id=?",
+                    (row["trial_id"],),
+                )
+
+    def mark_replica_cleaned(self, replica_id: str) -> None:
+        with self._lock, self.connection:
+            row = self.connection.execute(
+                "SELECT trial_id, cleaned_at FROM capacity_replicas WHERE id=?", (replica_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(replica_id)
+            newly_cleaned = row["cleaned_at"] is None
+            self.connection.execute(
+                "UPDATE capacity_replicas SET cleaned_at=?, status='cleaned' WHERE id=?",
+                (utc_now(), replica_id),
+            )
+            if newly_cleaned:
+                self.connection.execute(
+                    "UPDATE capacity_trials SET cleaned_depth=cleaned_depth+1 WHERE id=?",
+                    (row["trial_id"],),
+                )
+
+    def mark_replica_failed(
+        self,
+        replica_id: str,
+        failure_class: str,
+        message: str | None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        with self._lock, self.connection:
+            row = self.connection.execute(
+                "SELECT details_json FROM capacity_replicas WHERE id=?",
+                (replica_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(replica_id)
+            self.connection.execute(
+                """
+                UPDATE capacity_replicas
+                SET failed_at=?, failure_class=?, failure_message=?, status='failed',
+                    details_json=?
+                WHERE id=?
+                """,
+                (
+                    utc_now(),
+                    failure_class,
+                    message,
+                    merge_json_text(row["details_json"], details),
+                    replica_id,
+                ),
+            )
+
+    def mark_replica_observed(
+        self,
+        replica_id: str,
+        *,
+        provider_ready: bool,
+        application_ready: bool | None,
+        provider_location: str | None = None,
+        machine_id: str | None = None,
+        realized_price_usd_hr: float | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        with self._lock, self.connection:
+            row = self.connection.execute(
+                """
+                SELECT trial_id, provider_ready_at, application_ready_at, details_json
+                FROM capacity_replicas WHERE id=?
+                """,
+                (replica_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(replica_id)
+            provider_ready_at = utc_now() if provider_ready and row["provider_ready_at"] is None else row["provider_ready_at"]
+            application_ready_at = utc_now() if application_ready is True and row["application_ready_at"] is None else row["application_ready_at"]
+            self.connection.execute(
+                """
+                UPDATE capacity_replicas
+                SET provider_ready_at=?, application_ready_at=?,
+                    provider_location=COALESCE(?, provider_location),
+                    machine_id=COALESCE(?, machine_id),
+                    realized_price_usd_hr=COALESCE(?, realized_price_usd_hr),
+                    status=?, details_json=?
+                WHERE id=?
+                """,
+                (
+                    provider_ready_at,
+                    application_ready_at,
+                    provider_location,
+                    machine_id,
+                    realized_price_usd_hr,
+                    "application_ready" if application_ready_at else "provider_ready" if provider_ready_at else "accepted",
+                    merge_json_text(row["details_json"], details),
+                    replica_id,
+                ),
+            )
+            if provider_ready and row["provider_ready_at"] is None:
+                self.connection.execute(
+                    "UPDATE capacity_trials SET provider_ready_depth=provider_ready_depth+1 WHERE id=?",
+                    (row["trial_id"],),
+                )
+            if application_ready is True and row["application_ready_at"] is None:
+                self.connection.execute(
+                    "UPDATE capacity_trials SET application_ready_depth=application_ready_depth+1 WHERE id=?",
+                    (row["trial_id"],),
+                )
+
+    def finish_capacity_trial(
+        self,
+        trial_id: str,
+        *,
+        status: str,
+        first_failed_stage: int | None = None,
+        failure_class: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                UPDATE capacity_trials
+                SET finished_at=?, status=?, first_failed_stage=?, failure_class=?,
+                    details_json=?
+                WHERE id=?
+                """,
+                (utc_now(), status, first_failed_stage, failure_class, json_text(details or {}), trial_id),
+            )
+
+    def capacity_trial_row(self, trial_id: str) -> sqlite3.Row:
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT * FROM capacity_trials WHERE id=?", (trial_id,)
+            ).fetchone()
+        if row is None:
+            raise KeyError(trial_id)
+        return row
+
+    def capacity_replica_rows(self, trial_id: str) -> list[sqlite3.Row]:
+        with self._lock:
+            return self.connection.execute(
+                """
+                SELECT * FROM capacity_replicas
+                WHERE trial_id=? ORDER BY ordinal, attempt
+                """,
+                (trial_id,),
+            ).fetchall()
+
+    def record_cleanup(
+        self,
+        run_id: str,
+        *,
+        owner_type: str,
+        owner_id: str,
+        provider: str,
+        provider_resource_id: str,
+        action: str,
+        status: str,
+        failure_class: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> str:
+        event_id = str(uuid.uuid4())
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO cleanup_events
+                  (id, run_id, owner_type, owner_id, provider,
+                   provider_resource_id, observed_at, action, status,
+                   failure_class, details_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event_id,
+                    run_id,
+                    owner_type,
+                    owner_id,
+                    provider,
+                    provider_resource_id,
+                    utc_now(),
+                    action,
+                    status,
+                    failure_class,
+                    json_text(details or {}),
+                ),
+            )
+        return event_id
+
+    def record_budget(
+        self,
+        run_id: str,
+        provider: str,
+        amount_usd: float,
+        kind: str,
+        reference: str | None,
+        details: dict[str, Any] | None = None,
+    ) -> str:
+        if amount_usd < 0:
+            raise ValueError("budget amount must not be negative")
+        entry_id = str(uuid.uuid4())
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO budget_ledger_v2
+                  (id, run_id, observed_at, provider, amount_usd, kind, reference, details_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (entry_id, run_id, utc_now(), provider, amount_usd, kind, reference, json_text(details or {})),
+            )
+        return entry_id
+
+    def record_budget_release(
+        self,
+        run_id: str,
+        provider: str,
+        amount_usd: float,
+        reference: str,
+        details: dict[str, Any] | None = None,
+    ) -> str:
+        if amount_usd < 0:
+            raise ValueError("budget release must not be negative")
+        entry_id = str(uuid.uuid4())
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO budget_ledger_v2
+                  (id, run_id, observed_at, provider, amount_usd, kind, reference, details_json)
+                VALUES (?, ?, ?, ?, ?, 'released_unused_commitment', ?, ?)
+                """,
+                (
+                    entry_id,
+                    run_id,
+                    utc_now(),
+                    provider,
+                    -amount_usd,
+                    reference,
+                    json_text(details or {}),
+                ),
+            )
+        return entry_id
+
+    def budget_reference_rows(
+        self,
+        run_id: str,
+        provider: str,
+        reference: str,
+    ) -> list[sqlite3.Row]:
+        with self._lock:
+            return self.connection.execute(
+                """
+                SELECT * FROM budget_ledger_v2
+                WHERE run_id=? AND provider=? AND reference=?
+                ORDER BY observed_at, id
+                """,
+                (run_id, provider, reference),
+            ).fetchall()
+
+    def provider_spend(self, run_id: str, provider: str) -> float:
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT COALESCE(SUM(amount_usd), 0) FROM budget_ledger_v2 WHERE run_id=? AND provider=?",
+                (run_id, provider),
+            ).fetchone()
+        return float(row[0])
+
+    def total_spend(self, run_id: str) -> float:
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT COALESCE(SUM(amount_usd), 0) FROM budget_ledger_v2 WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+        return float(row[0])
+
+    def owned_resources(self, run_id: str, provider: str | None = None) -> list[OwnedResource]:
+        provider_clause = " AND t.provider=?" if provider else ""
+        params: list[Any] = [run_id]
+        if provider:
+            params.append(provider)
+        with self._lock:
+            replica_rows = self.connection.execute(
+                f"""
+                SELECT r.id owner_id, t.run_id, t.provider, r.provider_resource_id
+                FROM capacity_replicas r JOIN capacity_trials t ON t.id=r.trial_id
+                WHERE t.run_id=? AND r.provider_resource_id IS NOT NULL
+                  AND r.cleaned_at IS NULL{provider_clause}
+                """,
+                params,
+            ).fetchall()
+            canary_params: list[Any] = [run_id]
+            canary_clause = " AND provider=?" if provider else ""
+            if provider:
+                canary_params.append(provider)
+            canary_rows = self.connection.execute(
+                f"""
+                SELECT id owner_id, run_id, provider, provider_resource_id
+                FROM canary_leases
+                WHERE run_id=? AND provider_resource_id IS NOT NULL
+                  AND cleaned_at IS NULL{canary_clause}
+                """,
+                canary_params,
+            ).fetchall()
+        resources = [
+            OwnedResource("capacity_replica", row["owner_id"], row["run_id"], row["provider"], row["provider_resource_id"], "gpu")
+            for row in replica_rows
+        ]
+        resources.extend(
+            OwnedResource("canary_lease", row["owner_id"], row["run_id"], row["provider"], row["provider_resource_id"], "gpu")
+            for row in canary_rows
+        )
+        return resources
+
+    def all_owned_resources(self, provider: str | None = None) -> list[OwnedResource]:
+        with self._lock:
+            run_ids = [
+                row[0]
+                for row in self.connection.execute(
+                    "SELECT id FROM experiment_runs ORDER BY started_at"
+                ).fetchall()
+            ]
+        resources: list[OwnedResource] = []
+        for run_id in run_ids:
+            resources.extend(self.owned_resources(run_id, provider=provider))
+        return resources
+
+    def run_row(self, run_id: str) -> sqlite3.Row:
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT * FROM experiment_runs WHERE id=?", (run_id,)
+            ).fetchone()
+        if row is None:
+            raise KeyError(run_id)
+        return row
+
+    def latest_run_id(self) -> str | None:
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT id FROM experiment_runs ORDER BY started_at DESC LIMIT 1"
+            ).fetchone()
+        return row[0] if row else None
+
+    def record_host(
+        self,
+        run_id: str,
+        *,
+        expected_monotonic: float,
+        actual_monotonic: float,
+        scheduler_drift_ms: int,
+        healthy: bool,
+        network_status: str | None = None,
+        network_latency_ms: int | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> str:
+        observation_id = str(uuid.uuid4())
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO host_observations
+                  (id, run_id, observed_at, expected_monotonic, actual_monotonic,
+                   scheduler_drift_ms, healthy, network_status, network_latency_ms,
+                   db_write_ok, details_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                """,
+                (
+                    observation_id,
+                    run_id,
+                    utc_now(),
+                    expected_monotonic,
+                    actual_monotonic,
+                    scheduler_drift_ms,
+                    int(healthy),
+                    network_status,
+                    network_latency_ms,
+                    json_text(details or {}),
+                ),
+            )
+        return observation_id
+
+    def record_api_observation(
+        self,
+        run_id: str,
+        provider: str,
+        operation: str,
+        status: str,
+        latency_ms: int | None,
+        raw: Any,
+        *,
+        failure_class: str | None = None,
+        host_observation_id: str | None = None,
+    ) -> str:
+        observation_id = str(uuid.uuid4())
+        raw_json = json_text(raw)
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO provider_api_observations_v2
+                  (id, run_id, observed_at, provider, operation, status, latency_ms,
+                   failure_class, host_observation_id, response_hash, raw_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    observation_id,
+                    run_id,
+                    utc_now(),
+                    provider,
+                    operation,
+                    status,
+                    latency_ms,
+                    failure_class,
+                    host_observation_id,
+                    hashlib.sha256(raw_json.encode()).hexdigest(),
+                    raw_json,
+                ),
+            )
+        return observation_id
+
+    def active_canaries(
+        self,
+        run_id: str,
+        *,
+        provider: str,
+        sku: str,
+        resource_class: str,
+    ) -> list[sqlite3.Row]:
+        with self._lock:
+            return self.connection.execute(
+                """
+                SELECT * FROM canary_leases
+                WHERE run_id=? AND provider=? AND sku=? AND resource_class=?
+                  AND cleaned_at IS NULL
+                  AND status IN ('requested','active','provider_ready','application_ready','monitoring')
+                ORDER BY interruptible DESC
+                """,
+                (run_id, provider, sku, resource_class),
+            ).fetchall()
+
+    def start_canary_epoch(
+        self,
+        run_id: str,
+        *,
+        cohort_name: str,
+        sequence: int,
+        cell: TrialCell,
+        planned_duration_seconds: float,
+        interval_seconds: float,
+        selection_probability: float,
+        selection_seed: int | None,
+        details: dict[str, Any] | None = None,
+    ) -> str:
+        if not cohort_name.strip():
+            raise ValueError("cohort_name is required")
+        if sequence < 0:
+            raise ValueError("canary epoch sequence must not be negative")
+        if planned_duration_seconds <= 0 or interval_seconds <= 0:
+            raise ValueError("canary epoch durations must be positive")
+        if not 0 < selection_probability <= 1:
+            raise ValueError("selection_probability must be in (0, 1]")
+        epoch_id = str(uuid.uuid4())
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO canary_epochs
+                  (id, run_id, cohort_name, sequence, provider, sku, gpu_type,
+                   region, datacenter, resource_class, planned_duration_seconds,
+                   interval_seconds, selection_probability, selection_seed,
+                   selected_at, status, details_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'selected', ?)
+                """,
+                (
+                    epoch_id,
+                    run_id,
+                    cohort_name,
+                    sequence,
+                    cell.provider,
+                    cell.sku,
+                    cell.gpu_type,
+                    cell.region,
+                    cell.datacenter,
+                    cell.resource_class,
+                    planned_duration_seconds,
+                    interval_seconds,
+                    selection_probability,
+                    selection_seed,
+                    utc_now(),
+                    json_text(details or {}),
+                ),
+            )
+        return epoch_id
+
+    def mark_canary_epoch_started(self, epoch_id: str, planned_end_at: str) -> None:
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                UPDATE canary_epochs
+                SET started_at=COALESCE(started_at, ?), planned_end_at=?, status='active'
+                WHERE id=?
+                """,
+                (utc_now(), planned_end_at, epoch_id),
+            )
+
+    def finish_canary_epoch(
+        self,
+        epoch_id: str,
+        *,
+        status: str,
+        stop_reason: str,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        with self._lock, self.connection:
+            row = self.connection.execute(
+                "SELECT details_json FROM canary_epochs WHERE id=?", (epoch_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(epoch_id)
+            merged_details = json.loads(row["details_json"])
+            merged_details.update(details or {})
+            self.connection.execute(
+                """
+                UPDATE canary_epochs
+                SET finished_at=?, status=?, stop_reason=?, details_json=?
+                WHERE id=?
+                """,
+                (utc_now(), status, stop_reason, json_text(merged_details), epoch_id),
+            )
+
+    def canary_epoch_row(self, epoch_id: str) -> sqlite3.Row:
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT * FROM canary_epochs WHERE id=?", (epoch_id,)
+            ).fetchone()
+        if row is None:
+            raise KeyError(epoch_id)
+        return row
+
+    def canary_epoch_rows(self, run_id: str) -> list[sqlite3.Row]:
+        with self._lock:
+            return self.connection.execute(
+                """
+                SELECT * FROM canary_epochs
+                WHERE run_id=? ORDER BY cohort_name, sequence
+                """,
+                (run_id,),
+            ).fetchall()
+
+    def canary_rows_for_pair(self, pair_id: str) -> list[sqlite3.Row]:
+        with self._lock:
+            return self.connection.execute(
+                """
+                SELECT * FROM canary_leases
+                WHERE pair_id=? ORDER BY interruptible DESC
+                """,
+                (pair_id,),
+            ).fetchall()
+
+    def canary_rows(self, run_id: str) -> list[sqlite3.Row]:
+        with self._lock:
+            return self.connection.execute(
+                """
+                SELECT * FROM canary_leases
+                WHERE run_id=? ORDER BY created_at, interruptible DESC
+                """,
+                (run_id,),
+            ).fetchall()
+
+    def start_canary(
+        self,
+        run_id: str,
+        cell: TrialCell,
+        *,
+        pair_id: str,
+        interruptible: bool,
+        planned_end_at: str,
+    ) -> str:
+        lease_id = str(uuid.uuid4())
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO canary_leases
+                  (id, run_id, provider, sku, gpu_type, region, datacenter,
+                   resource_class, market, interruptible, pair_id, planned_end_at,
+                   created_at, status, details_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'requested', '{}')
+                """,
+                (
+                    lease_id,
+                    run_id,
+                    cell.provider,
+                    cell.sku,
+                    cell.gpu_type,
+                    cell.region,
+                    cell.datacenter,
+                    cell.resource_class,
+                    cell.market,
+                    int(interruptible),
+                    pair_id,
+                    planned_end_at,
+                    utc_now(),
+                ),
+            )
+        return lease_id
+
+    def mark_canary_created(
+        self,
+        lease_id: str,
+        *,
+        provider_resource_id: str,
+        machine_id: str | None = None,
+        datacenter: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                UPDATE canary_leases
+                SET provider_resource_id=?, machine_id=?,
+                    datacenter=COALESCE(?, datacenter), status='active', details_json=?
+                WHERE id=?
+                """,
+                (provider_resource_id, machine_id, datacenter, json_text(details or {}), lease_id),
+            )
+
+    def record_canary_observation(
+        self,
+        lease_id: str,
+        *,
+        provider_state: str | None,
+        machine_id: str | None,
+        runtime_uptime_seconds: float | None,
+        realized_price_usd_hr: float | None,
+        provider_location: str | None,
+        heartbeat_ok: bool | None,
+        heartbeat_latency_ms: int | None,
+        heartbeat_version: str | None,
+        host_observation_id: str | None = None,
+        raw: Any = None,
+        observed_at: str | None = None,
+    ) -> str:
+        observation_id = str(uuid.uuid4())
+        at = observed_at or utc_now()
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO canary_observations
+                  (id, lease_id, observed_at, provider_state, machine_id,
+                   runtime_uptime_seconds, realized_price_usd_hr, provider_location,
+                   heartbeat_ok, heartbeat_latency_ms, heartbeat_version,
+                   host_observation_id, raw_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    observation_id,
+                    lease_id,
+                    at,
+                    provider_state,
+                    machine_id,
+                    runtime_uptime_seconds,
+                    realized_price_usd_hr,
+                    provider_location,
+                    None if heartbeat_ok is None else int(heartbeat_ok),
+                    heartbeat_latency_ms,
+                    heartbeat_version,
+                    host_observation_id,
+                    json_text(raw or {}),
+                ),
+            )
+            fields = ["machine_id=COALESCE(?, machine_id)", "datacenter=COALESCE(?, datacenter)"]
+            params: list[Any] = [machine_id, provider_location]
+            if heartbeat_ok:
+                fields.append("provider_ready_at=COALESCE(provider_ready_at, ?)")
+                params.append(at)
+                fields.append("last_heartbeat_at=?")
+                params.append(at)
+                fields.append("application_ready_at=COALESCE(application_ready_at, ?)")
+                params.append(at)
+                fields.append("status='application_ready'")
+            elif provider_state in ("RUNNING", "active"):
+                fields.append("provider_ready_at=COALESCE(provider_ready_at, ?)")
+                params.append(at)
+                fields.append("status=CASE WHEN status='application_ready' THEN status ELSE 'provider_ready' END")
+            params.append(lease_id)
+            self.connection.execute(
+                f"UPDATE canary_leases SET {', '.join(fields)} WHERE id=?",
+                params,
+            )
+        return observation_id
+
+    def finish_canary(
+        self,
+        lease_id: str,
+        reason: str,
+        *,
+        event_at: str | None = None,
+        operator_cleanup: bool = False,
+    ) -> None:
+        at = event_at or utc_now()
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                UPDATE canary_leases
+                SET event_at=?, censor_reason=?, status='finished',
+                    operator_cleanup_at=CASE WHEN ? THEN ? ELSE operator_cleanup_at END
+                WHERE id=?
+                """,
+                (at, reason, int(operator_cleanup), at, lease_id),
+            )
+
+    def mark_canary_cleaned(self, lease_id: str) -> None:
+        with self._lock, self.connection:
+            self.connection.execute(
+                "UPDATE canary_leases SET cleaned_at=?, status='cleaned' WHERE id=?",
+                (utc_now(), lease_id),
+            )
+
+    def canary_row(self, lease_id: str) -> sqlite3.Row:
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT * FROM canary_leases WHERE id=?", (lease_id,)
+            ).fetchone()
+        if row is None:
+            raise KeyError(lease_id)
+        return row
+
+    def canary_observation_rows(self, lease_id: str) -> list[sqlite3.Row]:
+        with self._lock:
+            return self.connection.execute(
+                "SELECT * FROM canary_observations WHERE lease_id=? ORDER BY observed_at",
+                (lease_id,),
+            ).fetchall()
