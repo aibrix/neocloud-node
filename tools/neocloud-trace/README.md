@@ -13,21 +13,17 @@ Python standard library and SQLite.
 Python 3.10 or newer is required. From the repository root:
 
 ```bash
-python3 -m pip install --editable tools/neocloud-trace
+pip install tools/neocloud-trace
 ```
 
-This installs the `neocloud-trace` command. Verify the installation with:
+This installs the `neocloud-trace` command. Verify it with:
 
 ```bash
 neocloud-trace --help
 ```
 
-To run directly from the source checkout without installing:
-
-```bash
-cd tools/neocloud-trace/src
-python3 -m neocloud_trace --help
-```
+Editable installation, direct Python module execution, and test commands are
+documented in [DEVELOPMENT.md](DEVELOPMENT.md).
 
 ## Core Concepts
 
@@ -50,7 +46,7 @@ For example:
 neocloud-trace init \
   --plan tools/neocloud-trace/plans/research-runpod-pilot-3h.json \
   --db data/neocloud-trace/runpod-pilot.db \
-  --vantage-id us-west-office
+  --vantage-id us-west
 ```
 
 Run `neocloud-trace COMMAND --help` for command-specific options. The top-level
@@ -382,21 +378,10 @@ SQLite records include:
 Database files and their `-wal` and `-shm` companions are runtime data and are
 excluded from Git.
 
-## Development
+## Development and Legacy Code
 
-Run the full test suite from the repository root:
-
-```bash
-python3 -m pytest tools/neocloud-trace/tests
-```
-
-Check the CLI from source:
-
-```bash
-cd tools/neocloud-trace/src
-python3 -m neocloud_trace --help
-python3 -m neocloud_trace run --help
-```
+See [DEVELOPMENT.md](DEVELOPMENT.md) for the editable setup, direct module
+execution, test workflow, and change checklist.
 
 The original single-file collector remains under `legacy/` for existing
 databases and historical workflows. New work should use the packaged
