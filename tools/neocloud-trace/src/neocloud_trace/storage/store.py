@@ -13,7 +13,7 @@ from typing import Any
 
 from ..model import (
     CatalogQuote,
-    CollectionConfig,
+    CatalogConfig,
     ExperimentConfig,
     OwnedResource,
     TrialCell,
@@ -111,16 +111,16 @@ class TraceStore:
             python_version=python_version,
         )
 
-    def start_collection(
+    def start_catalog(
         self,
-        config: CollectionConfig,
+        config: CatalogConfig,
         *,
         collector_revision: str | None = None,
         python_version: str | None = None,
     ) -> str:
         return self._start_trace_run(
             protocol_version=config.protocol_version,
-            config_json=json_text({"collection": dataclasses.asdict(config)}),
+            config_json=json_text({"catalog": dataclasses.asdict(config)}),
             host_id=config.host_id,
             vantage_id=config.vantage_id,
             total_budget_usd=0.0,

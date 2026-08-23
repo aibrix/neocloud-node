@@ -312,10 +312,10 @@ class ResearchSupervisorTest(unittest.TestCase):
             with self.assertRaises(ActiveRunDisabled):
                 module.require_active(args)
 
-        collect = parser.parse_args(
-            ["collect", "--db", database, "--provider", "runpod"]
+        catalog = parser.parse_args(
+            ["catalog", "--db", database, "--provider", "runpod"]
         )
-        module.require_active(collect)
+        module.require_active(catalog)
         export = parser.parse_args(
             [
                 "export",
@@ -364,6 +364,7 @@ class ResearchSupervisorTest(unittest.TestCase):
 
         self.assertIn("run", top_level_help)
         self.assertIn("tick", top_level_help)
+        self.assertIn("catalog", top_level_help)
         self.assertNotIn("capacity-once", top_level_help)
         self.assertNotIn("capacity-tick", top_level_help)
 
@@ -385,12 +386,74 @@ class ResearchSupervisorTest(unittest.TestCase):
 
         output = io.StringIO()
         with contextlib.redirect_stdout(output), self.assertRaises(SystemExit):
-            parser.parse_args(["collect", "--help"])
-        collect_help = output.getvalue()
-        self.assertIn("--provider", collect_help)
-        self.assertIn("--vantage-id", collect_help)
-        self.assertNotIn("--plan", collect_help)
-        self.assertNotIn("--host-id", collect_help)
+            parser.parse_args(["catalog", "--help"])
+        catalog_help = output.getvalue()
+        self.assertIn("--provider", catalog_help)
+        self.assertIn("--vantage-id", catalog_help)
+        self.assertNotIn("--plan", catalog_help)
+        self.assertNotIn("--host-id", catalog_help)
+
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parser.parse_args(["collect", "--db", "trace.db", "--provider", "runpod"])
+
+    def test_catalog_cli_deduplicates_repeated_query_dimensions(self):
+        args = trace_cli.build_parser().parse_args(
+            [
+                "catalog",
+                "--db",
+                str(self.root / "catalog.db"),
+                "--provider",
+                "runpod",
+                "--provider",
+                "runpod",
+                "--gpu-count",
+                "1",
+                "--gpu-count",
+                "4",
+                "--gpu-count",
+                "1",
+            ]
+        )
+
+        config = trace_cli._catalog_config(args)
+
+        self.assertEqual(config.providers, ("runpod",))
+        self.assertEqual(config.gpu_counts, (1, 4))
+
+    def test_catalog_cli_executes_one_passive_snapshot(self):
+        class Provider:
+            def catalog_fetches(self, gpu_counts):
+                return [
+                    CatalogFetch(
+                        provider="runpod",
+                        operation=f"catalog.g{gpu_counts[0]}",
+                        response=HTTPResponse(200, 5, payload={}),
+                        quotes=(),
+                    )
+                ]
+
+        args = trace_cli.build_parser().parse_args(
+            [
+                "catalog",
+                "--db",
+                str(self.root / "catalog.db"),
+                "--provider",
+                "runpod",
+                "--gpu-count",
+                "1",
+                "--once",
+            ]
+        )
+        with mock.patch.object(
+            trace_cli,
+            "_provider_clients",
+            return_value={"runpod": Provider()},
+        ):
+            result = trace_cli.execute(args)
+
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["counts"]["host_observations"], 1)
+        self.assertEqual(result["counts"]["provider_api_observations_v2"], 1)
 
     def test_cli_metadata_has_one_resolution_rule_for_every_plan_command(self):
         document = plan_document()

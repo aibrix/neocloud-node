@@ -8,7 +8,7 @@ import random
 import signal
 import socket
 import sys
-from typing import Any
+from typing import Any, Protocol
 
 from .analysis import (
     capacity_trial_payload,
@@ -17,9 +17,9 @@ from .analysis import (
     export_survival_csv,
 )
 from .analysis.billing import import_billing_file, reconcile_costs
-from .model import CollectionConfig
+from .model import CatalogConfig
 from .providers import LambdaResearchClient, RunPodResearchClient
-from .runners import PassiveCollector
+from .runners import CatalogCollector
 from .storage import TraceStore
 from .supervisor import ActiveRunDisabled, PilotSupervisor, load_plan
 
@@ -31,8 +31,12 @@ ACTIVE_COMMANDS = {
     "recover",
 }
 SUPPORTED_PROVIDERS = ("lambda", "runpod")
-PASSIVE_PROTOCOL_VERSION = "1.0-passive-catalog"
+CATALOG_PROTOCOL_VERSION = "1.0-passive-catalog"
 ACTIVE_PLAN_SECTIONS = ("capacity_cohorts", "canary_cohorts")
+
+
+class Stoppable(Protocol):
+    def request_stop(self) -> None: ...
 
 
 def _add_database_argument(parser: argparse.ArgumentParser) -> None:
@@ -78,46 +82,46 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_plan_arguments(init)
 
-    collect = subparsers.add_parser(
-        "collect",
-        help="collect passive catalog and host observations",
+    catalog = subparsers.add_parser(
+        "catalog",
+        help="sample provider catalogs and collector health",
     )
-    _add_database_argument(collect)
-    collect.add_argument(
+    _add_database_argument(catalog)
+    catalog.add_argument(
         "--provider",
         action="append",
         choices=SUPPORTED_PROVIDERS,
         required=True,
-        help="provider to query; repeat to collect more than one",
+        help="provider to query; repeat to sample more than one",
     )
-    collect.add_argument(
+    catalog.add_argument(
         "--vantage-id",
         help="network/location group (default: local hostname)",
     )
-    collect.add_argument(
+    catalog.add_argument(
         "--gpu-count",
         action="append",
         type=int,
         dest="gpu_counts",
         help="GPU shape to query; repeat as needed (default: 1, 2, 4, 8)",
     )
-    collect.add_argument(
+    catalog.add_argument(
         "--catalog-interval-seconds",
         type=float,
         default=300.0,
     )
-    collect.add_argument(
+    catalog.add_argument(
         "--host-interval-seconds",
         type=float,
         default=30.0,
     )
-    collect.add_argument("--network-control-url")
-    collection_window = collect.add_mutually_exclusive_group()
-    collection_window.add_argument("--duration-seconds", type=float)
-    collection_window.add_argument(
+    catalog.add_argument("--network-control-url")
+    sampling_window = catalog.add_mutually_exclusive_group()
+    sampling_window.add_argument("--duration-seconds", type=float)
+    sampling_window.add_argument(
         "--once",
         action="store_true",
-        help="collect one snapshot and exit (also the default without a duration)",
+        help="sample one snapshot and exit (also the default without a duration)",
     )
 
     run = subparsers.add_parser(
@@ -332,7 +336,7 @@ def _require_real_metadata(plan) -> None:
         raise ValueError("vantage_id must identify the collector network/location")
 
 
-def _install_signal_handlers(supervisor: PilotSupervisor):
+def _install_signal_handlers(supervisor: Stoppable):
     previous = {}
 
     def stop(_signum, _frame):
@@ -427,15 +431,16 @@ def _run_stability_window(
         _restore_signal_handlers(previous)
 
 
-def _collection_config(args: argparse.Namespace) -> CollectionConfig:
+def _catalog_config(args: argparse.Namespace) -> CatalogConfig:
     host_id = socket.gethostname()
     providers = tuple(dict.fromkeys(args.provider))
-    return CollectionConfig(
-        protocol_version=PASSIVE_PROTOCOL_VERSION,
+    gpu_counts = tuple(dict.fromkeys(args.gpu_counts or (1, 2, 4, 8)))
+    return CatalogConfig(
+        protocol_version=CATALOG_PROTOCOL_VERSION,
         host_id=host_id,
         vantage_id=args.vantage_id or host_id,
         providers=providers,
-        gpu_counts=tuple(args.gpu_counts or (1, 2, 4, 8)),
+        gpu_counts=gpu_counts,
         catalog_interval_seconds=args.catalog_interval_seconds,
         host_interval_seconds=args.host_interval_seconds,
         duration_seconds=args.duration_seconds,
@@ -443,13 +448,13 @@ def _collection_config(args: argparse.Namespace) -> CollectionConfig:
     )
 
 
-def _collect(
+def _catalog(
     store: TraceStore,
     args: argparse.Namespace,
-    config: CollectionConfig,
+    config: CatalogConfig,
 ) -> dict[str, Any]:
     clients = _provider_clients(set(config.providers))
-    collector = PassiveCollector(store, clients.values())
+    collector = CatalogCollector(store, clients.values())
     previous = _install_signal_handlers(collector)
     try:
         run_id = collector.run(
@@ -710,7 +715,7 @@ def _cleanup_or_recover(
 def execute(args: argparse.Namespace) -> dict[str, Any]:
     require_active(args)
     plan = None
-    collection_config = None
+    catalog_config = None
     if args.command in {"init", "tick", "run"}:
         plan = _load_cli_plan(
             args.plan,
@@ -721,8 +726,8 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
             _validate_tick_plan(plan)
         elif args.command == "run":
             _validate_run_plan(plan)
-    elif args.command == "collect":
-        collection_config = _collection_config(args)
+    elif args.command == "catalog":
+        catalog_config = _catalog_config(args)
 
     store = TraceStore(args.db)
     try:
@@ -736,9 +741,9 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
             return _export_data(store, args)
         if args.command == "billing":
             return _billing(store, args)
-        if args.command == "collect":
-            assert collection_config is not None
-            return _collect(store, args, collection_config)
+        if args.command == "catalog":
+            assert catalog_config is not None
+            return _catalog(store, args, catalog_config)
 
         assert plan is not None
         if args.command == "init":

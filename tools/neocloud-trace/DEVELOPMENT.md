@@ -181,7 +181,7 @@ neocloud-trace init \
   --db /tmp/neocloud-trace-dev.db \
   --vantage-id local-development
 
-neocloud-trace collect \
+neocloud-trace catalog \
   --db /tmp/neocloud-trace-dev.db \
   --provider runpod \
   --once

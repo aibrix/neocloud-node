@@ -116,7 +116,7 @@ class ExperimentConfig:
 
 
 @dataclasses.dataclass(frozen=True)
-class CollectionConfig:
+class CatalogConfig:
     protocol_version: str
     host_id: str
     vantage_id: str
@@ -140,6 +140,8 @@ class CollectionConfig:
             raise ValueError("providers must be unique")
         if not self.gpu_counts or any(count <= 0 for count in self.gpu_counts):
             raise ValueError("gpu_counts must contain positive values")
+        if len(self.gpu_counts) != len(set(self.gpu_counts)):
+            raise ValueError("gpu_counts must be unique")
         if self.catalog_interval_seconds <= 0:
             raise ValueError("catalog_interval_seconds must be positive")
         if self.host_interval_seconds <= 0:

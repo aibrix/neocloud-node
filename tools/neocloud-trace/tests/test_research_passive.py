@@ -1,3 +1,4 @@
+import json
 import pathlib
 import sys
 import tempfile
@@ -7,14 +8,18 @@ import unittest
 TRACE_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TRACE_ROOT / "src"))
 
-from neocloud_trace.model import CollectionConfig, ExperimentConfig
+from neocloud_trace.model import CatalogConfig, ExperimentConfig
 from neocloud_trace.providers import (
     CatalogFetch,
     HTTPResponse,
     LambdaResearchClient,
     RunPodResearchClient,
 )
-from neocloud_trace.runners.passive import HostMonitor, PassiveCollector, PassiveWorker
+from neocloud_trace.runners.passive import (
+    CatalogCollector,
+    HostMonitor,
+    PassiveWorker,
+)
 from neocloud_trace.storage import TraceStore
 
 
@@ -220,7 +225,7 @@ class PassiveWorkerTest(unittest.TestCase):
         self.assertFalse(observation.healthy)
         self.assertEqual(observation.scheduler_drift_ms, 10000)
 
-    def test_collector_starts_and_finishes_a_passive_run(self):
+    def test_catalog_collector_starts_and_finishes_a_passive_run(self):
         class Provider:
             def catalog_fetches(self, gpu_counts):
                 self.gpu_counts = gpu_counts
@@ -234,7 +239,7 @@ class PassiveWorkerTest(unittest.TestCase):
                 ]
 
         provider = Provider()
-        config = CollectionConfig(
+        config = CatalogConfig(
             protocol_version="1.0-passive-catalog",
             host_id="collector-host",
             vantage_id="collector-host",
@@ -242,12 +247,16 @@ class PassiveWorkerTest(unittest.TestCase):
             gpu_counts=(1, 2),
         )
 
-        run_id = PassiveCollector(self.store, [provider]).run(config, once=True)
+        run_id = CatalogCollector(self.store, [provider]).run(config, once=True)
 
         run = self.store.run_row(run_id)
         self.assertEqual(run["status"], "complete")
         self.assertEqual(run["host_id"], "collector-host")
         self.assertEqual(run["vantage_id"], "collector-host")
+        self.assertEqual(
+            json.loads(run["config_json"])["catalog"]["providers"],
+            ["runpod"],
+        )
         self.assertEqual(provider.gpu_counts, (1, 2))
         self.assertEqual(
             self.store.connection.execute(

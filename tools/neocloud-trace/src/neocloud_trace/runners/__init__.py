@@ -2,7 +2,7 @@
 
 from .canary import CanaryClassifier, CanaryRunner, CanarySample
 from .capacity import CapacityRunner, CapacityTrialResult, ReplicaRequest
-from .passive import HostMonitor, PassiveCollector, PassiveResult, PassiveWorker
+from .passive import CatalogCollector, HostMonitor, PassiveResult, PassiveWorker
 
 __all__ = [
     "CanaryClassifier",
@@ -11,7 +11,7 @@ __all__ = [
     "CapacityRunner",
     "CapacityTrialResult",
     "HostMonitor",
-    "PassiveCollector",
+    "CatalogCollector",
     "PassiveResult",
     "PassiveWorker",
     "ReplicaRequest",

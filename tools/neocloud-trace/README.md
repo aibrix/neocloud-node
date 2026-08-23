@@ -26,7 +26,7 @@ The three collection commands have separate contracts:
 
 | Command | Function | Active plan input | Scheduled unit |
 | --- | --- | --- | --- |
-| `collect` | Passive catalog, price, API, host, and network observations | None | None |
+| `catalog` | Passive catalog, price, API, host, and network observations | None | None |
 | `tick` | One due capacity epoch | One `capacity_cohorts` entry with `max_trials=1` | `capacity_epochs` |
 | `run` | One due Stability sampling window | One `canary_cohorts` entry | `stability_windows` |
 
@@ -71,7 +71,7 @@ promptly to censor observations and clean up remote resources.
 
 Every run stores `host_id` and `vantage_id`.
 
-For `collect`, `host_id` is the local hostname. `vantage_id` defaults to that
+For `catalog`, `host_id` is the local hostname. `vantage_id` defaults to that
 hostname and can be overridden with `--vantage-id` to identify a stable network
 or physical location.
 
@@ -109,20 +109,20 @@ neocloud-trace init \
 supported active-plan shapes. `run` and `tick` apply their command-specific
 contracts even when a plan passes general `init` validation.
 
-## Passive Collection
+## Catalog Sampling
 
-`collect` takes provider and sampling settings directly. It does not accept a
+`catalog` takes provider and sampling settings directly. It does not accept a
 plan and never creates cloud resources.
 
 ```bash
 # One snapshot
-neocloud-trace collect \
+neocloud-trace catalog \
   --db data/neocloud-trace/trace.db \
   --provider runpod \
   --once
 
 # Timed collection
-neocloud-trace collect \
+neocloud-trace catalog \
   --db data/neocloud-trace/trace.db \
   --provider lambda \
   --provider runpod \
