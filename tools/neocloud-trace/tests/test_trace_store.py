@@ -317,6 +317,38 @@ class TraceStoreTest(unittest.TestCase):
         self.assertEqual(rows[0]["amount_usd"], 0.42)
         self.assertNotIn("must-redact", rows[0]["raw_json"])
 
+    def test_provider_billing_import_updates_a_settling_record(self):
+        run_id = self.store.start_run(self.config(), config_document={"mode": "test"})
+        initial = ProviderBillingRecord(
+            provider="vast",
+            provider_resource_id="instance-1",
+            period_start="2026-08-23T00:00:00Z",
+            amount_usd=0.001,
+            billed_duration_ms=43000,
+            source="vast_charges_api",
+            source_record_id="stable-daily-record",
+            raw={"amount": 0.001},
+        )
+        settled = ProviderBillingRecord(
+            provider="vast",
+            provider_resource_id="instance-1",
+            period_start="2026-08-23T00:00:00Z",
+            amount_usd=0.003,
+            billed_duration_ms=260000,
+            source="vast_charges_api",
+            source_record_id="stable-daily-record",
+            raw={"amount": 0.003},
+        )
+
+        first = self.store.record_provider_billing(run_id, initial)
+        second = self.store.record_provider_billing(run_id, settled)
+
+        self.assertEqual(first, second)
+        rows = self.store.provider_billing_rows(run_id)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["amount_usd"], 0.003)
+        self.assertEqual(rows[0]["billed_duration_ms"], 260000)
+
     def test_rejects_invalid_experiment_limits(self):
         with self.assertRaisesRegex(ValueError, "max_active_gpus_per_provider"):
             ExperimentConfig(

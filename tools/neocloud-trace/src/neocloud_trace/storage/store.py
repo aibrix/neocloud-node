@@ -948,7 +948,16 @@ class TraceStore:
                    source_record_id, gpu_type, disk_space_billed_gb,
                    imported_at, raw_json)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(run_id, provider, source, source_record_id) DO NOTHING
+                ON CONFLICT(run_id, provider, source, source_record_id) DO UPDATE SET
+                  provider_resource_id=excluded.provider_resource_id,
+                  period_start=excluded.period_start,
+                  amount_usd=excluded.amount_usd,
+                  billed_duration_ms=excluded.billed_duration_ms,
+                  currency=excluded.currency,
+                  gpu_type=excluded.gpu_type,
+                  disk_space_billed_gb=excluded.disk_space_billed_gb,
+                  imported_at=excluded.imported_at,
+                  raw_json=excluded.raw_json
                 """,
                 (
                     billing_id,
