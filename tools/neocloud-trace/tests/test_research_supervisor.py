@@ -66,6 +66,47 @@ def plan_document():
     }
 
 
+def stability_plan_document():
+    document = plan_document()
+    document.update(
+        {
+            "protocol_version": "3.0-stability",
+            "duration_seconds": 0.2,
+            "max_active_gpus_per_provider": 2,
+            "capacity_trials": [],
+            "capacity_cohorts": [],
+            "completion_window_cohorts": [],
+            "canary_trials": [],
+            "control_cohorts": [],
+            "canary_cohorts": [
+                {
+                    "name": "lambda-stability",
+                    "max_pairs": 1,
+                    "selection_seed": 17,
+                    "replacement_delay_seconds": 0,
+                    "min_remaining_seconds": 0.01,
+                    "cells": [
+                        {
+                            "provider": "lambda",
+                            "sku": "gpu_1x_a10",
+                            "gpu_type": "A10",
+                            "region": "us-east-1",
+                            "resource_class": "on-demand",
+                            "market": "on-demand",
+                            "duration_seconds": 0.05,
+                            "interval_seconds": 0.001,
+                            "interruptible_price_usd_hr": 0.3,
+                            "on_demand_price_usd_hr": 0.3,
+                            "weight": 1,
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    return document
+
+
 class CountingCatalogProvider:
     provider = "lambda"
 
@@ -544,8 +585,125 @@ class ResearchSupervisorTest(unittest.TestCase):
             ]
         )
 
-        with self.assertRaisesRegex(ValueError, "capacity cohort index"):
+        with self.assertRaisesRegex(ValueError, "exactly one capacity_cohorts"):
             module.execute(args)
+
+    def test_tick_contract_rejects_legacy_trials_before_db_or_provider(self):
+        self.plan_path.write_text(json.dumps(plan_document()), encoding="utf-8")
+        db_path = self.root / "invalid-capacity.db"
+        args = trace_cli.build_parser().parse_args(
+            [
+                "tick",
+                "--db",
+                str(db_path),
+                "--plan",
+                str(self.plan_path),
+                "--enable-active",
+            ]
+        )
+
+        with mock.patch.object(trace_cli, "_provider_clients") as clients:
+            with self.assertRaisesRegex(ValueError, "capacity_trials=1"):
+                trace_cli.execute(args)
+
+        clients.assert_not_called()
+        self.assertFalse(db_path.exists())
+
+    def test_tick_contract_requires_one_trial_in_its_only_cohort(self):
+        document = plan_document()
+        document.update(
+            {
+                "capacity_trials": [],
+                "canary_trials": [],
+                "capacity_cohorts": [
+                    {
+                        "name": "invalid-batch",
+                        "max_trials": 2,
+                        "selection_seed": 23,
+                        "interval_seconds": 60,
+                        "min_remaining_seconds": 1,
+                        "cells": [
+                            {
+                                "provider": "lambda",
+                                "sku": "gpu_1x_a10",
+                                "gpu_type": "A10",
+                                "region": "us-east-1",
+                                "resource_class": "on-demand",
+                                "market": "on-demand",
+                                "target_depth": 1,
+                                "ready_timeout_seconds": 1,
+                                "max_lease_seconds": 60,
+                                "estimated_price_usd_hr": 0.6,
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+        self.plan_path.write_text(json.dumps(document), encoding="utf-8")
+        db_path = self.root / "invalid-max-trials.db"
+        args = trace_cli.build_parser().parse_args(
+            [
+                "tick",
+                "--db",
+                str(db_path),
+                "--plan",
+                str(self.plan_path),
+                "--enable-active",
+            ]
+        )
+
+        with self.assertRaisesRegex(ValueError, "max_trials=1"):
+            trace_cli.execute(args)
+
+        self.assertFalse(db_path.exists())
+
+    def test_run_contract_rejects_mixed_plan_before_db_or_provider(self):
+        document = stability_plan_document()
+        document["capacity_trials"] = plan_document()["capacity_trials"]
+        self.plan_path.write_text(json.dumps(document), encoding="utf-8")
+        db_path = self.root / "invalid-stability.db"
+        args = trace_cli.build_parser().parse_args(
+            [
+                "run",
+                "--db",
+                str(db_path),
+                "--plan",
+                str(self.plan_path),
+                "--enable-active",
+            ]
+        )
+
+        with mock.patch.object(trace_cli, "_provider_clients") as clients:
+            with self.assertRaisesRegex(ValueError, "capacity_trials=1"):
+                trace_cli.execute(args)
+
+        clients.assert_not_called()
+        self.assertFalse(db_path.exists())
+
+    def test_run_contract_keeps_only_the_stability_target_alias(self):
+        self.plan_path.write_text(
+            json.dumps(stability_plan_document()),
+            encoding="utf-8",
+        )
+        db_path = self.root / "wrong-target.db"
+        args = trace_cli.build_parser().parse_args(
+            [
+                "run",
+                "--db",
+                str(db_path),
+                "--plan",
+                str(self.plan_path),
+                "--target",
+                "capacity",
+                "--enable-active",
+            ]
+        )
+
+        with self.assertRaisesRegex(ValueError, "all or canary-cohort"):
+            trace_cli.execute(args)
+
+        self.assertFalse(db_path.exists())
 
     def test_init_reports_dynamic_cohort_pair_cost_bounds(self):
         document = plan_document()

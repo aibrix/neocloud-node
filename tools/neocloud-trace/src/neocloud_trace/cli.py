@@ -41,6 +41,14 @@ RUN_TARGETS = (
 )
 SUPPORTED_PROVIDERS = ("lambda", "runpod")
 PASSIVE_PROTOCOL_VERSION = "1.0-passive-catalog"
+ACTIVE_PLAN_SECTIONS = (
+    "capacity_trials",
+    "capacity_cohorts",
+    "completion_window_cohorts",
+    "canary_trials",
+    "canary_cohorts",
+    "control_cohorts",
+)
 
 
 def _add_database_argument(parser: argparse.ArgumentParser) -> None:
@@ -377,6 +385,49 @@ def _run_supervisor(store: TraceStore, plan, *, enable_active: bool) -> str:
         _restore_signal_handlers(previous)
 
 
+def _active_section_counts(plan) -> dict[str, int]:
+    return {
+        section: len(getattr(plan, section))
+        for section in ACTIVE_PLAN_SECTIONS
+        if getattr(plan, section)
+    }
+
+
+def _validate_tick_plan(plan, *, cohort_index: int) -> None:
+    sections = _active_section_counts(plan)
+    if sections != {"capacity_cohorts": 1}:
+        found = ", ".join(
+            f"{section}={count}" for section, count in sections.items()
+        ) or "no active sections"
+        raise ValueError(
+            "tick requires exactly one capacity_cohorts entry and no other "
+            f"active sections; found {found}"
+        )
+    if cohort_index != 0:
+        raise ValueError("tick accepts only --index 0 for its single capacity cohort")
+    cohort = plan.capacity_cohorts[0]
+    if cohort.max_trials != 1:
+        raise ValueError("tick requires capacity_cohorts[0].max_trials=1")
+
+
+def _validate_run_plan(plan, *, target: str, index: int) -> None:
+    sections = _active_section_counts(plan)
+    if sections != {"canary_cohorts": 1}:
+        found = ", ".join(
+            f"{section}={count}" for section, count in sections.items()
+        ) or "no active sections"
+        raise ValueError(
+            "run requires exactly one canary_cohorts entry and no other "
+            f"active sections; found {found}"
+        )
+    if target not in {"all", "canary-cohort"}:
+        raise ValueError(
+            "run --target must be all or canary-cohort for a stability plan"
+        )
+    if index != 0:
+        raise ValueError("run accepts only --index 0 for its single canary cohort")
+
+
 def _run_capacity_tick(
     store: TraceStore,
     plan,
@@ -405,10 +456,10 @@ def _run_capacity_tick(
         _restore_signal_handlers(previous)
 
 
-def _collect(store: TraceStore, args: argparse.Namespace) -> dict[str, Any]:
+def _collection_config(args: argparse.Namespace) -> CollectionConfig:
     host_id = socket.gethostname()
     providers = tuple(dict.fromkeys(args.provider))
-    config = CollectionConfig(
+    return CollectionConfig(
         protocol_version=PASSIVE_PROTOCOL_VERSION,
         host_id=host_id,
         vantage_id=args.vantage_id or host_id,
@@ -419,7 +470,14 @@ def _collect(store: TraceStore, args: argparse.Namespace) -> dict[str, Any]:
         duration_seconds=args.duration_seconds,
         network_control_url=args.network_control_url,
     )
-    clients = _provider_clients(set(providers))
+
+
+def _collect(
+    store: TraceStore,
+    args: argparse.Namespace,
+    config: CollectionConfig,
+) -> dict[str, Any]:
+    clients = _provider_clients(set(config.providers))
     collector = PassiveCollector(store, clients.values())
     previous = _install_signal_handlers(collector)
     try:
@@ -752,6 +810,21 @@ def _cleanup_or_recover(
 
 def execute(args: argparse.Namespace) -> dict[str, Any]:
     require_active(args)
+    plan = None
+    collection_config = None
+    if args.command in {"init", "tick", "run"}:
+        plan = _load_cli_plan(
+            args.plan,
+            host_id=args.host_id,
+            vantage_id=args.vantage_id,
+        )
+        if args.command == "tick":
+            _validate_tick_plan(plan, cohort_index=args.index)
+        elif args.command == "run":
+            _validate_run_plan(plan, target=args.target, index=args.index)
+    elif args.command == "collect":
+        collection_config = _collection_config(args)
+
     store = TraceStore(args.db)
     try:
         if args.command == "status":
@@ -765,13 +838,10 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         if args.command == "billing":
             return _billing(store, args)
         if args.command == "collect":
-            return _collect(store, args)
+            assert collection_config is not None
+            return _collect(store, args, collection_config)
 
-        plan = _load_cli_plan(
-            args.plan,
-            host_id=args.host_id,
-            vantage_id=args.vantage_id,
-        )
+        assert plan is not None
         if args.command == "init":
             return _plan_summary(plan, args.db)
         if args.command == "tick":
