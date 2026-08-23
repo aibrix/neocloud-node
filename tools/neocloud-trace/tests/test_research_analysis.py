@@ -18,11 +18,33 @@ from neocloud_trace.analysis import (
     completion_window_rows,
     survival_rows,
 )
-from neocloud_trace.model import CatalogQuote, CanaryEndReason, ExperimentConfig, TrialCell
+from neocloud_trace.analysis.exports import RIGHT_CENSOR_REASONS
+from neocloud_trace.model import (
+    CatalogQuote,
+    ExperimentConfig,
+    TerminalReason,
+    TrialCell,
+)
 from neocloud_trace.storage import TraceStore
 
 
 UTC = dt.timezone.utc
+
+
+class TerminalReasonAnalysisTest(unittest.TestCase):
+    def test_right_censor_reasons_remain_a_statistical_subset(self):
+        self.assertEqual(
+            RIGHT_CENSOR_REASONS,
+            {
+                "operator_cleanup",
+                "right_censored_collector_loss",
+                "right_censored_planned_end",
+            },
+        )
+        self.assertNotIn(
+            TerminalReason.PROVIDER_INTERRUPTION_CANDIDATE.value,
+            RIGHT_CENSOR_REASONS,
+        )
 
 
 class SurvivalExportTest(unittest.TestCase):
@@ -107,12 +129,12 @@ class SurvivalExportTest(unittest.TestCase):
 
         self.store.finish_canary(
             spot_id,
-            CanaryEndReason.PROVIDER_INTERRUPTION_CANDIDATE.value,
+            TerminalReason.PROVIDER_INTERRUPTION_CANDIDATE.value,
             event_at=(start + dt.timedelta(minutes=11)).isoformat(),
         )
         self.store.finish_canary(
             control_id,
-            CanaryEndReason.RIGHT_CENSORED_PLANNED_END.value,
+            TerminalReason.RIGHT_CENSORED_PLANNED_END.value,
             event_at=planned_end.isoformat(),
         )
         self.store.mark_canary_cleaned(spot_id)
@@ -181,7 +203,7 @@ class SurvivalExportTest(unittest.TestCase):
         )
         self.store.finish_canary(
             lease_id,
-            CanaryEndReason.RIGHT_CENSORED_PLANNED_END.value,
+            TerminalReason.RIGHT_CENSORED_PLANNED_END.value,
             event_at=planned_end.isoformat(),
         )
         self.store.mark_canary_cleaned(lease_id)

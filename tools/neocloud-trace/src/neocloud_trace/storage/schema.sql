@@ -213,6 +213,8 @@ CREATE TABLE IF NOT EXISTS canary_leases (
     application_ready_at TEXT,
     last_heartbeat_at TEXT,
     event_at TEXT,
+    -- Legacy column name retained for existing trace databases. The value can
+    -- represent either an observed terminal event or statistical censoring.
     censor_reason TEXT,
     operator_cleanup_at TEXT,
     cleaned_at TEXT,

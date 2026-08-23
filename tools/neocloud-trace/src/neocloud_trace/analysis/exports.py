@@ -6,23 +6,23 @@ import json
 import pathlib
 from typing import Any
 
-from ..model import CanaryEndReason
+from ..model import TerminalReason
 from ..storage import TraceStore
 
 
 PRE_READY_EVENTS = {
-    CanaryEndReason.LAUNCH_FAILURE.value,
-    CanaryEndReason.PROVIDER_PRE_READY_FAILURE.value,
+    TerminalReason.LAUNCH_FAILURE.value,
+    TerminalReason.PROVIDER_PRE_READY_FAILURE.value,
 }
 POST_READY_INTERRUPTION_EVENTS = {
-    CanaryEndReason.MACHINE_REPLACEMENT.value,
-    CanaryEndReason.PROVIDER_INTERRUPTION_CANDIDATE.value,
-    CanaryEndReason.PROVIDER_UNHEALTHY.value,
+    TerminalReason.MACHINE_REPLACEMENT.value,
+    TerminalReason.PROVIDER_INTERRUPTION_CANDIDATE.value,
+    TerminalReason.PROVIDER_UNHEALTHY.value,
 }
 RIGHT_CENSOR_REASONS = {
-    CanaryEndReason.OPERATOR_CLEANUP.value,
-    CanaryEndReason.RIGHT_CENSORED_COLLECTOR_LOSS.value,
-    CanaryEndReason.RIGHT_CENSORED_PLANNED_END.value,
+    TerminalReason.OPERATOR_CLEANUP.value,
+    TerminalReason.RIGHT_CENSORED_COLLECTOR_LOSS.value,
+    TerminalReason.RIGHT_CENSORED_PLANNED_END.value,
 }
 
 
@@ -278,8 +278,8 @@ def survival_rows(store: TraceStore, run_id: str) -> list[dict[str, Any]]:
                     provider_ready is not None
                     and reason
                     not in {
-                        CanaryEndReason.LAUNCH_FAILURE.value,
-                        CanaryEndReason.PAIR_SETUP_FAILURE.value,
+                        TerminalReason.LAUNCH_FAILURE.value,
+                        TerminalReason.PAIR_SETUP_FAILURE.value,
                     }
                 ),
                 "pre_ready_exposure_seconds": _duration(created, pre_ready_terminal),
@@ -289,15 +289,15 @@ def survival_rows(store: TraceStore, run_id: str) -> list[dict[str, Any]]:
                     reason in POST_READY_INTERRUPTION_EVENTS
                 ),
                 "application_failure_event": int(
-                    reason == CanaryEndReason.APPLICATION_FAILURE.value
+                    reason == TerminalReason.APPLICATION_FAILURE.value
                 ),
                 "right_censored": int(reason in RIGHT_CENSOR_REASONS),
                 "post_ready_analysis_eligible": int(
                     application_ready is not None
                     and reason
                     not in {
-                        CanaryEndReason.LAUNCH_FAILURE.value,
-                        CanaryEndReason.PAIR_SETUP_FAILURE.value,
+                        TerminalReason.LAUNCH_FAILURE.value,
+                        TerminalReason.PAIR_SETUP_FAILURE.value,
                     }
                 ),
             }

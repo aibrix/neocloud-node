@@ -17,7 +17,9 @@ class FailureClass(str, enum.Enum):
     UNKNOWN = "unknown"
 
 
-class CanaryEndReason(str, enum.Enum):
+# Values are persisted in canary_leases.censor_reason. Renaming the Python type
+# does not change this serialization contract.
+class TerminalReason(str, enum.Enum):
     PROVIDER_INTERRUPTION_CANDIDATE = "provider_interruption_candidate"
     PROVIDER_PRE_READY_FAILURE = "provider_pre_ready_failure"
     APPLICATION_FAILURE = "application_failure"

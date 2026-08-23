@@ -7,7 +7,7 @@ import uuid
 from collections.abc import Callable, Sequence
 
 from .capacity import ReplicaRequest
-from ..model import CanaryLease, CanaryEndReason, TrialCell
+from ..model import CanaryLease, TerminalReason, TrialCell
 from ..providers import DeleteResult, ProviderAPICall, ResourceObservation
 from ..storage import TraceStore
 
@@ -44,30 +44,30 @@ class CanaryClassifier:
         now: dt.datetime,
         samples: Sequence[CanarySample],
         operator_cleanup: bool,
-    ) -> CanaryEndReason | None:
+    ) -> TerminalReason | None:
         if operator_cleanup:
-            return CanaryEndReason.OPERATOR_CLEANUP
+            return TerminalReason.OPERATOR_CLEANUP
         if not samples:
             return (
-                CanaryEndReason.RIGHT_CENSORED_PLANNED_END
+                TerminalReason.RIGHT_CENSORED_PLANNED_END
                 if now >= planned_end
                 else None
             )
         latest = samples[-1]
         if not latest.host_healthy and (not latest.exists or latest.heartbeat_ok is False):
-            return CanaryEndReason.RIGHT_CENSORED_COLLECTOR_LOSS
+            return TerminalReason.RIGHT_CENSORED_COLLECTOR_LOSS
 
         prior_machine = None
         prior_uptime = None
         for sample in samples:
             if prior_machine and sample.machine_id and sample.machine_id != prior_machine:
-                return CanaryEndReason.MACHINE_REPLACEMENT
+                return TerminalReason.MACHINE_REPLACEMENT
             if (
                 prior_uptime is not None
                 and sample.runtime_uptime_seconds is not None
                 and sample.runtime_uptime_seconds + 1 < prior_uptime
             ):
-                return CanaryEndReason.MACHINE_REPLACEMENT
+                return TerminalReason.MACHINE_REPLACEMENT
             prior_machine = sample.machine_id or prior_machine
             prior_uptime = (
                 sample.runtime_uptime_seconds
@@ -76,7 +76,7 @@ class CanaryClassifier:
             )
 
         if latest.provider_state and latest.provider_state.lower() == "unhealthy":
-            return CanaryEndReason.PROVIDER_UNHEALTHY
+            return TerminalReason.PROVIDER_UNHEALTHY
         if latest.provider_state and latest.provider_state.lower() in {
             "exited",
             "preempted",
@@ -84,9 +84,9 @@ class CanaryClassifier:
             "terminated",
         } and now < planned_end:
             return (
-                CanaryEndReason.PROVIDER_INTERRUPTION_CANDIDATE
+                TerminalReason.PROVIDER_INTERRUPTION_CANDIDATE
                 if any(sample.provider_ready for sample in samples[:-1])
-                else CanaryEndReason.PROVIDER_PRE_READY_FAILURE
+                else TerminalReason.PROVIDER_PRE_READY_FAILURE
             )
         if not latest.exists and now < planned_end:
             first_missing = latest.observed_at
@@ -96,9 +96,9 @@ class CanaryClassifier:
                 first_missing = sample.observed_at
             if (now - first_missing).total_seconds() >= self.disappearance_grace_seconds:
                 return (
-                    CanaryEndReason.PROVIDER_INTERRUPTION_CANDIDATE
+                    TerminalReason.PROVIDER_INTERRUPTION_CANDIDATE
                     if any(sample.provider_ready for sample in samples)
-                    else CanaryEndReason.PROVIDER_PRE_READY_FAILURE
+                    else TerminalReason.PROVIDER_PRE_READY_FAILURE
                 )
 
         if latest.provider_ready and latest.heartbeat_ok is False:
@@ -108,10 +108,10 @@ class CanaryClassifier:
             )
             failure_start = last_healthy or samples[0].observed_at
             if (now - failure_start).total_seconds() >= self.heartbeat_grace_seconds:
-                return CanaryEndReason.APPLICATION_FAILURE
+                return TerminalReason.APPLICATION_FAILURE
 
         if now >= planned_end:
-            return CanaryEndReason.RIGHT_CENSORED_PLANNED_END
+            return TerminalReason.RIGHT_CENSORED_PLANNED_END
         return None
 
 
@@ -184,7 +184,7 @@ class CanaryRunner:
             else:
                 self.store.finish_canary(
                     lease_id,
-                    CanaryEndReason.LAUNCH_FAILURE.value,
+                    TerminalReason.LAUNCH_FAILURE.value,
                 )
                 self.store.mark_canary_cleaned(lease_id)
             leases.append(self._lease_from_row(self.store.canary_row(lease_id)))
@@ -232,7 +232,7 @@ class CanaryRunner:
         else:
             self.store.finish_canary(
                 lease_id,
-                CanaryEndReason.LAUNCH_FAILURE.value,
+                TerminalReason.LAUNCH_FAILURE.value,
             )
             self.store.mark_canary_cleaned(lease_id)
         return self._lease_from_row(self.store.canary_row(lease_id))
@@ -291,7 +291,7 @@ class CanaryRunner:
         run_id: str,
         lease: CanaryLease,
         *,
-        reason: CanaryEndReason,
+        reason: TerminalReason,
         operator_cleanup: bool = False,
     ) -> DeleteResult:
         self.store.finish_canary(
