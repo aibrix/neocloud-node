@@ -305,7 +305,7 @@ class ResearchSupervisorTest(unittest.TestCase):
                 module.require_active(args)
 
         collect = parser.parse_args(
-            ["collect", "--db", database, "--plan", plan]
+            ["collect", "--db", database, "--provider", "runpod"]
         )
         module.require_active(collect)
         export = parser.parse_args(
@@ -375,6 +375,15 @@ class ResearchSupervisorTest(unittest.TestCase):
             "--index",
         ):
             self.assertIn(option, run_help)
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), self.assertRaises(SystemExit):
+            parser.parse_args(["collect", "--help"])
+        collect_help = output.getvalue()
+        self.assertIn("--provider", collect_help)
+        self.assertIn("--vantage-id", collect_help)
+        self.assertNotIn("--plan", collect_help)
+        self.assertNotIn("--host-id", collect_help)
 
     def test_cli_metadata_has_one_resolution_rule_for_every_plan_command(self):
         document = plan_document()

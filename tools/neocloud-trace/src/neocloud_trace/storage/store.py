@@ -13,6 +13,7 @@ from typing import Any
 
 from ..model import (
     CatalogQuote,
+    CollectionConfig,
     ExperimentConfig,
     OwnedResource,
     TrialCell,
@@ -96,8 +97,49 @@ class TraceStore:
         collector_revision: str | None = None,
         python_version: str | None = None,
     ) -> str:
-        run_id = str(uuid.uuid4())
         config_json = json_text({"experiment": dataclasses.asdict(config), "document": config_document})
+        return self._start_trace_run(
+            protocol_version=config.protocol_version,
+            config_json=config_json,
+            host_id=config.host_id,
+            vantage_id=config.vantage_id,
+            total_budget_usd=config.total_budget_usd,
+            max_active_gpus_per_provider=config.max_active_gpus_per_provider,
+            collector_revision=collector_revision,
+            python_version=python_version,
+        )
+
+    def start_collection(
+        self,
+        config: CollectionConfig,
+        *,
+        collector_revision: str | None = None,
+        python_version: str | None = None,
+    ) -> str:
+        return self._start_trace_run(
+            protocol_version=config.protocol_version,
+            config_json=json_text({"collection": dataclasses.asdict(config)}),
+            host_id=config.host_id,
+            vantage_id=config.vantage_id,
+            total_budget_usd=0.0,
+            max_active_gpus_per_provider=0,
+            collector_revision=collector_revision,
+            python_version=python_version,
+        )
+
+    def _start_trace_run(
+        self,
+        *,
+        protocol_version: str,
+        config_json: str,
+        host_id: str,
+        vantage_id: str,
+        total_budget_usd: float,
+        max_active_gpus_per_provider: int,
+        collector_revision: str | None,
+        python_version: str | None,
+    ) -> str:
+        run_id = str(uuid.uuid4())
         config_hash = hashlib.sha256(config_json.encode()).hexdigest()
         with self._lock, self.connection:
             self.connection.execute(
@@ -110,16 +152,16 @@ class TraceStore:
                 """,
                 (
                     run_id,
-                    config.protocol_version,
+                    protocol_version,
                     config_hash,
                     config_json,
-                    config.host_id,
-                    config.vantage_id,
+                    host_id,
+                    vantage_id,
                     collector_revision,
                     python_version,
                     utc_now(),
-                    config.total_budget_usd,
-                    config.max_active_gpus_per_provider,
+                    total_budget_usd,
+                    max_active_gpus_per_provider,
                 ),
             )
         return run_id

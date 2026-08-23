@@ -127,7 +127,8 @@ When adding or changing a command:
 1. place operational options on the command parser, not on the top-level parser;
 2. require `--enable-active` for every path that can create or delete a provider
    resource;
-3. load plan metadata through the shared host/vantage resolution path;
+3. load plan metadata through the shared host/vantage resolution path for
+   plan-based commands;
 4. keep stdout JSON stable and machine-readable;
 5. add parser/help and execution tests;
 6. update `README.md` when user-visible behavior changes.
@@ -137,8 +138,9 @@ a single-purpose plan and a shared execution path.
 
 ## Storage and Data Changes
 
-The schema is defined in `src/neocloud_trace/storage/store.py`. Opening a
-database runs the idempotent schema statements and enables WAL mode.
+The schema is defined in `src/neocloud_trace/storage/schema.sql`; persistence
+operations are implemented in `storage/store.py`. Opening a database runs the
+idempotent schema statements and enables WAL mode.
 
 For schema or exporter changes:
 
@@ -164,9 +166,8 @@ neocloud-trace init \
   --vantage-id local-development
 
 neocloud-trace collect \
-  --plan /path/to/plan.json \
   --db /tmp/neocloud-trace-dev.db \
-  --vantage-id local-development \
+  --provider runpod \
   --once
 ```
 

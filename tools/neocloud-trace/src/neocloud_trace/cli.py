@@ -17,7 +17,9 @@ from .analysis import (
     export_survival_csv,
 )
 from .analysis.billing import import_billing_file, reconcile_costs
+from .model import CollectionConfig
 from .providers import LambdaResearchClient, RunPodResearchClient
+from .runners import PassiveCollector
 from .storage import TraceStore
 from .supervisor import ActiveRunDisabled, PilotSupervisor, load_plan
 
@@ -37,6 +39,8 @@ RUN_TARGETS = (
     "window-cohort",
     "control-cohort",
 )
+SUPPORTED_PROVIDERS = ("lambda", "runpod")
+PASSIVE_PROTOCOL_VERSION = "1.0-passive-catalog"
 
 
 def _add_database_argument(parser: argparse.ArgumentParser) -> None:
@@ -86,13 +90,42 @@ def build_parser() -> argparse.ArgumentParser:
         "collect",
         help="collect passive catalog and host observations",
     )
-    _add_plan_arguments(collect)
+    _add_database_argument(collect)
+    collect.add_argument(
+        "--provider",
+        action="append",
+        choices=SUPPORTED_PROVIDERS,
+        required=True,
+        help="provider to query; repeat to collect more than one",
+    )
+    collect.add_argument(
+        "--vantage-id",
+        help="network/location group (default: local hostname)",
+    )
+    collect.add_argument(
+        "--gpu-count",
+        action="append",
+        type=int,
+        dest="gpu_counts",
+        help="GPU shape to query; repeat as needed (default: 1, 2, 4, 8)",
+    )
+    collect.add_argument(
+        "--catalog-interval-seconds",
+        type=float,
+        default=300.0,
+    )
+    collect.add_argument(
+        "--host-interval-seconds",
+        type=float,
+        default=30.0,
+    )
+    collect.add_argument("--network-control-url")
     collection_window = collect.add_mutually_exclusive_group()
     collection_window.add_argument("--duration-seconds", type=float)
     collection_window.add_argument(
         "--once",
         action="store_true",
-        help="collect one snapshot and exit",
+        help="collect one snapshot and exit (also the default without a duration)",
     )
 
     run = subparsers.add_parser(
@@ -370,6 +403,33 @@ def _run_capacity_tick(
         )
     finally:
         _restore_signal_handlers(previous)
+
+
+def _collect(store: TraceStore, args: argparse.Namespace) -> dict[str, Any]:
+    host_id = socket.gethostname()
+    providers = tuple(dict.fromkeys(args.provider))
+    config = CollectionConfig(
+        protocol_version=PASSIVE_PROTOCOL_VERSION,
+        host_id=host_id,
+        vantage_id=args.vantage_id or host_id,
+        providers=providers,
+        gpu_counts=tuple(args.gpu_counts or (1, 2, 4, 8)),
+        catalog_interval_seconds=args.catalog_interval_seconds,
+        host_interval_seconds=args.host_interval_seconds,
+        duration_seconds=args.duration_seconds,
+        network_control_url=args.network_control_url,
+    )
+    clients = _provider_clients(set(providers))
+    collector = PassiveCollector(store, clients.values())
+    previous = _install_signal_handlers(collector)
+    try:
+        run_id = collector.run(
+            config,
+            once=args.once or args.duration_seconds is None,
+        )
+    finally:
+        _restore_signal_handlers(previous)
+    return _status(store, run_id)
 
 
 def _status(store: TraceStore, run_id: str | None) -> dict[str, Any]:
@@ -704,6 +764,8 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
             return _export_data(store, args)
         if args.command == "billing":
             return _billing(store, args)
+        if args.command == "collect":
+            return _collect(store, args)
 
         plan = _load_cli_plan(
             args.plan,
@@ -720,24 +782,6 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
                 cohort_index=args.index,
                 enable_active=args.enable_active,
             )
-        if args.command == "collect":
-            duration = (
-                0.01
-                if args.once
-                else args.duration_seconds or plan.duration_seconds
-            )
-            selected = dataclasses.replace(
-                plan,
-                duration_seconds=duration,
-                capacity_trials=(),
-                capacity_cohorts=(),
-                completion_window_cohorts=(),
-                canary_trials=(),
-                canary_cohorts=(),
-                control_cohorts=(),
-            )
-            run_id = _run_supervisor(store, selected, enable_active=False)
-            return _status(store, run_id)
         if args.command == "run":
             selected = _select_run_target(plan, args.target, args.index)
             run_id = _run_supervisor(

@@ -27,12 +27,15 @@ documented in [DEVELOPMENT.md](DEVELOPMENT.md).
 
 ## Core Concepts
 
-Every collection or experiment uses two files:
+Active experiments use two files:
 
 - a plan JSON file describing providers, experiment types, durations, GPU
   shapes, and budget limits;
 - a SQLite database containing run state, observations, owned resources,
   cleanup events, and billing records.
+
+Passive `collect` does not need an experiment plan. It takes provider and
+sampling options directly and writes to the same SQLite format.
 
 Commands place their options after the command name:
 
@@ -69,21 +72,24 @@ commands are:
 
 Every persisted run has a `host_id` and a `vantage_id`.
 
-`host_id` identifies the machine running the collector. It is resolved in this
+For `collect`, `host_id` is always the local hostname. `vantage_id` defaults to
+the same value, so a normal control-plane snapshot needs no identity options.
+Set `--vantage-id` only when several collector hosts should be grouped under a
+stable network or physical location for API-latency analysis.
+
+Plan-based commands resolve identity differently. `host_id` is resolved in this
 order:
 
 1. `--host-id`;
 2. a non-placeholder `host_id` in the plan;
 3. the local system hostname.
 
-`vantage_id` identifies the collector's network or physical location. It is
-resolved in this order:
+For plan-based commands, `vantage_id` is resolved in this order:
 
 1. `--vantage-id`;
 2. a non-placeholder `vantage_id` in the plan.
 
-There is no automatic `vantage_id`, because a hostname cannot reliably identify
-a network location. All plan-based commands reject placeholder values such as
+Plan-based commands reject unresolved placeholder values such as
 `replace-with-network-vantage`.
 
 Use stable, human-readable values when comparing runs from different machines
@@ -193,9 +199,8 @@ Collect one snapshot:
 
 ```bash
 neocloud-trace collect \
-  --plan /path/to/plan.json \
-  --db data/neocloud-trace/catalog.db \
-  --vantage-id us-west-office \
+  --db data/neocloud-trace/trace.db \
+  --provider runpod \
   --once
 ```
 
@@ -203,14 +208,16 @@ Collect for a fixed duration:
 
 ```bash
 neocloud-trace collect \
-  --plan /path/to/plan.json \
-  --db data/neocloud-trace/catalog.db \
+  --db data/neocloud-trace/trace.db \
+  --provider lambda \
+  --provider runpod \
   --vantage-id us-west-office \
   --duration-seconds 3600
 ```
 
-Without either duration option, collection uses `duration_seconds` from the
-plan.
+Without `--duration-seconds`, `collect` records one snapshot and exits. During a
+timed collection, catalog and host sampling default to 300 and 30 seconds;
+`--catalog-interval-seconds` and `--host-interval-seconds` override them.
 
 ## Run Experiments
 

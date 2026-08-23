@@ -114,6 +114,39 @@ class ExperimentConfig:
 
 
 @dataclasses.dataclass(frozen=True)
+class CollectionConfig:
+    protocol_version: str
+    host_id: str
+    vantage_id: str
+    providers: tuple[str, ...]
+    gpu_counts: tuple[int, ...] = (1, 2, 4, 8)
+    catalog_interval_seconds: float = 300.0
+    host_interval_seconds: float = 30.0
+    duration_seconds: float | None = None
+    network_control_url: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.protocol_version.strip():
+            raise ValueError("protocol_version is required")
+        if not self.host_id.strip():
+            raise ValueError("host_id is required")
+        if not self.vantage_id.strip():
+            raise ValueError("vantage_id is required")
+        if not self.providers or any(not provider.strip() for provider in self.providers):
+            raise ValueError("providers must contain at least one provider")
+        if len(self.providers) != len(set(self.providers)):
+            raise ValueError("providers must be unique")
+        if not self.gpu_counts or any(count <= 0 for count in self.gpu_counts):
+            raise ValueError("gpu_counts must contain positive values")
+        if self.catalog_interval_seconds <= 0:
+            raise ValueError("catalog_interval_seconds must be positive")
+        if self.host_interval_seconds <= 0:
+            raise ValueError("host_interval_seconds must be positive")
+        if self.duration_seconds is not None and self.duration_seconds <= 0:
+            raise ValueError("duration_seconds must be positive")
+
+
+@dataclasses.dataclass(frozen=True)
 class TrialCell:
     provider: str
     sku: str
