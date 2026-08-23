@@ -14,6 +14,7 @@ from .analysis import (
     capacity_trial_payload,
     export_capacity_depth_csv,
     export_completion_window_csv,
+    export_stability_window_csv,
     export_survival_csv,
 )
 from .analysis.billing import import_billing_file, reconcile_costs
@@ -154,6 +155,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help="zero-based item index when --target is not all",
     )
+    run.add_argument(
+        "--campaign-id",
+        help="stable campaign identity (default: reuse the database campaign)",
+    )
 
     tick = subparsers.add_parser(
         "tick",
@@ -209,6 +214,7 @@ def build_parser() -> argparse.ArgumentParser:
         ("survival", "export one row per canary lease"),
         ("depth", "export one row per scheduled capacity epoch"),
         ("window", "export one row per completion-window opportunity"),
+        ("stability", "export one row per scheduled stability window"),
     ):
         export_command = export_types.add_parser(export_type, help=help_text)
         _add_database_argument(export_command)
@@ -320,6 +326,17 @@ def _capacity_campaign_id(store: TraceStore) -> str:
             "per experiment"
         )
     return str(rows[0]["campaign_id"]) if rows else "capacity-experiment"
+
+
+def _stability_campaign_id(store: TraceStore) -> str:
+    rows = store.connection.execute(
+        "SELECT campaign_id FROM stability_campaigns ORDER BY created_at"
+    ).fetchall()
+    if len(rows) > 1:
+        raise ValueError(
+            "stability database contains multiple experiments; pass --campaign-id"
+        )
+    return str(rows[0]["campaign_id"]) if rows else "stability-experiment"
 
 
 def _capacity_cohort_summary(cohort) -> dict[str, Any]:
@@ -456,6 +473,27 @@ def _run_capacity_tick(
         _restore_signal_handlers(previous)
 
 
+def _run_stability_window(
+    store: TraceStore,
+    plan,
+    *,
+    campaign_id: str,
+    enable_active: bool,
+) -> dict[str, Any]:
+    cohort = plan.canary_cohorts[0]
+    providers = _provider_clients({trial.cell.provider for trial in cohort.cells})
+    supervisor = PilotSupervisor(store, providers)
+    previous = _install_signal_handlers(supervisor)
+    try:
+        return supervisor.stability_run(
+            plan,
+            campaign_id=campaign_id,
+            enable_active=enable_active,
+        )
+    finally:
+        _restore_signal_handlers(previous)
+
+
 def _collection_config(args: argparse.Namespace) -> CollectionConfig:
     host_id = socket.gethostname()
     providers = tuple(dict.fromkeys(args.provider))
@@ -502,6 +540,7 @@ def _status(store: TraceStore, run_id: str | None) -> dict[str, Any]:
         "catalog_quotes_v2",
         "capacity_trials",
         "capacity_epochs",
+        "stability_windows",
         "completion_window_epochs",
         "capacity_replicas",
         "canary_leases",
@@ -559,6 +598,7 @@ def _export_data(store: TraceStore, args: argparse.Namespace) -> dict[str, Any]:
         "survival": export_survival_csv,
         "depth": export_capacity_depth_csv,
         "window": export_completion_window_csv,
+        "stability": export_stability_window_csv,
     }
     count = exporters[args.export_type](store, run_id, args.output)
     return {
@@ -728,6 +768,14 @@ def _plan_summary(plan, db_path: str) -> dict[str, Any]:
         ],
         "canary_trials": len(plan.canary_trials),
         "canary_cohort_count": len(plan.canary_cohorts),
+        "stability_schedule": {
+            "window_count": plan.stability_schedule.window_count,
+            "schedule_seed": plan.stability_schedule.schedule_seed,
+            "initial_delay_seconds": plan.stability_schedule.initial_delay_seconds,
+            "interval_seconds": plan.stability_schedule.interval_seconds,
+            "jitter_seconds": plan.stability_schedule.jitter_seconds,
+            "scheduled_offsets_seconds": list(plan.stability_schedule.offsets()),
+        },
         "canary_cohorts": [
             {
                 "name": cohort.name,
@@ -854,12 +902,12 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
             )
         if args.command == "run":
             selected = _select_run_target(plan, args.target, args.index)
-            run_id = _run_supervisor(
+            return _run_stability_window(
                 store,
                 selected,
+                campaign_id=args.campaign_id or _stability_campaign_id(store),
                 enable_active=args.enable_active,
             )
-            return _status(store, run_id)
         raise ValueError(f"unsupported command: {args.command}")
     finally:
         store.close()

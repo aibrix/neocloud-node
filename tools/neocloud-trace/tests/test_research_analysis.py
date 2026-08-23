@@ -14,9 +14,11 @@ from neocloud_trace.analysis import (
     capacity_depth_rows,
     export_capacity_depth_csv,
     export_completion_window_csv,
+    export_stability_window_csv,
     export_survival_csv,
     completion_window_rows,
     survival_rows,
+    stability_window_rows,
 )
 from neocloud_trace.analysis.exports import RIGHT_CENSOR_REASONS
 from neocloud_trace.model import (
@@ -488,6 +490,67 @@ class SurvivalExportTest(unittest.TestCase):
         self.assertEqual(count, 1)
         self.assertEqual(len(exported), 1)
         self.assertIn("assignment_probability", exported[0])
+
+
+class StabilityWindowExportTest(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.tempdir.name)
+        self.store = TraceStore(self.root / "stability.db")
+
+    def tearDown(self):
+        self.store.close()
+        self.tempdir.cleanup()
+
+    def test_export_includes_missed_windows_without_canary_leases(self):
+        start = dt.datetime(2026, 8, 10, tzinfo=UTC)
+        run_id, _created = self.store.ensure_stability_campaign(
+            ExperimentConfig(
+                protocol_version="4.0-stability",
+                host_id="host",
+                vantage_id="vantage",
+                provider_budgets={"runpod": 5.0},
+                total_budget_usd=5.0,
+                max_active_gpus_per_provider=2,
+            ),
+            {"mode": "stability"},
+            campaign_id="stability-analysis",
+            cohort_name="runpod-survival",
+            started_at=start.isoformat(),
+            windows=[
+                {
+                    "sequence": 0,
+                    "scheduled_offset_seconds": 0,
+                    "scheduled_at": start.isoformat(),
+                    "scheduled_end_at": (start + dt.timedelta(hours=1)).isoformat(),
+                },
+                {
+                    "sequence": 1,
+                    "scheduled_offset_seconds": 7200,
+                    "scheduled_at": (start + dt.timedelta(hours=2)).isoformat(),
+                    "scheduled_end_at": (start + dt.timedelta(hours=3)).isoformat(),
+                },
+            ],
+        )
+        claim_status, _window = self.store.claim_due_stability_window(
+            "stability-analysis",
+            due_at=(start + dt.timedelta(hours=1, minutes=30)).isoformat(),
+        )
+
+        rows = stability_window_rows(self.store, run_id)
+        output = self.root / "stability-windows.csv"
+        count = export_stability_window_csv(self.store, run_id, output)
+        with output.open(newline="", encoding="utf-8") as handle:
+            exported = list(csv.DictReader(handle))
+
+        self.assertEqual(claim_status, "idle")
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["window_status"], "missed")
+        self.assertEqual(rows[0]["canary_epoch_count"], 0)
+        self.assertEqual(rows[0]["lease_count"], 0)
+        self.assertEqual(rows[1]["window_status"], "scheduled")
+        self.assertEqual(count, 2)
+        self.assertEqual(exported[0]["window_stop_reason"], "external_scheduler_late")
 
 
 if __name__ == "__main__":

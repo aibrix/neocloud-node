@@ -351,3 +351,31 @@ FROM canary_leases l
 WHERE l.run_id = :run_id
   AND l.provider_resource_id IS NOT NULL
   AND l.cleaned_at IS NULL;
+
+-- 14. Durable Stability-window coverage. Keep missed windows with zero linked
+-- epochs or leases in the denominator.
+SELECT
+  c.campaign_id,
+  w.cohort_name,
+  w.sequence AS window_sequence,
+  w.scheduled_at,
+  w.scheduled_end_at,
+  w.claimed_at,
+  w.started_at,
+  w.finished_at,
+  w.status AS window_status,
+  w.stop_reason AS window_stop_reason,
+  ROUND((julianday(w.started_at) - julianday(w.scheduled_at)) * 86400, 1)
+    AS started_lag_seconds,
+  COUNT(DISTINCT link.epoch_id) AS canary_epochs,
+  COUNT(l.id) AS leases,
+  SUM(l.interruptible = 1) AS interruptible_leases,
+  SUM(l.interruptible = 0) AS matched_control_leases,
+  SUM(l.application_ready_at IS NOT NULL) AS application_ready_leases
+FROM stability_windows w
+JOIN stability_campaigns c ON c.run_id = w.run_id
+LEFT JOIN stability_window_epochs link ON link.window_id = w.id
+LEFT JOIN canary_leases l ON l.pair_id = link.epoch_id
+WHERE w.run_id = :run_id
+GROUP BY w.id
+ORDER BY w.sequence;

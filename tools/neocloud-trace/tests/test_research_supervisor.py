@@ -414,6 +414,7 @@ class ResearchSupervisorTest(unittest.TestCase):
             "--enable-active",
             "--target",
             "--index",
+            "--campaign-id",
         ):
             self.assertIn(option, run_help)
 
@@ -704,6 +705,42 @@ class ResearchSupervisorTest(unittest.TestCase):
             trace_cli.execute(args)
 
         self.assertFalse(db_path.exists())
+
+    def test_run_cli_reuses_durable_stability_campaign(self):
+        document = stability_plan_document()
+        document["duration_seconds"] = 0.08
+        self.plan_path.write_text(json.dumps(document), encoding="utf-8")
+        db_path = self.root / "stability-cli.db"
+        provider = FastFailingCanaryProvider()
+
+        def invoke():
+            args = trace_cli.build_parser().parse_args(
+                [
+                    "run",
+                    "--db",
+                    str(db_path),
+                    "--plan",
+                    str(self.plan_path),
+                    "--enable-active",
+                ]
+            )
+            with mock.patch.object(
+                trace_cli,
+                "_provider_clients",
+                return_value={"lambda": provider},
+            ):
+                return trace_cli.execute(args)
+
+        first = invoke()
+        duplicate = invoke()
+
+        self.assertEqual(first["campaign_id"], "stability-experiment")
+        self.assertEqual(first["status"], "executed")
+        self.assertEqual(first["window_status"], "complete")
+        self.assertTrue(first["campaign_complete"])
+        self.assertEqual(duplicate["status"], "complete")
+        self.assertEqual(first["run_id"], duplicate["run_id"])
+        self.assertEqual(len(provider.created), 2)
 
     def test_init_reports_dynamic_cohort_pair_cost_bounds(self):
         document = plan_document()
@@ -1589,6 +1626,159 @@ class ResearchSupervisorTest(unittest.TestCase):
         self.assertEqual(store.run_row(run_id)["status"], "running")
         self.assertEqual(
             store.capacity_campaign_row("recoverable-campaign")["status"],
+            "running",
+        )
+
+    def test_stability_run_persists_all_windows_and_marks_missed_denominators(self):
+        document = stability_plan_document()
+        document["stability_schedule"] = {
+            "window_count": 3,
+            "schedule_seed": 29,
+            "initial_delay_seconds": 0.05,
+            "interval_seconds": 0.3,
+            "jitter_seconds": 0,
+        }
+        self.plan_path.write_text(json.dumps(document), encoding="utf-8")
+        plan = load_plan(self.plan_path)
+        store = TraceStore(self.root / "stability-missed.db")
+        self.addCleanup(store.close)
+        supervisor = PilotSupervisor(
+            store,
+            {"lambda": FastFailingCanaryProvider()},
+        )
+        started_at = dt.datetime(2026, 8, 11, tzinfo=dt.timezone.utc)
+
+        initialized = supervisor.stability_run(
+            plan,
+            campaign_id="stability-missed",
+            enable_active=True,
+            now=started_at,
+        )
+        after_outage = PilotSupervisor(
+            store,
+            {"lambda": FastFailingCanaryProvider()},
+        ).stability_run(
+            plan,
+            campaign_id="stability-missed",
+            enable_active=True,
+            now=started_at + dt.timedelta(seconds=0.26),
+        )
+
+        windows = store.stability_window_rows(initialized["run_id"])
+        self.assertEqual(initialized["status"], "idle")
+        self.assertEqual(after_outage["status"], "idle")
+        self.assertEqual(len(windows), 3)
+        self.assertEqual(
+            [row["status"] for row in windows],
+            ["missed", "scheduled", "scheduled"],
+        )
+        self.assertEqual(windows[0]["stop_reason"], "external_scheduler_late")
+
+    def test_stability_run_executes_one_window_and_links_canary_epochs(self):
+        document = stability_plan_document()
+        self.plan_path.write_text(json.dumps(document), encoding="utf-8")
+        plan = load_plan(self.plan_path)
+        store = TraceStore(self.root / "stability-execution.db")
+        self.addCleanup(store.close)
+        provider = FastFailingCanaryProvider()
+        now = dt.datetime(2026, 8, 11, tzinfo=dt.timezone.utc)
+
+        result = PilotSupervisor(store, {"lambda": provider}).stability_run(
+            plan,
+            campaign_id="stability-execution",
+            enable_active=True,
+            now=now,
+        )
+        duplicate = PilotSupervisor(store, {"lambda": provider}).stability_run(
+            plan,
+            campaign_id="stability-execution",
+            enable_active=True,
+            now=now,
+        )
+
+        windows = store.stability_window_rows(result["run_id"])
+        linked = store.stability_window_epoch_rows(windows[0]["id"])
+        self.assertEqual(result["status"], "executed")
+        self.assertEqual(result["window_status"], "complete")
+        self.assertTrue(result["campaign_complete"])
+        self.assertEqual(duplicate["status"], "complete")
+        self.assertEqual([row["status"] for row in windows], ["complete"])
+        self.assertEqual(len(linked), 1)
+        self.assertEqual(linked[0]["sequence"], 0)
+        self.assertEqual(len(provider.created), 2)
+        self.assertEqual(store.run_row(result["run_id"])["status"], "complete")
+
+    def test_stability_final_window_does_not_hide_cleanup_failure(self):
+        document = stability_plan_document()
+        self.plan_path.write_text(json.dumps(document), encoding="utf-8")
+        plan = load_plan(self.plan_path)
+        store = TraceStore(self.root / "stability-cleanup-failure.db")
+        self.addCleanup(store.close)
+
+        result = PilotSupervisor(
+            store,
+            {"lambda": CleanupFailProvider()},
+        ).stability_run(
+            plan,
+            campaign_id="stability-cleanup-failure",
+            enable_active=True,
+            now=dt.datetime(2026, 8, 11, tzinfo=dt.timezone.utc),
+        )
+
+        self.assertEqual(result["window_status"], "cleanup_incomplete")
+        self.assertTrue(result["campaign_complete"])
+        self.assertEqual(
+            store.stability_campaign_row("stability-cleanup-failure")["status"],
+            "cleanup_incomplete",
+        )
+        self.assertEqual(store.run_row(result["run_id"])["status"], "cleanup_incomplete")
+        self.assertEqual(len(store.owned_resources(result["run_id"])), 2)
+
+    def test_stability_recovery_preserves_future_windows(self):
+        document = stability_plan_document()
+        document["stability_schedule"] = {
+            "window_count": 2,
+            "schedule_seed": 11,
+            "initial_delay_seconds": 0.1,
+            "interval_seconds": 0.4,
+            "jitter_seconds": 0,
+        }
+        self.plan_path.write_text(json.dumps(document), encoding="utf-8")
+        plan = load_plan(self.plan_path)
+        store = TraceStore(self.root / "stability-recovery.db")
+        self.addCleanup(store.close)
+        now = dt.datetime(2026, 8, 11, tzinfo=dt.timezone.utc)
+        supervisor = PilotSupervisor(
+            store,
+            {"lambda": FastFailingCanaryProvider()},
+        )
+        initialized = supervisor.stability_run(
+            plan,
+            campaign_id="recoverable-stability",
+            enable_active=True,
+            now=now,
+        )
+        claim_status, claimed = store.claim_due_stability_window(
+            "recoverable-stability",
+            due_at=(now + dt.timedelta(seconds=0.1)).isoformat(),
+        )
+        self.assertEqual(claim_status, "claimed")
+        store.mark_stability_window_started(
+            claimed["id"],
+            started_at=(now + dt.timedelta(seconds=0.1)).isoformat(),
+        )
+
+        remaining = supervisor.recover_run(initialized["run_id"])
+
+        windows = store.stability_window_rows(initialized["run_id"])
+        self.assertEqual(remaining, [])
+        self.assertEqual(
+            [row["status"] for row in windows],
+            ["collector_loss", "scheduled"],
+        )
+        self.assertEqual(store.run_row(initialized["run_id"])["status"], "running")
+        self.assertEqual(
+            store.stability_campaign_row("recoverable-stability")["status"],
             "running",
         )
 

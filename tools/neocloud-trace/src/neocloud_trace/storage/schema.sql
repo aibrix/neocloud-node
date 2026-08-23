@@ -157,6 +157,33 @@ CREATE TABLE IF NOT EXISTS capacity_campaigns (
     status TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS stability_campaigns (
+    campaign_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL UNIQUE REFERENCES experiment_runs(id),
+    cohort_name TEXT NOT NULL,
+    config_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    finished_at TEXT,
+    status TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS stability_windows (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES experiment_runs(id),
+    cohort_name TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    scheduled_offset_seconds REAL NOT NULL,
+    scheduled_at TEXT NOT NULL,
+    scheduled_end_at TEXT NOT NULL,
+    claimed_at TEXT,
+    started_at TEXT,
+    finished_at TEXT,
+    status TEXT NOT NULL,
+    stop_reason TEXT,
+    details_json TEXT NOT NULL,
+    UNIQUE(run_id, cohort_name, sequence)
+);
+
 CREATE TABLE IF NOT EXISTS completion_window_epochs (
     id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES experiment_runs(id),
@@ -245,6 +272,12 @@ CREATE TABLE IF NOT EXISTS canary_epochs (
     stop_reason TEXT,
     details_json TEXT NOT NULL,
     UNIQUE(run_id, cohort_name, sequence)
+);
+
+CREATE TABLE IF NOT EXISTS stability_window_epochs (
+    window_id TEXT NOT NULL REFERENCES stability_windows(id),
+    epoch_id TEXT NOT NULL UNIQUE REFERENCES canary_epochs(id),
+    PRIMARY KEY(window_id, epoch_id)
 );
 
 CREATE TABLE IF NOT EXISTS canary_observations (
@@ -338,6 +371,10 @@ CREATE INDEX IF NOT EXISTS idx_canaries_pair
     ON canary_leases(pair_id);
 CREATE INDEX IF NOT EXISTS idx_canary_epochs_run_cohort
     ON canary_epochs(run_id, cohort_name, sequence);
+CREATE INDEX IF NOT EXISTS idx_stability_windows_run_cohort
+    ON stability_windows(run_id, cohort_name, sequence);
+CREATE INDEX IF NOT EXISTS idx_stability_windows_status_time
+    ON stability_windows(status, scheduled_at, scheduled_end_at);
 CREATE INDEX IF NOT EXISTS idx_budget_run_provider
     ON budget_ledger_v2(run_id, provider);
 CREATE INDEX IF NOT EXISTS idx_billing_run_resource

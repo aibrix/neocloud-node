@@ -175,6 +175,33 @@ COMPLETION_WINDOW_FIELDS = (
 )
 
 
+STABILITY_WINDOW_FIELDS = (
+    "run_id",
+    "campaign_id",
+    "cohort_name",
+    "window_sequence",
+    "scheduled_offset_seconds",
+    "scheduled_at",
+    "scheduled_end_at",
+    "claimed_at",
+    "started_at",
+    "finished_at",
+    "window_status",
+    "window_stop_reason",
+    "scheduled_duration_seconds",
+    "started_lag_seconds",
+    "observed_duration_seconds",
+    "canary_epoch_count",
+    "lease_count",
+    "interruptible_lease_count",
+    "matched_control_lease_count",
+    "provider_ready_lease_count",
+    "application_ready_lease_count",
+    "terminal_lease_count",
+    "cleanup_verified",
+)
+
+
 def _parse(value: str | None) -> dt.datetime | None:
     return dt.datetime.fromisoformat(value) if value else None
 
@@ -315,6 +342,95 @@ def export_survival_csv(
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=SURVIVAL_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+    return len(rows)
+
+
+def stability_window_rows(
+    store: TraceStore,
+    run_id: str,
+) -> list[dict[str, Any]]:
+    store.run_row(run_id)
+    rows = store.connection.execute(
+        """
+        SELECT w.*, c.campaign_id,
+               COUNT(DISTINCT l.epoch_id) AS canary_epoch_count,
+               COUNT(cl.id) AS lease_count,
+               COALESCE(SUM(CASE WHEN cl.interruptible=1 THEN 1 ELSE 0 END), 0)
+                 AS interruptible_lease_count,
+               COALESCE(SUM(CASE WHEN cl.interruptible=0 THEN 1 ELSE 0 END), 0)
+                 AS matched_control_lease_count,
+               COALESCE(SUM(CASE WHEN cl.provider_ready_at IS NOT NULL THEN 1 ELSE 0 END), 0)
+                 AS provider_ready_lease_count,
+               COALESCE(SUM(CASE WHEN cl.application_ready_at IS NOT NULL THEN 1 ELSE 0 END), 0)
+                 AS application_ready_lease_count,
+               COALESCE(SUM(CASE WHEN cl.censor_reason IS NOT NULL THEN 1 ELSE 0 END), 0)
+                 AS terminal_lease_count
+        FROM stability_windows w
+        JOIN stability_campaigns c ON c.run_id=w.run_id
+        LEFT JOIN stability_window_epochs l ON l.window_id=w.id
+        LEFT JOIN canary_leases cl ON cl.pair_id=l.epoch_id
+        WHERE w.run_id=?
+        GROUP BY w.id
+        ORDER BY w.sequence
+        """,
+        (run_id,),
+    ).fetchall()
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        details = json.loads(row["details_json"])
+        result.append(
+            {
+                "run_id": row["run_id"],
+                "campaign_id": row["campaign_id"],
+                "cohort_name": row["cohort_name"],
+                "window_sequence": row["sequence"],
+                "scheduled_offset_seconds": row["scheduled_offset_seconds"],
+                "scheduled_at": row["scheduled_at"],
+                "scheduled_end_at": row["scheduled_end_at"],
+                "claimed_at": row["claimed_at"],
+                "started_at": row["started_at"],
+                "finished_at": row["finished_at"],
+                "window_status": row["status"],
+                "window_stop_reason": row["stop_reason"],
+                "scheduled_duration_seconds": _duration(
+                    _parse(row["scheduled_at"]),
+                    _parse(row["scheduled_end_at"]),
+                ),
+                "started_lag_seconds": _duration(
+                    _parse(row["scheduled_at"]),
+                    _parse(row["started_at"]),
+                ),
+                "observed_duration_seconds": _duration(
+                    _parse(row["started_at"]),
+                    _parse(row["finished_at"]),
+                ),
+                "canary_epoch_count": row["canary_epoch_count"],
+                "lease_count": row["lease_count"],
+                "interruptible_lease_count": row["interruptible_lease_count"],
+                "matched_control_lease_count": row["matched_control_lease_count"],
+                "provider_ready_lease_count": row["provider_ready_lease_count"],
+                "application_ready_lease_count": row[
+                    "application_ready_lease_count"
+                ],
+                "terminal_lease_count": row["terminal_lease_count"],
+                "cleanup_verified": details.get("cleanup_verified"),
+            }
+        )
+    return result
+
+
+def export_stability_window_csv(
+    store: TraceStore,
+    run_id: str,
+    output: str | pathlib.Path,
+) -> int:
+    rows = stability_window_rows(store, run_id)
+    path = pathlib.Path(output)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=STABILITY_WINDOW_FIELDS)
         writer.writeheader()
         writer.writerows(rows)
     return len(rows)

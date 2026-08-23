@@ -454,6 +454,422 @@ class TraceStore:
             )
         return True
 
+    def ensure_stability_campaign(
+        self,
+        config: ExperimentConfig,
+        config_document: dict[str, Any],
+        *,
+        campaign_id: str,
+        cohort_name: str,
+        started_at: str,
+        windows: list[dict[str, Any]],
+        collector_revision: str | None = None,
+        python_version: str | None = None,
+    ) -> tuple[str, bool]:
+        if not campaign_id.strip() or not cohort_name.strip():
+            raise ValueError("stability campaign ID and cohort name are required")
+        if not windows:
+            raise ValueError("stability campaign requires scheduled windows")
+        config_json = json_text(
+            {"experiment": dataclasses.asdict(config), "document": config_document}
+        )
+        config_hash = hashlib.sha256(config_json.encode()).hexdigest()
+        with self._lock:
+            self.connection.execute("BEGIN IMMEDIATE")
+            try:
+                existing = self.connection.execute(
+                    "SELECT * FROM stability_campaigns WHERE campaign_id=?",
+                    (campaign_id,),
+                ).fetchone()
+                if existing is not None:
+                    if (
+                        existing["config_hash"] != config_hash
+                        or existing["cohort_name"] != cohort_name
+                    ):
+                        raise ValueError(
+                            "stability database already uses a different "
+                            "experiment definition"
+                        )
+                    self.connection.commit()
+                    return str(existing["run_id"]), False
+
+                run_id = str(uuid.uuid4())
+                self.connection.execute(
+                    """
+                    INSERT INTO experiment_runs
+                      (id, protocol_version, config_hash, config_json, host_id,
+                       vantage_id, collector_revision, python_version, started_at,
+                       status, total_budget_usd, max_active_gpus_per_provider)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)
+                    """,
+                    (
+                        run_id,
+                        config.protocol_version,
+                        config_hash,
+                        config_json,
+                        config.host_id,
+                        config.vantage_id,
+                        collector_revision,
+                        python_version,
+                        started_at,
+                        config.total_budget_usd,
+                        config.max_active_gpus_per_provider,
+                    ),
+                )
+                self.connection.execute(
+                    """
+                    INSERT INTO stability_campaigns
+                      (campaign_id, run_id, cohort_name, config_hash, created_at,
+                       status)
+                    VALUES (?, ?, ?, ?, ?, 'running')
+                    """,
+                    (campaign_id, run_id, cohort_name, config_hash, started_at),
+                )
+                for window in windows:
+                    self.connection.execute(
+                        """
+                        INSERT INTO stability_windows
+                          (id, run_id, cohort_name, sequence,
+                           scheduled_offset_seconds, scheduled_at,
+                           scheduled_end_at, status, details_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, 'scheduled', ?)
+                        """,
+                        (
+                            str(uuid.uuid4()),
+                            run_id,
+                            cohort_name,
+                            int(window["sequence"]),
+                            float(window["scheduled_offset_seconds"]),
+                            str(window["scheduled_at"]),
+                            str(window["scheduled_end_at"]),
+                            json_text(window.get("details") or {}),
+                        ),
+                    )
+                self.connection.commit()
+                return run_id, True
+            except Exception:
+                self.connection.rollback()
+                raise
+
+    def stability_campaign_row(self, campaign_id: str) -> sqlite3.Row:
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT * FROM stability_campaigns WHERE campaign_id=?",
+                (campaign_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(campaign_id)
+        return row
+
+    def stability_campaign_for_run(self, run_id: str) -> sqlite3.Row | None:
+        with self._lock:
+            return self.connection.execute(
+                "SELECT * FROM stability_campaigns WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+
+    def resume_stability_campaign(self, run_id: str) -> None:
+        with self._lock, self.connection:
+            campaign = self.connection.execute(
+                "SELECT * FROM stability_campaigns WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+            if campaign is None:
+                raise KeyError(run_id)
+            self.connection.execute(
+                """
+                UPDATE stability_campaigns
+                SET status='running', finished_at=NULL WHERE run_id=?
+                """,
+                (run_id,),
+            )
+            self.connection.execute(
+                """
+                UPDATE experiment_runs
+                SET status='running', finished_at=NULL,
+                    termination_reason='resumed_after_collector_loss'
+                WHERE id=?
+                """,
+                (run_id,),
+            )
+
+    def claim_due_stability_window(
+        self,
+        campaign_id: str,
+        *,
+        due_at: str,
+    ) -> tuple[str, sqlite3.Row | None]:
+        with self._lock:
+            self.connection.execute("BEGIN IMMEDIATE")
+            try:
+                campaign = self.connection.execute(
+                    "SELECT * FROM stability_campaigns WHERE campaign_id=?",
+                    (campaign_id,),
+                ).fetchone()
+                if campaign is None:
+                    raise KeyError(campaign_id)
+                if campaign["status"] != "running":
+                    self.connection.commit()
+                    return "complete", None
+                active = self.connection.execute(
+                    """
+                    SELECT * FROM stability_windows
+                    WHERE run_id=? AND cohort_name=?
+                      AND status IN ('claimed', 'running')
+                    ORDER BY sequence LIMIT 1
+                    """,
+                    (campaign["run_id"], campaign["cohort_name"]),
+                ).fetchone()
+                if active is not None:
+                    self.connection.commit()
+                    return "busy", active
+                unresolved = self.connection.execute(
+                    """
+                    SELECT
+                      (SELECT COUNT(*) FROM capacity_replicas
+                       WHERE provider_resource_id IS NOT NULL AND cleaned_at IS NULL)
+                      +
+                      (SELECT COUNT(*) FROM canary_leases
+                       WHERE provider_resource_id IS NOT NULL AND cleaned_at IS NULL)
+                    """
+                ).fetchone()[0]
+                if unresolved:
+                    self.connection.commit()
+                    return "cleanup_blocked", None
+                finished_at = utc_now()
+                self.connection.execute(
+                    """
+                    UPDATE stability_windows
+                    SET status='missed', stop_reason='external_scheduler_late',
+                        finished_at=?
+                    WHERE run_id=? AND cohort_name=? AND status='scheduled'
+                      AND scheduled_end_at<=?
+                    """,
+                    (
+                        finished_at,
+                        campaign["run_id"],
+                        campaign["cohort_name"],
+                        due_at,
+                    ),
+                )
+                window = self.connection.execute(
+                    """
+                    SELECT * FROM stability_windows
+                    WHERE run_id=? AND cohort_name=? AND status='scheduled'
+                      AND scheduled_at<=? AND scheduled_end_at>?
+                    ORDER BY scheduled_at, sequence LIMIT 1
+                    """,
+                    (
+                        campaign["run_id"],
+                        campaign["cohort_name"],
+                        due_at,
+                        due_at,
+                    ),
+                ).fetchone()
+                if window is None:
+                    remaining = self.connection.execute(
+                        """
+                        SELECT COUNT(*) FROM stability_windows
+                        WHERE run_id=? AND cohort_name=? AND status='scheduled'
+                        """,
+                        (campaign["run_id"], campaign["cohort_name"]),
+                    ).fetchone()[0]
+                    self.connection.commit()
+                    return ("idle" if remaining else "complete"), None
+                updated = self.connection.execute(
+                    """
+                    UPDATE stability_windows
+                    SET status='claimed', claimed_at=?
+                    WHERE id=? AND status='scheduled'
+                    """,
+                    (finished_at, window["id"]),
+                )
+                if updated.rowcount != 1:
+                    self.connection.rollback()
+                    return "busy", None
+                claimed = self.connection.execute(
+                    "SELECT * FROM stability_windows WHERE id=?",
+                    (window["id"],),
+                ).fetchone()
+                self.connection.commit()
+                return "claimed", claimed
+            except Exception:
+                self.connection.rollback()
+                raise
+
+    def mark_stability_window_started(
+        self,
+        window_id: str,
+        *,
+        started_at: str,
+    ) -> None:
+        with self._lock, self.connection:
+            updated = self.connection.execute(
+                """
+                UPDATE stability_windows SET status='running', started_at=?
+                WHERE id=? AND status='claimed'
+                """,
+                (started_at, window_id),
+            )
+            if updated.rowcount != 1:
+                raise ValueError("stability window is not claimed")
+
+    def finish_stability_window(
+        self,
+        window_id: str,
+        *,
+        status: str,
+        stop_reason: str | None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        with self._lock, self.connection:
+            row = self.connection.execute(
+                "SELECT details_json FROM stability_windows WHERE id=?",
+                (window_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(window_id)
+            merged = json.loads(row["details_json"])
+            merged.update(details or {})
+            self.connection.execute(
+                """
+                UPDATE stability_windows
+                SET status=?, stop_reason=?, finished_at=?, details_json=?
+                WHERE id=?
+                """,
+                (status, stop_reason, utc_now(), json_text(merged), window_id),
+            )
+
+    def finish_active_stability_windows(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        stop_reason: str,
+        details: dict[str, Any] | None = None,
+    ) -> int:
+        with self._lock:
+            rows = self.connection.execute(
+                """
+                SELECT id, details_json FROM stability_windows
+                WHERE run_id=? AND status IN ('claimed', 'running')
+                """,
+                (run_id,),
+            ).fetchall()
+            with self.connection:
+                for row in rows:
+                    self.connection.execute(
+                        """
+                        UPDATE stability_windows
+                        SET status=?, stop_reason=?, finished_at=?, details_json=?
+                        WHERE id=?
+                        """,
+                        (
+                            status,
+                            stop_reason,
+                            utc_now(),
+                            merge_json_text(row["details_json"], details),
+                            row["id"],
+                        ),
+                    )
+        return len(rows)
+
+    def stop_remaining_stability_windows(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        stop_reason: str,
+    ) -> None:
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                UPDATE stability_windows
+                SET status=?, stop_reason=?, finished_at=?
+                WHERE run_id=? AND status='scheduled'
+                """,
+                (status, stop_reason, utc_now(), run_id),
+            )
+
+    def link_stability_window_epoch(self, window_id: str, epoch_id: str) -> None:
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO stability_window_epochs (window_id, epoch_id)
+                VALUES (?, ?)
+                """,
+                (window_id, epoch_id),
+            )
+
+    def stability_window_epoch_rows(self, window_id: str) -> list[sqlite3.Row]:
+        with self._lock:
+            return self.connection.execute(
+                """
+                SELECT e.* FROM canary_epochs e
+                JOIN stability_window_epochs l ON l.epoch_id=e.id
+                WHERE l.window_id=? ORDER BY e.sequence
+                """,
+                (window_id,),
+            ).fetchall()
+
+    def stability_window_rows(self, run_id: str) -> list[sqlite3.Row]:
+        with self._lock:
+            return self.connection.execute(
+                """
+                SELECT * FROM stability_windows
+                WHERE run_id=? ORDER BY sequence
+                """,
+                (run_id,),
+            ).fetchall()
+
+    def finish_stability_campaign_if_complete(
+        self,
+        campaign_id: str,
+        *,
+        campaign_status: str = "complete",
+        run_status: str = "complete",
+        termination_reason: str | None = None,
+    ) -> bool:
+        with self._lock, self.connection:
+            campaign = self.connection.execute(
+                "SELECT * FROM stability_campaigns WHERE campaign_id=?",
+                (campaign_id,),
+            ).fetchone()
+            if campaign is None:
+                raise KeyError(campaign_id)
+            remaining = self.connection.execute(
+                """
+                SELECT COUNT(*) FROM stability_windows
+                WHERE run_id=? AND cohort_name=?
+                  AND status IN ('scheduled', 'claimed', 'running')
+                """,
+                (campaign["run_id"], campaign["cohort_name"]),
+            ).fetchone()[0]
+            if remaining:
+                return False
+            finished_at = utc_now()
+            self.connection.execute(
+                """
+                UPDATE stability_campaigns
+                SET status=?, finished_at=? WHERE campaign_id=?
+                """,
+                (campaign_status, finished_at, campaign_id),
+            )
+            self.connection.execute(
+                """
+                UPDATE experiment_runs
+                SET status=?, finished_at=?, termination_reason=?
+                WHERE id=?
+                """,
+                (
+                    run_status,
+                    finished_at,
+                    termination_reason,
+                    campaign["run_id"],
+                ),
+            )
+        return True
+
     def finish_run(self, run_id: str, status: str, reason: str | None = None) -> None:
         with self._lock, self.connection:
             self.connection.execute(

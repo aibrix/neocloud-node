@@ -292,6 +292,41 @@ class CanaryCohortPlan:
 
 
 @dataclasses.dataclass(frozen=True)
+class StabilitySchedulePlan:
+    window_count: int
+    schedule_seed: int
+    initial_delay_seconds: float
+    interval_seconds: float
+    jitter_seconds: float
+
+    def __post_init__(self) -> None:
+        if self.window_count <= 0:
+            raise ValueError("stability window_count must be positive")
+        if self.initial_delay_seconds < 0:
+            raise ValueError("stability initial_delay_seconds must not be negative")
+        if self.interval_seconds <= 0:
+            raise ValueError("stability interval_seconds must be positive")
+        if self.jitter_seconds < 0:
+            raise ValueError("stability jitter_seconds must not be negative")
+
+    def offsets(self) -> tuple[float, ...]:
+        rng = random.Random(self.schedule_seed)
+        return tuple(
+            max(
+                0.0,
+                self.initial_delay_seconds
+                + sequence * self.interval_seconds
+                + (
+                    rng.uniform(-self.jitter_seconds, self.jitter_seconds)
+                    if self.jitter_seconds
+                    else 0.0
+                ),
+            )
+            for sequence in range(self.window_count)
+        )
+
+
+@dataclasses.dataclass(frozen=True)
 class ControlTrialPlan:
     cell: TrialCell
     duration_seconds: float
@@ -409,6 +444,7 @@ class PilotPlan:
     completion_window_cohorts: tuple[CompletionWindowCohortPlan, ...]
     canary_trials: tuple[CanaryTrialPlan, ...]
     canary_cohorts: tuple[CanaryCohortPlan, ...]
+    stability_schedule: StabilitySchedulePlan
     control_cohorts: tuple[ControlCohortPlan, ...]
     raw_document: dict[str, Any]
 
@@ -538,6 +574,13 @@ class PilotPlan:
             raise ValueError(
                 "control cohorts must run in a dedicated cross-provider plan"
             )
+        offsets = self.stability_schedule.offsets()
+        for previous, current in zip(offsets, offsets[1:]):
+            if current < previous + self.duration_seconds:
+                raise ValueError(
+                    "stability windows must not overlap; increase interval_seconds "
+                    "or reduce jitter_seconds"
+                )
 
     @property
     def has_active_work(self) -> bool:
@@ -756,9 +799,28 @@ def load_plan(
         )
         for item in raw.get("control_cohorts") or []
     )
+    duration_seconds = float(raw.get("duration_seconds") or 0)
+    schedule_document = raw.get("stability_schedule") or {}
+    if not isinstance(schedule_document, dict):
+        raise ValueError("stability_schedule must be an object")
+    stability_schedule = StabilitySchedulePlan(
+        window_count=int(schedule_document.get("window_count", 1)),
+        schedule_seed=int(
+            schedule_document.get("schedule_seed")
+            if schedule_document.get("schedule_seed") is not None
+            else 0
+        ),
+        initial_delay_seconds=float(
+            schedule_document.get("initial_delay_seconds", 0)
+        ),
+        interval_seconds=float(
+            schedule_document.get("interval_seconds", duration_seconds)
+        ),
+        jitter_seconds=float(schedule_document.get("jitter_seconds", 0)),
+    )
     return PilotPlan(
         experiment=experiment,
-        duration_seconds=float(raw.get("duration_seconds") or 0),
+        duration_seconds=duration_seconds,
         passive_interval_seconds=float(raw.get("passive_interval_seconds") or 0),
         host_interval_seconds=float(raw.get("host_interval_seconds") or 0),
         canary_interval_seconds=float(raw.get("canary_interval_seconds") or 0),
@@ -769,6 +831,7 @@ def load_plan(
         completion_window_cohorts=completion_window_cohorts,
         canary_trials=canary_trials,
         canary_cohorts=canary_cohorts,
+        stability_schedule=stability_schedule,
         control_cohorts=control_cohorts,
         raw_document=raw,
     )
@@ -1067,6 +1130,278 @@ class PilotSupervisor:
                 else execution.stop_reason
             ),
             "cleanup_verified": execution.cleanup_verified,
+            "campaign_complete": campaign_complete,
+        }
+
+    def stability_run(
+        self,
+        plan: PilotPlan,
+        *,
+        campaign_id: str,
+        enable_active: bool = False,
+        now: dt.datetime | None = None,
+    ) -> dict[str, Any]:
+        if not enable_active:
+            raise ActiveRunDisabled("stability run requires --enable-active")
+        if len(plan.canary_cohorts) != 1:
+            raise ValueError("stability run requires exactly one canary cohort")
+        cohort = plan.canary_cohorts[0]
+        required_providers = {trial.cell.provider for trial in cohort.cells}
+        missing = sorted(required_providers - self.providers.keys())
+        if missing:
+            raise ValueError(f"missing provider clients: {', '.join(missing)}")
+        current = now or dt.datetime.now(UTC)
+        if current.tzinfo is None:
+            raise ValueError("stability run now must be timezone-aware")
+        current = current.astimezone(UTC)
+
+        windows = []
+        for sequence, offset in enumerate(plan.stability_schedule.offsets()):
+            scheduled_at = current + dt.timedelta(seconds=offset)
+            windows.append(
+                {
+                    "sequence": sequence,
+                    "scheduled_offset_seconds": offset,
+                    "scheduled_at": scheduled_at.isoformat(),
+                    "scheduled_end_at": (
+                        scheduled_at + dt.timedelta(seconds=plan.duration_seconds)
+                    ).isoformat(),
+                    "details": {
+                        "schedule_seed": plan.stability_schedule.schedule_seed,
+                        "window_duration_seconds": plan.duration_seconds,
+                        "max_pairs": cohort.max_pairs,
+                    },
+                }
+            )
+        run_id, campaign_created = self.store.ensure_stability_campaign(
+            plan.experiment,
+            plan.raw_document,
+            campaign_id=campaign_id,
+            cohort_name=cohort.name,
+            started_at=current.isoformat(),
+            windows=windows,
+            python_version=platform.python_version(),
+        )
+        campaign = self.store.stability_campaign_row(campaign_id)
+        if campaign["status"] != "running":
+            return {
+                "campaign_id": campaign_id,
+                "campaign_created": campaign_created,
+                "run_id": run_id,
+                "cohort_name": cohort.name,
+                "status": str(campaign["status"]),
+                "window_id": None,
+            }
+
+        expected_monotonic = self.monotonic()
+        host_monitor = HostMonitor(
+            self.store,
+            network_control_url=plan.network_control_url,
+            monotonic=self.monotonic,
+        )
+        passive = PassiveWorker(self.store, self.providers.values())
+        initial_host = host_monitor.sample(run_id, expected_monotonic)
+        with self._latest_host_lock:
+            self._latest_host_id = initial_host.id
+            self._latest_host_healthy = initial_host.healthy
+        passive.run_once(
+            run_id,
+            gpu_counts=plan.gpu_counts,
+            host_observation_id=initial_host.id,
+        )
+
+        claim_status, window = self.store.claim_due_stability_window(
+            campaign_id,
+            due_at=current.isoformat(),
+        )
+        if claim_status == "complete":
+            self.store.finish_stability_campaign_if_complete(campaign_id)
+        if claim_status != "claimed" or window is None:
+            return {
+                "campaign_id": campaign_id,
+                "campaign_created": campaign_created,
+                "run_id": run_id,
+                "cohort_name": cohort.name,
+                "status": claim_status,
+                "window_id": window["id"] if window is not None else None,
+            }
+
+        sequence = int(window["sequence"])
+        if sequence < 0 or sequence >= plan.stability_schedule.window_count:
+            raise RuntimeError(
+                f"persisted stability window sequence {sequence} is not in the plan"
+            )
+        expected_offset = plan.stability_schedule.offsets()[sequence]
+        if abs(float(window["scheduled_offset_seconds"]) - expected_offset) > 1e-6:
+            raise RuntimeError("persisted stability window does not match the plan")
+        scheduled_end = dt.datetime.fromisoformat(window["scheduled_end_at"])
+        remaining_seconds = (
+            scheduled_end.astimezone(UTC) - current
+        ).total_seconds()
+        if remaining_seconds <= 0:
+            raise RuntimeError("claimed stability window has already ended")
+        hard_deadline = self.monotonic() + remaining_seconds
+        self.store.mark_stability_window_started(
+            window["id"],
+            started_at=current.isoformat(),
+        )
+
+        guard = BudgetGuard(self.store, run_id, plan.experiment)
+        threads = [
+            threading.Thread(
+                target=self._host_loop,
+                args=(run_id, host_monitor, plan.host_interval_seconds),
+                name="neocloud-stability-host",
+                daemon=True,
+            ),
+            threading.Thread(
+                target=self._passive_loop,
+                args=(
+                    run_id,
+                    passive,
+                    plan.passive_interval_seconds,
+                    plan.gpu_counts,
+                ),
+                name="neocloud-stability-passive",
+                daemon=True,
+            ),
+        ]
+        for thread in threads:
+            thread.start()
+
+        window_status = "complete"
+        stop_reason: str | None = "window_elapsed"
+        caught_error: Exception | None = None
+        try:
+            completed = self._run_canary_cohort(
+                run_id,
+                cohort,
+                guard=guard,
+                hard_deadline=hard_deadline,
+                sequence_start=len(self.store.canary_epoch_rows(run_id)),
+                stability_window_id=window["id"],
+            )
+            if not completed:
+                epochs = self.store.stability_window_epoch_rows(window["id"])
+                last_status = epochs[-1]["status"] if epochs else "failed"
+                if last_status == "budget_exhausted":
+                    window_status = "budget_exhausted"
+                    stop_reason = "budget_exhausted"
+                    self.store.stop_remaining_stability_windows(
+                        run_id,
+                        status="not_run_budget_exhausted",
+                        stop_reason="budget_exhausted",
+                    )
+                else:
+                    window_status = "cleanup_incomplete"
+                    stop_reason = "provider resources remain unresolved"
+            if window_status == "complete":
+                self.stop_event.wait(max(0.0, hard_deadline - self.monotonic()))
+                if self.stop_event.is_set():
+                    window_status = "stopped"
+                    stop_reason = "operator_stop"
+                    self.store.stop_remaining_stability_windows(
+                        run_id,
+                        status="not_run_operator_stop",
+                        stop_reason="operator_stop",
+                    )
+        except Exception as error:
+            window_status = "failed"
+            stop_reason = f"{type(error).__name__}: {error}"
+            caught_error = error
+        finally:
+            self.stop_event.set()
+            join_timeout = max(
+                plan.host_interval_seconds,
+                plan.passive_interval_seconds,
+            ) + 5
+            for thread in threads:
+                thread.join(timeout=join_timeout)
+            censor_reason = (
+                TerminalReason.RIGHT_CENSORED_COLLECTOR_LOSS
+                if window_status == "failed"
+                else TerminalReason.OPERATOR_CLEANUP
+            )
+            self._censor_unfinished_canaries(run_id, censor_reason)
+            self._cleanup_owned(run_id)
+            unfinished_status = (
+                "collector_loss"
+                if window_status == "failed"
+                else (
+                    "operator_stop"
+                    if window_status == "stopped"
+                    else "cleanup_incomplete"
+                )
+            )
+            self._finish_unfinished_canary_epochs(
+                run_id,
+                status=unfinished_status,
+                reason=censor_reason.value,
+                cleanup_verified=not self.store.owned_resources(run_id),
+            )
+            self._settle_cleaned_canary_epochs(run_id, guard)
+            if self.store.owned_resources(run_id):
+                window_status = "cleanup_incomplete"
+                stop_reason = "provider resources remain unresolved"
+            elif self._worker_errors and window_status == "complete":
+                window_status = "complete_with_sampling_errors"
+                stop_reason = "; ".join(self._worker_errors[-5:])
+            self.store.finish_stability_window(
+                window["id"],
+                status=window_status,
+                stop_reason=stop_reason,
+                details={
+                    "worker_errors": self._worker_errors,
+                    "cleanup_verified": not self.store.owned_resources(run_id),
+                },
+            )
+
+        campaign_finish: dict[str, str | None] = {}
+        if window_status == "budget_exhausted":
+            campaign_finish = {
+                "campaign_status": "budget_exhausted",
+                "run_status": "budget_exhausted",
+                "termination_reason": "budget_exhausted",
+            }
+        elif window_status == "stopped":
+            campaign_finish = {
+                "campaign_status": "stopped",
+                "run_status": "stopped",
+                "termination_reason": "operator_stop",
+            }
+        elif window_status == "cleanup_incomplete":
+            campaign_finish = {
+                "campaign_status": "cleanup_incomplete",
+                "run_status": "cleanup_incomplete",
+                "termination_reason": "provider resources remain unresolved",
+            }
+        elif window_status == "complete_with_sampling_errors":
+            campaign_finish = {
+                "campaign_status": "complete_with_sampling_errors",
+                "run_status": "complete_with_sampling_errors",
+                "termination_reason": stop_reason,
+            }
+        elif window_status == "failed":
+            campaign_finish = {
+                "campaign_status": "failed",
+                "run_status": "failed",
+                "termination_reason": stop_reason,
+            }
+        campaign_complete = self.store.finish_stability_campaign_if_complete(
+            campaign_id,
+            **campaign_finish,
+        )
+        if caught_error is not None:
+            raise caught_error
+        return {
+            "campaign_id": campaign_id,
+            "campaign_created": campaign_created,
+            "run_id": run_id,
+            "cohort_name": cohort.name,
+            "status": "executed",
+            "window_id": window["id"],
+            "window_sequence": sequence,
+            "window_status": window_status,
             "campaign_complete": campaign_complete,
         }
 
@@ -1831,6 +2166,7 @@ class PilotSupervisor:
         selection_seed: int | None,
         guard: BudgetGuard,
         hard_deadline: float,
+        stability_window_id: str | None = None,
     ) -> bool:
         epoch_id = self.store.start_canary_epoch(
             run_id,
@@ -1849,6 +2185,8 @@ class PilotSupervisor:
                 "settlement_safety_multiplier": trial.settlement_safety_multiplier,
             },
         )
+        if stability_window_id is not None:
+            self.store.link_stability_window_epoch(stability_window_id, epoch_id)
         try:
             guard.reserve(
                 trial.cell.provider,
@@ -1908,27 +2246,33 @@ class PilotSupervisor:
         *,
         guard: BudgetGuard,
         hard_deadline: float,
-    ) -> None:
+        sequence_start: int = 0,
+        stability_window_id: str | None = None,
+    ) -> bool:
         rng = random.Random(cohort.selection_seed)
-        for sequence in range(cohort.max_pairs):
+        for _ in range(sequence_start):
+            cohort.select(rng)
+        for local_sequence in range(cohort.max_pairs):
             remaining = hard_deadline - self.monotonic()
             if self.stop_event.is_set() or remaining < cohort.min_remaining_seconds:
-                return
+                return True
             trial, probability = cohort.select(rng)
             completed = self._execute_canary_epoch(
                 run_id,
                 trial,
                 cohort_name=cohort.name,
-                sequence=sequence,
+                sequence=sequence_start + local_sequence,
                 selection_probability=probability,
                 selection_seed=cohort.selection_seed,
                 guard=guard,
                 hard_deadline=hard_deadline,
+                stability_window_id=stability_window_id,
             )
             if not completed:
-                return
+                return False
             if cohort.replacement_delay_seconds:
                 self.stop_event.wait(cohort.replacement_delay_seconds)
+        return True
 
     def _run_control_cohort(
         self,
@@ -2443,6 +2787,7 @@ class PilotSupervisor:
 
     def cleanup_run(self, run_id: str) -> list[object]:
         run = self.store.run_row(run_id)
+        stability_campaign = self.store.stability_campaign_for_run(run_id)
         self._censor_unfinished_canaries(run_id, TerminalReason.OPERATOR_CLEANUP)
         self._cleanup_owned(run_id)
         remaining = list(self.store.owned_resources(run_id))
@@ -2463,6 +2808,33 @@ class PilotSupervisor:
             reason=TerminalReason.OPERATOR_CLEANUP.value,
             cleanup_verified=not remaining,
         )
+        if (
+            stability_campaign is not None
+            and stability_campaign["status"] == "running"
+        ):
+            self.store.finish_active_stability_windows(
+                run_id,
+                status=capacity_status,
+                stop_reason=TerminalReason.OPERATOR_CLEANUP.value,
+                details={"cleanup_verified": not remaining},
+            )
+            self.store.stop_remaining_stability_windows(
+                run_id,
+                status="not_run_operator_stop",
+                stop_reason=TerminalReason.OPERATOR_CLEANUP.value,
+            )
+            self.store.finish_stability_campaign_if_complete(
+                stability_campaign["campaign_id"],
+                campaign_status=(
+                    "cleanup_incomplete" if remaining else "stopped"
+                ),
+                run_status=("cleanup_incomplete" if remaining else "stopped"),
+                termination_reason=(
+                    "provider resources remain unresolved"
+                    if remaining
+                    else "operator cleanup"
+                ),
+            )
         if remaining:
             self.store.finish_run(
                 run_id,
@@ -2482,6 +2854,7 @@ class PilotSupervisor:
     def recover_run(self, run_id: str) -> list[object]:
         self.store.run_row(run_id)
         capacity_campaign = self.store.capacity_campaign_for_run(run_id)
+        stability_campaign = self.store.stability_campaign_for_run(run_id)
         self._censor_unfinished_canaries(
             run_id,
             TerminalReason.RIGHT_CENSORED_COLLECTOR_LOSS,
@@ -2505,7 +2878,55 @@ class PilotSupervisor:
             reason=TerminalReason.RIGHT_CENSORED_COLLECTOR_LOSS.value,
             cleanup_verified=not remaining,
         )
-        if capacity_campaign is not None and not remaining:
+        if (
+            stability_campaign is not None
+            and stability_campaign["status"] == "running"
+        ):
+            recovery_status = (
+                "recovery_cleanup_incomplete" if remaining else "collector_loss"
+            )
+            self.store.finish_active_stability_windows(
+                run_id,
+                status=recovery_status,
+                stop_reason=TerminalReason.RIGHT_CENSORED_COLLECTOR_LOSS.value,
+                details={
+                    "recovered": True,
+                    "cleanup_verified": not remaining,
+                },
+            )
+            has_future = any(
+                row["status"] == "scheduled"
+                for row in self.store.stability_window_rows(run_id)
+            )
+            if not remaining and has_future:
+                self.store.resume_stability_campaign(run_id)
+            elif not has_future:
+                self.store.finish_stability_campaign_if_complete(
+                    stability_campaign["campaign_id"],
+                    campaign_status=(
+                        "recovery_cleanup_incomplete"
+                        if remaining
+                        else "recovered_after_collector_loss"
+                    ),
+                    run_status=(
+                        "recovery_cleanup_incomplete"
+                        if remaining
+                        else "recovered_after_collector_loss"
+                    ),
+                    termination_reason=(
+                        "provider resources remain unresolved"
+                        if remaining
+                        else "collector process loss"
+                    ),
+                )
+        if stability_campaign is not None:
+            if remaining:
+                self.store.finish_run(
+                    run_id,
+                    "recovery_cleanup_incomplete",
+                    "provider resources remain unresolved",
+                )
+        elif capacity_campaign is not None and not remaining:
             self.store.resume_capacity_campaign(run_id)
         else:
             self.store.finish_run(

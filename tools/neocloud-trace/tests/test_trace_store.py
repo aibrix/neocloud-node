@@ -195,6 +195,51 @@ class TraceStoreTest(unittest.TestCase):
         self.assertEqual(second_status, "busy")
         self.assertEqual(first_epoch["id"], second_epoch["id"])
 
+    def test_stability_window_claim_is_idempotent_across_store_connections(self):
+        now = dt.datetime(2026, 8, 11, tzinfo=dt.timezone.utc)
+        windows = [
+            {
+                "sequence": 0,
+                "scheduled_offset_seconds": 0,
+                "scheduled_at": now.isoformat(),
+                "scheduled_end_at": (now + dt.timedelta(minutes=5)).isoformat(),
+            }
+        ]
+        first_run, first_created = self.store.ensure_stability_campaign(
+            self.config(),
+            {"mode": "stability"},
+            campaign_id="shared-stability",
+            cohort_name="survival",
+            started_at=now.isoformat(),
+            windows=windows,
+        )
+        other = TraceStore(self.db_path)
+        self.addCleanup(other.close)
+        second_run, second_created = other.ensure_stability_campaign(
+            self.config(),
+            {"mode": "stability"},
+            campaign_id="shared-stability",
+            cohort_name="survival",
+            started_at=now.isoformat(),
+            windows=windows,
+        )
+
+        first_status, first_window = self.store.claim_due_stability_window(
+            "shared-stability",
+            due_at=now.isoformat(),
+        )
+        second_status, second_window = other.claim_due_stability_window(
+            "shared-stability",
+            due_at=now.isoformat(),
+        )
+
+        self.assertTrue(first_created)
+        self.assertFalse(second_created)
+        self.assertEqual(first_run, second_run)
+        self.assertEqual(first_status, "claimed")
+        self.assertEqual(second_status, "busy")
+        self.assertEqual(first_window["id"], second_window["id"])
+
     def test_persists_completion_window_assignment_and_decision(self):
         run_id = self.store.start_run(self.config(), config_document={"mode": "test"})
         cell = TrialCell(

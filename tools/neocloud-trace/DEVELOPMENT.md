@@ -136,6 +136,17 @@ When adding or changing a command:
 Do not add a new top-level command merely to select another plan section. Prefer
 a single-purpose plan and a shared execution path.
 
+The active command contracts are intentionally narrow:
+
+- `tick` accepts one `capacity_cohorts` entry with `max_trials=1`;
+- `run` accepts one `canary_cohorts` entry and an optional top-level
+  `stability_schedule`;
+- both reject every other active section before opening SQLite or constructing
+  provider clients.
+
+Keep the command-level validation separate from lower-level historical runners
+until their stored data no longer needs compatibility support.
+
 ## Storage and Data Changes
 
 The schema is defined in `src/neocloud_trace/storage/schema.sql`; persistence
@@ -150,6 +161,15 @@ For schema or exporter changes:
 4. keep instance counts, GPU depth, estimates, and provider bills explicit;
 5. update fixture tests and user-facing documentation;
 6. verify old databases or provide a deliberate migration path.
+
+Stability has two distinct row grains. `stability_windows` is the scheduled
+outer sampling unit and must include missed windows. `canary_epochs` is an
+actually selected pair inside a window; `stability_window_epochs` provides the
+explicit link. Do not derive the outer denominator from canary rows.
+
+Campaign tests should cover schedule materialization, idempotent claims from two
+SQLite connections, missed slots, recovery with future work preserved, cleanup
+failure, and exports containing zero-observation scheduled rows.
 
 Local databases, `-wal`/`-shm` files, exports, logs, and temporary results are
 ignored by Git. Use a temporary or `data/neocloud-trace/` path for development
@@ -191,6 +211,9 @@ Before handing off a change:
 python3 -m pytest tools/neocloud-trace/tests -q
 git diff --check
 ```
+
+For storage-resource changes, also build a wheel and verify that
+`neocloud_trace/storage/schema.sql` is present in it.
 
 Also inspect the public help for every changed command:
 
