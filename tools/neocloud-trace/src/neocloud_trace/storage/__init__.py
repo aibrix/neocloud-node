@@ -1,5 +1,5 @@
 """Durable SQLite storage for trace experiments."""
 
-from .store import ResearchStore
+from .store import TraceStore
 
-__all__ = ["ResearchStore"]
+__all__ = ["TraceStore"]

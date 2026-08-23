@@ -6,23 +6,23 @@ import json
 import pathlib
 from typing import Any
 
-from ..model import CensorReason
-from ..storage import ResearchStore
+from ..model import TerminalReason
+from ..storage import TraceStore
 
 
 PRE_READY_EVENTS = {
-    CensorReason.LAUNCH_FAILURE.value,
-    CensorReason.PROVIDER_PRE_READY_FAILURE.value,
+    TerminalReason.LAUNCH_FAILURE.value,
+    TerminalReason.PROVIDER_PRE_READY_FAILURE.value,
 }
 POST_READY_INTERRUPTION_EVENTS = {
-    CensorReason.MACHINE_REPLACEMENT.value,
-    CensorReason.PROVIDER_INTERRUPTION_CANDIDATE.value,
-    CensorReason.PROVIDER_UNHEALTHY.value,
+    TerminalReason.MACHINE_REPLACEMENT.value,
+    TerminalReason.PROVIDER_INTERRUPTION_CANDIDATE.value,
+    TerminalReason.PROVIDER_UNHEALTHY.value,
 }
 RIGHT_CENSOR_REASONS = {
-    CensorReason.OPERATOR_CLEANUP.value,
-    CensorReason.RIGHT_CENSORED_COLLECTOR_LOSS.value,
-    CensorReason.RIGHT_CENSORED_PLANNED_END.value,
+    TerminalReason.OPERATOR_CLEANUP.value,
+    TerminalReason.RIGHT_CENSORED_COLLECTOR_LOSS.value,
+    TerminalReason.RIGHT_CENSORED_PLANNED_END.value,
 }
 
 
@@ -123,54 +123,29 @@ CAPACITY_DEPTH_FIELDS = (
 )
 
 
-COMPLETION_WINDOW_FIELDS = (
+STABILITY_WINDOW_FIELDS = (
     "run_id",
+    "campaign_id",
     "cohort_name",
-    "epoch_sequence",
-    "arm_name",
-    "launch_fraction",
-    "assignment_probability",
-    "assignment_seed",
-    "provider",
-    "sku",
-    "gpu_type",
-    "region",
-    "datacenter",
-    "resource_class",
-    "market",
-    "target_depth",
-    "release_at",
-    "allocation_deadline_at",
-    "planned_launch_at",
-    "released_at",
-    "actual_decision_at",
-    "planned_wait_seconds",
-    "actual_wait_seconds",
-    "decision_lag_seconds",
-    "release_quote_observed_at",
-    "release_stock_status",
-    "release_advertised_available",
-    "release_quoted_price_usd_hr",
-    "release_spot_price_usd_hr",
-    "decision_quote_observed_at",
-    "decision_stock_status",
-    "decision_advertised_available",
-    "decision_quoted_price_usd_hr",
-    "decision_spot_price_usd_hr",
-    "quoted_price_delta_usd_hr",
+    "window_sequence",
+    "scheduled_offset_seconds",
+    "scheduled_at",
+    "scheduled_end_at",
+    "claimed_at",
+    "started_at",
+    "finished_at",
     "window_status",
     "window_stop_reason",
-    "capacity_epoch_id",
-    "capacity_status",
-    "requested_depth",
-    "accepted_depth",
-    "provider_ready_depth",
-    "application_ready_depth",
-    "provider_sla_met",
-    "application_sla_met",
-    "first_failed_stage",
-    "failure_class",
-    "estimated_cost_usd",
+    "scheduled_duration_seconds",
+    "started_lag_seconds",
+    "observed_duration_seconds",
+    "canary_epoch_count",
+    "lease_count",
+    "interruptible_lease_count",
+    "matched_control_lease_count",
+    "provider_ready_lease_count",
+    "application_ready_lease_count",
+    "terminal_lease_count",
     "cleanup_verified",
 )
 
@@ -185,7 +160,7 @@ def _duration(start: dt.datetime | None, end: dt.datetime | None) -> float | Non
     return max(0.0, (end - start).total_seconds())
 
 
-def survival_rows(store: ResearchStore, run_id: str) -> list[dict[str, Any]]:
+def survival_rows(store: TraceStore, run_id: str) -> list[dict[str, Any]]:
     store.run_row(run_id)
     leases = store.connection.execute(
         """
@@ -193,7 +168,7 @@ def survival_rows(store: ResearchStore, run_id: str) -> list[dict[str, Any]]:
                e.selection_probability, e.selection_seed,
                e.details_json epoch_details_json
         FROM canary_leases l
-        LEFT JOIN canary_epochs e ON e.id=l.pair_id
+        JOIN canary_epochs e ON e.id=l.pair_id
         WHERE l.run_id=?
         ORDER BY l.created_at, l.interruptible DESC
         """,
@@ -218,24 +193,13 @@ def survival_rows(store: ResearchStore, run_id: str) -> list[dict[str, Any]]:
         terminal = _parse(row["event_at"] or row["cleaned_at"])
         reason = row["censor_reason"]
         pre_ready_terminal = application_ready or terminal
-        epoch_details = (
-            json.loads(row["epoch_details_json"])
-            if row["epoch_details_json"]
-            else {}
-        )
+        epoch_details = json.loads(row["epoch_details_json"])
         group_size = len(pairs[str(row["pair_id"])])
-        cohort_design = epoch_details.get("design")
-        if cohort_design is None:
-            cohort_design = (
-                "matched_interruptible_control"
-                if group_size == 2
-                else "legacy_unspecified"
-            )
         result.append(
             {
                 "run_id": row["run_id"],
-                "cohort_name": row["cohort_name"] or "legacy",
-                "cohort_design": cohort_design,
+                "cohort_name": row["cohort_name"],
+                "cohort_design": epoch_details["design"],
                 "epoch_sequence": row["epoch_sequence"],
                 "selection_probability": row["selection_probability"],
                 "selection_seed": row["selection_seed"],
@@ -258,7 +222,9 @@ def survival_rows(store: ResearchStore, run_id: str) -> list[dict[str, Any]]:
                 "planned_end_at": row["planned_end_at"],
                 "terminal_reason": reason,
                 "time_to_provider_ready_seconds": _duration(created, provider_ready),
-                "time_to_application_ready_seconds": _duration(created, application_ready),
+                "time_to_application_ready_seconds": _duration(
+                    created, application_ready
+                ),
                 "pre_provider_ready_exposure_seconds": _duration(
                     created,
                     provider_ready or terminal,
@@ -278,8 +244,8 @@ def survival_rows(store: ResearchStore, run_id: str) -> list[dict[str, Any]]:
                     provider_ready is not None
                     and reason
                     not in {
-                        CensorReason.LAUNCH_FAILURE.value,
-                        CensorReason.PAIR_SETUP_FAILURE.value,
+                        TerminalReason.LAUNCH_FAILURE.value,
+                        TerminalReason.PAIR_SETUP_FAILURE.value,
                     }
                 ),
                 "pre_ready_exposure_seconds": _duration(created, pre_ready_terminal),
@@ -289,15 +255,15 @@ def survival_rows(store: ResearchStore, run_id: str) -> list[dict[str, Any]]:
                     reason in POST_READY_INTERRUPTION_EVENTS
                 ),
                 "application_failure_event": int(
-                    reason == CensorReason.APPLICATION_FAILURE.value
+                    reason == TerminalReason.APPLICATION_FAILURE.value
                 ),
                 "right_censored": int(reason in RIGHT_CENSOR_REASONS),
                 "post_ready_analysis_eligible": int(
                     application_ready is not None
                     and reason
                     not in {
-                        CensorReason.LAUNCH_FAILURE.value,
-                        CensorReason.PAIR_SETUP_FAILURE.value,
+                        TerminalReason.LAUNCH_FAILURE.value,
+                        TerminalReason.PAIR_SETUP_FAILURE.value,
                     }
                 ),
             }
@@ -306,7 +272,7 @@ def survival_rows(store: ResearchStore, run_id: str) -> list[dict[str, Any]]:
 
 
 def export_survival_csv(
-    store: ResearchStore,
+    store: TraceStore,
     run_id: str,
     output: str | pathlib.Path,
 ) -> int:
@@ -320,7 +286,94 @@ def export_survival_csv(
     return len(rows)
 
 
-def capacity_depth_rows(store: ResearchStore, run_id: str) -> list[dict[str, Any]]:
+def stability_window_rows(
+    store: TraceStore,
+    run_id: str,
+) -> list[dict[str, Any]]:
+    store.run_row(run_id)
+    rows = store.connection.execute(
+        """
+        SELECT w.*, c.campaign_id,
+               COUNT(DISTINCT l.epoch_id) AS canary_epoch_count,
+               COUNT(cl.id) AS lease_count,
+               COALESCE(SUM(CASE WHEN cl.interruptible=1 THEN 1 ELSE 0 END), 0)
+                 AS interruptible_lease_count,
+               COALESCE(SUM(CASE WHEN cl.interruptible=0 THEN 1 ELSE 0 END), 0)
+                 AS matched_control_lease_count,
+               COALESCE(SUM(CASE WHEN cl.provider_ready_at IS NOT NULL THEN 1 ELSE 0 END), 0)
+                 AS provider_ready_lease_count,
+               COALESCE(SUM(CASE WHEN cl.application_ready_at IS NOT NULL THEN 1 ELSE 0 END), 0)
+                 AS application_ready_lease_count,
+               COALESCE(SUM(CASE WHEN cl.censor_reason IS NOT NULL THEN 1 ELSE 0 END), 0)
+                 AS terminal_lease_count
+        FROM stability_windows w
+        JOIN stability_campaigns c ON c.run_id=w.run_id
+        LEFT JOIN stability_window_epochs l ON l.window_id=w.id
+        LEFT JOIN canary_leases cl ON cl.pair_id=l.epoch_id
+        WHERE w.run_id=?
+        GROUP BY w.id
+        ORDER BY w.sequence
+        """,
+        (run_id,),
+    ).fetchall()
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        details = json.loads(row["details_json"])
+        result.append(
+            {
+                "run_id": row["run_id"],
+                "campaign_id": row["campaign_id"],
+                "cohort_name": row["cohort_name"],
+                "window_sequence": row["sequence"],
+                "scheduled_offset_seconds": row["scheduled_offset_seconds"],
+                "scheduled_at": row["scheduled_at"],
+                "scheduled_end_at": row["scheduled_end_at"],
+                "claimed_at": row["claimed_at"],
+                "started_at": row["started_at"],
+                "finished_at": row["finished_at"],
+                "window_status": row["status"],
+                "window_stop_reason": row["stop_reason"],
+                "scheduled_duration_seconds": _duration(
+                    _parse(row["scheduled_at"]),
+                    _parse(row["scheduled_end_at"]),
+                ),
+                "started_lag_seconds": _duration(
+                    _parse(row["scheduled_at"]),
+                    _parse(row["started_at"]),
+                ),
+                "observed_duration_seconds": _duration(
+                    _parse(row["started_at"]),
+                    _parse(row["finished_at"]),
+                ),
+                "canary_epoch_count": row["canary_epoch_count"],
+                "lease_count": row["lease_count"],
+                "interruptible_lease_count": row["interruptible_lease_count"],
+                "matched_control_lease_count": row["matched_control_lease_count"],
+                "provider_ready_lease_count": row["provider_ready_lease_count"],
+                "application_ready_lease_count": row["application_ready_lease_count"],
+                "terminal_lease_count": row["terminal_lease_count"],
+                "cleanup_verified": details.get("cleanup_verified"),
+            }
+        )
+    return result
+
+
+def export_stability_window_csv(
+    store: TraceStore,
+    run_id: str,
+    output: str | pathlib.Path,
+) -> int:
+    rows = stability_window_rows(store, run_id)
+    path = pathlib.Path(output)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=STABILITY_WINDOW_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+    return len(rows)
+
+
+def capacity_depth_rows(store: TraceStore, run_id: str) -> list[dict[str, Any]]:
     store.run_row(run_id)
     epochs = [dict(row) for row in store.capacity_epoch_rows(run_id)]
     trials = {
@@ -330,15 +383,9 @@ def capacity_depth_rows(store: ResearchStore, run_id: str) -> list[dict[str, Any
             (run_id,),
         ).fetchall()
     }
-    epoch_trial_ids = {row["trial_id"] for row in epochs if row["trial_id"]}
     sources: list[tuple[dict[str, Any] | None, dict[str, Any] | None]] = [
         (epoch, trials.get(epoch["trial_id"])) for epoch in epochs
     ]
-    sources.extend(
-        (None, trial)
-        for trial_id, trial in trials.items()
-        if trial_id not in epoch_trial_ids
-    )
 
     result: list[dict[str, Any]] = []
     for epoch, trial in sources:
@@ -376,9 +423,7 @@ def capacity_depth_rows(store: ResearchStore, run_id: str) -> list[dict[str, Any
             else "provider"
         )
         target_gpu_depth = (
-            int(trial["target_depth"])
-            if trial
-            else int(epoch["target_depth"])
+            int(trial["target_depth"]) if trial else int(epoch["target_depth"])
         )
         epoch_details = json.loads(epoch["details_json"]) if epoch else {}
         gpu_count_per_instance = (
@@ -389,9 +434,7 @@ def capacity_depth_rows(store: ResearchStore, run_id: str) -> list[dict[str, Any
         target_instance_count = target_gpu_depth // gpu_count_per_instance
         requested_instances = int(trial["requested_depth"]) if trial else 0
         accepted_instances = int(trial["accepted_depth"]) if trial else 0
-        provider_ready_instances = (
-            int(trial["provider_ready_depth"]) if trial else 0
-        )
+        provider_ready_instances = int(trial["provider_ready_depth"]) if trial else 0
         application_ready_instances = (
             int(trial["application_ready_depth"]) if trial else 0
         )
@@ -409,21 +452,15 @@ def capacity_depth_rows(store: ResearchStore, run_id: str) -> list[dict[str, Any
         result.append(
             {
                 "run_id": run_id,
-                "cohort_name": epoch["cohort_name"] if epoch else "legacy",
-                "epoch_sequence": epoch["sequence"] if epoch else None,
-                "selection_probability": (
-                    epoch["selection_probability"] if epoch else None
-                ),
-                "selection_seed": epoch["selection_seed"] if epoch else None,
-                "scheduled_at": epoch["scheduled_at"] if epoch else None,
-                "scheduled_offset_seconds": (
-                    epoch["scheduled_offset_seconds"] if epoch else None
-                ),
-                "started_lag_seconds": (
-                    epoch["started_lag_seconds"] if epoch else None
-                ),
-                "epoch_status": epoch["status"] if epoch else trial["status"],
-                "epoch_stop_reason": epoch["stop_reason"] if epoch else None,
+                "cohort_name": epoch["cohort_name"],
+                "epoch_sequence": epoch["sequence"],
+                "selection_probability": epoch["selection_probability"],
+                "selection_seed": epoch["selection_seed"],
+                "scheduled_at": epoch["scheduled_at"],
+                "scheduled_offset_seconds": epoch["scheduled_offset_seconds"],
+                "started_lag_seconds": epoch["started_lag_seconds"],
+                "epoch_status": epoch["status"],
+                "epoch_stop_reason": epoch["stop_reason"],
                 "trial_id": trial_id,
                 "provider": trial["provider"] if trial else epoch["provider"],
                 "sku": trial["sku"] if trial else epoch["sku"],
@@ -507,7 +544,7 @@ def capacity_depth_rows(store: ResearchStore, run_id: str) -> list[dict[str, Any
 
 
 def capacity_trial_payload(
-    store: ResearchStore,
+    store: TraceStore,
     trial_id: str,
 ) -> dict[str, Any]:
     row = store.capacity_trial_row(trial_id)
@@ -524,9 +561,7 @@ def capacity_trial_payload(
     stages = []
     for stage_target, attempts in sorted(grouped.items()):
         original_attempts = [item for item in attempts if item["attempt"] == 0]
-        accepted_attempts = [
-            item for item in attempts if item["provider_resource_id"]
-        ]
+        accepted_attempts = [item for item in attempts if item["provider_resource_id"]]
         stages.append(
             {
                 "target_gpu_depth": stage_target,
@@ -536,8 +571,7 @@ def capacity_trial_payload(
                 "accepted_instance_count": len(accepted_attempts),
                 "accepted_gpu_count": len(accepted_attempts) * gpu_count,
                 "provider_ready_instance_count": sum(
-                    item["provider_ready_at"] is not None
-                    for item in accepted_attempts
+                    item["provider_ready_at"] is not None for item in accepted_attempts
                 ),
                 "application_ready_instance_count": sum(
                     item["application_ready_at"] is not None
@@ -619,7 +653,7 @@ def capacity_trial_payload(
 
 
 def export_capacity_depth_csv(
-    store: ResearchStore,
+    store: TraceStore,
     run_id: str,
     output: str | pathlib.Path,
 ) -> int:
@@ -628,147 +662,6 @@ def export_capacity_depth_csv(
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=CAPACITY_DEPTH_FIELDS)
-        writer.writeheader()
-        writer.writerows(rows)
-    return len(rows)
-
-
-def completion_window_rows(
-    store: ResearchStore,
-    run_id: str,
-) -> list[dict[str, Any]]:
-    store.run_row(run_id)
-    result: list[dict[str, Any]] = []
-    for epoch_row in store.completion_window_epoch_rows(run_id):
-        epoch = dict(epoch_row)
-        capacity_epoch = None
-        trial = None
-        if epoch["capacity_epoch_id"]:
-            capacity_epoch = store.connection.execute(
-                "SELECT * FROM capacity_epochs WHERE id=?",
-                (epoch["capacity_epoch_id"],),
-            ).fetchone()
-            trial = store.connection.execute(
-                "SELECT * FROM capacity_trials WHERE id=?",
-                (epoch["capacity_epoch_id"],),
-            ).fetchone()
-        release_quote = (
-            store.connection.execute(
-                "SELECT * FROM catalog_quotes_v2 WHERE id=?",
-                (epoch["release_quote_id"],),
-            ).fetchone()
-            if epoch["release_quote_id"]
-            else None
-        )
-        decision_quote = (
-            store.connection.execute(
-                "SELECT * FROM catalog_quotes_v2 WHERE id=?",
-                (epoch["decision_quote_id"],),
-            ).fetchone()
-            if epoch["decision_quote_id"]
-            else None
-        )
-        release_price = (
-            release_quote["quoted_price_usd_hr"] if release_quote else None
-        )
-        decision_price = (
-            decision_quote["quoted_price_usd_hr"] if decision_quote else None
-        )
-        price_delta = (
-            float(decision_price) - float(release_price)
-            if release_price is not None and decision_price is not None
-            else None
-        )
-        details = json.loads(epoch["details_json"])
-        result.append(
-            {
-                "run_id": run_id,
-                "cohort_name": epoch["cohort_name"],
-                "epoch_sequence": epoch["sequence"],
-                "arm_name": epoch["arm_name"],
-                "launch_fraction": epoch["launch_fraction"],
-                "assignment_probability": epoch["assignment_probability"],
-                "assignment_seed": epoch["assignment_seed"],
-                "provider": epoch["provider"],
-                "sku": epoch["sku"],
-                "gpu_type": epoch["gpu_type"],
-                "region": epoch["region"],
-                "datacenter": epoch["datacenter"],
-                "resource_class": epoch["resource_class"],
-                "market": epoch["market"],
-                "target_depth": epoch["target_depth"],
-                "release_at": epoch["release_at"],
-                "allocation_deadline_at": epoch["allocation_deadline_at"],
-                "planned_launch_at": epoch["planned_launch_at"],
-                "released_at": epoch["released_at"],
-                "actual_decision_at": epoch["actual_decision_at"],
-                "planned_wait_seconds": _duration(
-                    _parse(epoch["release_at"]),
-                    _parse(epoch["planned_launch_at"]),
-                ),
-                "actual_wait_seconds": _duration(
-                    _parse(epoch["release_at"]),
-                    _parse(epoch["actual_decision_at"]),
-                ),
-                "decision_lag_seconds": epoch["decision_lag_seconds"],
-                "release_quote_observed_at": (
-                    release_quote["observed_at"] if release_quote else None
-                ),
-                "release_stock_status": (
-                    release_quote["stock_status"] if release_quote else None
-                ),
-                "release_advertised_available": (
-                    release_quote["available"] if release_quote else None
-                ),
-                "release_quoted_price_usd_hr": release_price,
-                "release_spot_price_usd_hr": (
-                    release_quote["spot_price_usd_hr"] if release_quote else None
-                ),
-                "decision_quote_observed_at": (
-                    decision_quote["observed_at"] if decision_quote else None
-                ),
-                "decision_stock_status": (
-                    decision_quote["stock_status"] if decision_quote else None
-                ),
-                "decision_advertised_available": (
-                    decision_quote["available"] if decision_quote else None
-                ),
-                "decision_quoted_price_usd_hr": decision_price,
-                "decision_spot_price_usd_hr": (
-                    decision_quote["spot_price_usd_hr"] if decision_quote else None
-                ),
-                "quoted_price_delta_usd_hr": price_delta,
-                "window_status": epoch["status"],
-                "window_stop_reason": epoch["stop_reason"],
-                "capacity_epoch_id": epoch["capacity_epoch_id"],
-                "capacity_status": capacity_epoch["status"] if capacity_epoch else None,
-                "requested_depth": trial["requested_depth"] if trial else None,
-                "accepted_depth": trial["accepted_depth"] if trial else None,
-                "provider_ready_depth": trial["provider_ready_depth"] if trial else None,
-                "application_ready_depth": (
-                    trial["application_ready_depth"] if trial else None
-                ),
-                "provider_sla_met": epoch["provider_sla_met"],
-                "application_sla_met": epoch["application_sla_met"],
-                "first_failed_stage": trial["first_failed_stage"] if trial else None,
-                "failure_class": trial["failure_class"] if trial else None,
-                "estimated_cost_usd": details.get("estimated_cost_usd"),
-                "cleanup_verified": details.get("cleanup_verified"),
-            }
-        )
-    return result
-
-
-def export_completion_window_csv(
-    store: ResearchStore,
-    run_id: str,
-    output: str | pathlib.Path,
-) -> int:
-    rows = completion_window_rows(store, run_id)
-    path = pathlib.Path(output)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=COMPLETION_WINDOW_FIELDS)
         writer.writeheader()
         writer.writerows(rows)
     return len(rows)

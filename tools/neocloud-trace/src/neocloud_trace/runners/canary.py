@@ -7,9 +7,9 @@ import uuid
 from collections.abc import Callable, Sequence
 
 from .capacity import ReplicaRequest
-from ..model import CanaryLease, CensorReason, TrialCell
+from ..model import CanaryLease, TerminalReason, TrialCell
 from ..providers import DeleteResult, ProviderAPICall, ResourceObservation
-from ..storage import ResearchStore
+from ..storage import TraceStore
 
 
 UTC = dt.timezone.utc
@@ -44,30 +44,36 @@ class CanaryClassifier:
         now: dt.datetime,
         samples: Sequence[CanarySample],
         operator_cleanup: bool,
-    ) -> CensorReason | None:
+    ) -> TerminalReason | None:
         if operator_cleanup:
-            return CensorReason.OPERATOR_CLEANUP
+            return TerminalReason.OPERATOR_CLEANUP
         if not samples:
             return (
-                CensorReason.RIGHT_CENSORED_PLANNED_END
+                TerminalReason.RIGHT_CENSORED_PLANNED_END
                 if now >= planned_end
                 else None
             )
         latest = samples[-1]
-        if not latest.host_healthy and (not latest.exists or latest.heartbeat_ok is False):
-            return CensorReason.RIGHT_CENSORED_COLLECTOR_LOSS
+        if not latest.host_healthy and (
+            not latest.exists or latest.heartbeat_ok is False
+        ):
+            return TerminalReason.RIGHT_CENSORED_COLLECTOR_LOSS
 
         prior_machine = None
         prior_uptime = None
         for sample in samples:
-            if prior_machine and sample.machine_id and sample.machine_id != prior_machine:
-                return CensorReason.MACHINE_REPLACEMENT
+            if (
+                prior_machine
+                and sample.machine_id
+                and sample.machine_id != prior_machine
+            ):
+                return TerminalReason.MACHINE_REPLACEMENT
             if (
                 prior_uptime is not None
                 and sample.runtime_uptime_seconds is not None
                 and sample.runtime_uptime_seconds + 1 < prior_uptime
             ):
-                return CensorReason.MACHINE_REPLACEMENT
+                return TerminalReason.MACHINE_REPLACEMENT
             prior_machine = sample.machine_id or prior_machine
             prior_uptime = (
                 sample.runtime_uptime_seconds
@@ -76,17 +82,22 @@ class CanaryClassifier:
             )
 
         if latest.provider_state and latest.provider_state.lower() == "unhealthy":
-            return CensorReason.PROVIDER_UNHEALTHY
-        if latest.provider_state and latest.provider_state.lower() in {
-            "exited",
-            "preempted",
-            "stopped",
-            "terminated",
-        } and now < planned_end:
+            return TerminalReason.PROVIDER_UNHEALTHY
+        if (
+            latest.provider_state
+            and latest.provider_state.lower()
+            in {
+                "exited",
+                "preempted",
+                "stopped",
+                "terminated",
+            }
+            and now < planned_end
+        ):
             return (
-                CensorReason.PROVIDER_INTERRUPTION_CANDIDATE
+                TerminalReason.PROVIDER_INTERRUPTION_CANDIDATE
                 if any(sample.provider_ready for sample in samples[:-1])
-                else CensorReason.PROVIDER_PRE_READY_FAILURE
+                else TerminalReason.PROVIDER_PRE_READY_FAILURE
             )
         if not latest.exists and now < planned_end:
             first_missing = latest.observed_at
@@ -94,31 +105,37 @@ class CanaryClassifier:
                 if sample.exists or not sample.host_healthy:
                     break
                 first_missing = sample.observed_at
-            if (now - first_missing).total_seconds() >= self.disappearance_grace_seconds:
+            if (
+                now - first_missing
+            ).total_seconds() >= self.disappearance_grace_seconds:
                 return (
-                    CensorReason.PROVIDER_INTERRUPTION_CANDIDATE
+                    TerminalReason.PROVIDER_INTERRUPTION_CANDIDATE
                     if any(sample.provider_ready for sample in samples)
-                    else CensorReason.PROVIDER_PRE_READY_FAILURE
+                    else TerminalReason.PROVIDER_PRE_READY_FAILURE
                 )
 
         if latest.provider_ready and latest.heartbeat_ok is False:
             last_healthy = next(
-                (sample.observed_at for sample in reversed(samples) if sample.heartbeat_ok is True),
+                (
+                    sample.observed_at
+                    for sample in reversed(samples)
+                    if sample.heartbeat_ok is True
+                ),
                 None,
             )
             failure_start = last_healthy or samples[0].observed_at
             if (now - failure_start).total_seconds() >= self.heartbeat_grace_seconds:
-                return CensorReason.APPLICATION_FAILURE
+                return TerminalReason.APPLICATION_FAILURE
 
         if now >= planned_end:
-            return CensorReason.RIGHT_CENSORED_PLANNED_END
+            return TerminalReason.RIGHT_CENSORED_PLANNED_END
         return None
 
 
 class CanaryRunner:
     def __init__(
         self,
-        store: ResearchStore,
+        store: TraceStore,
         provider: object,
         *,
         classifier: CanaryClassifier | None = None,
@@ -184,58 +201,11 @@ class CanaryRunner:
             else:
                 self.store.finish_canary(
                     lease_id,
-                    CensorReason.LAUNCH_FAILURE.value,
+                    TerminalReason.LAUNCH_FAILURE.value,
                 )
                 self.store.mark_canary_cleaned(lease_id)
             leases.append(self._lease_from_row(self.store.canary_row(lease_id)))
         return leases[0], leases[1]
-
-    def start_single(
-        self,
-        run_id: str,
-        cell: TrialCell,
-        planned_end: dt.datetime,
-        *,
-        group_id: str,
-    ) -> CanaryLease:
-        existing = self.store.canary_rows_for_pair(group_id)
-        if len(existing) == 1:
-            return self._lease_from_row(existing[0])
-        if existing:
-            raise ValueError(f"canary group {group_id} is not a single-lease group")
-        interruptible = cell.market == "interruptible"
-        lease_id = self.store.start_canary(
-            run_id,
-            cell,
-            pair_id=group_id,
-            interruptible=interruptible,
-            planned_end_at=planned_end.astimezone(UTC).isoformat(),
-        )
-        request = ReplicaRequest(
-            replica_id=lease_id,
-            name=f"aibrix-control-{group_id[:8]}",
-            stage_target=1,
-            ordinal=0,
-        )
-        results = list(self.provider.create_replicas(cell, [request]))
-        result = results[0] if results else None
-        if result:
-            self._record_api_call(run_id, cell.provider, result.api_call)
-        if result and result.accepted and result.provider_resource_id:
-            self.store.mark_canary_created(
-                lease_id,
-                provider_resource_id=result.provider_resource_id,
-                machine_id=result.machine_id,
-                datacenter=result.location,
-                details={"price_usd_hr": result.price_usd_hr, "raw": result.raw},
-            )
-        else:
-            self.store.finish_canary(
-                lease_id,
-                CensorReason.LAUNCH_FAILURE.value,
-            )
-            self.store.mark_canary_cleaned(lease_id)
-        return self._lease_from_row(self.store.canary_row(lease_id))
 
     def observe_once(
         self,
@@ -291,7 +261,7 @@ class CanaryRunner:
         run_id: str,
         lease: CanaryLease,
         *,
-        reason: CensorReason,
+        reason: TerminalReason,
         operator_cleanup: bool = False,
     ) -> DeleteResult:
         self.store.finish_canary(
@@ -321,7 +291,11 @@ class CanaryRunner:
             action="delete",
             status="accepted" if result.accepted else "failed",
             failure_class=result.failure_class.value if result.failure_class else None,
-            details={"missing": result.missing, "message": result.message, "raw": result.raw},
+            details={
+                "missing": result.missing,
+                "message": result.message,
+                "raw": result.raw,
+            },
         )
         if result.accepted or result.missing:
             if result.missing:
@@ -338,8 +312,12 @@ class CanaryRunner:
                 provider=lease.provider,
                 provider_resource_id=lease.provider_resource_id,
                 action="verify_deleted",
-                status="confirmed" if verified.accepted or verified.missing else "failed",
-                failure_class=verified.failure_class.value if verified.failure_class else None,
+                status="confirmed"
+                if verified.accepted or verified.missing
+                else "failed",
+                failure_class=verified.failure_class.value
+                if verified.failure_class
+                else None,
                 details={
                     "missing": verified.missing,
                     "message": verified.message,
@@ -367,9 +345,7 @@ class CanaryRunner:
             status=str(call.status),
             latency_ms=call.latency_ms,
             raw=call.raw,
-            failure_class=(
-                call.failure_class.value if call.failure_class else None
-            ),
+            failure_class=(call.failure_class.value if call.failure_class else None),
         )
 
     @staticmethod

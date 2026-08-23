@@ -9,7 +9,7 @@ from collections import defaultdict
 from typing import Any
 
 from ..providers import ProviderBillingRecord
-from ..storage import ResearchStore
+from ..storage import TraceStore
 
 
 def _parse(value: str) -> dt.datetime:
@@ -40,7 +40,7 @@ def _optional_int(value: Any) -> int | None:
 
 
 def import_billing_file(
-    store: ResearchStore,
+    store: TraceStore,
     run_id: str,
     *,
     provider: str,
@@ -104,7 +104,7 @@ def import_billing_file(
 
 
 def _owned_cost_sources(
-    store: ResearchStore,
+    store: TraceStore,
     run_id: str,
 ) -> list[dict[str, Any]]:
     sources: list[dict[str, Any]] = []
@@ -168,7 +168,7 @@ def _owned_cost_sources(
 
 
 def reconcile_costs(
-    store: ResearchStore,
+    store: TraceStore,
     run_id: str,
 ) -> list[dict[str, Any]]:
     store.run_row(run_id)

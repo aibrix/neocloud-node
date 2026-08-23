@@ -17,7 +17,9 @@ class FailureClass(str, enum.Enum):
     UNKNOWN = "unknown"
 
 
-class CensorReason(str, enum.Enum):
+# Values are persisted in canary_leases.censor_reason. Renaming the Python type
+# does not change this serialization contract.
+class TerminalReason(str, enum.Enum):
     PROVIDER_INTERRUPTION_CANDIDATE = "provider_interruption_candidate"
     PROVIDER_PRE_READY_FAILURE = "provider_pre_ready_failure"
     APPLICATION_FAILURE = "application_failure"
@@ -111,6 +113,39 @@ class ExperimentConfig:
         for provider, budget in self.provider_budgets.items():
             if not provider.strip() or budget <= 0:
                 raise ValueError("provider budgets require a provider name and positive amount")
+
+
+@dataclasses.dataclass(frozen=True)
+class CollectionConfig:
+    protocol_version: str
+    host_id: str
+    vantage_id: str
+    providers: tuple[str, ...]
+    gpu_counts: tuple[int, ...] = (1, 2, 4, 8)
+    catalog_interval_seconds: float = 300.0
+    host_interval_seconds: float = 30.0
+    duration_seconds: float | None = None
+    network_control_url: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.protocol_version.strip():
+            raise ValueError("protocol_version is required")
+        if not self.host_id.strip():
+            raise ValueError("host_id is required")
+        if not self.vantage_id.strip():
+            raise ValueError("vantage_id is required")
+        if not self.providers or any(not provider.strip() for provider in self.providers):
+            raise ValueError("providers must contain at least one provider")
+        if len(self.providers) != len(set(self.providers)):
+            raise ValueError("providers must be unique")
+        if not self.gpu_counts or any(count <= 0 for count in self.gpu_counts):
+            raise ValueError("gpu_counts must contain positive values")
+        if self.catalog_interval_seconds <= 0:
+            raise ValueError("catalog_interval_seconds must be positive")
+        if self.host_interval_seconds <= 0:
+            raise ValueError("host_interval_seconds must be positive")
+        if self.duration_seconds is not None and self.duration_seconds <= 0:
+            raise ValueError("duration_seconds must be positive")
 
 
 @dataclasses.dataclass(frozen=True)

@@ -8,13 +8,32 @@ import unittest
 TRACE_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TRACE_ROOT / "src"))
 
-from neocloud_trace.model import CensorReason, ExperimentConfig, TrialCell
+from neocloud_trace.model import TerminalReason, ExperimentConfig, TrialCell
 from neocloud_trace.providers import CreateResult, DeleteResult, ResourceObservation
 from neocloud_trace.runners.canary import CanaryClassifier, CanaryRunner, CanarySample
-from neocloud_trace.storage import ResearchStore
+from neocloud_trace.storage import TraceStore
 
 
 UTC = dt.timezone.utc
+
+
+class TerminalReasonContractTest(unittest.TestCase):
+    def test_persisted_values_remain_stable(self):
+        self.assertEqual(
+            {reason.name: reason.value for reason in TerminalReason},
+            {
+                "PROVIDER_INTERRUPTION_CANDIDATE": "provider_interruption_candidate",
+                "PROVIDER_PRE_READY_FAILURE": "provider_pre_ready_failure",
+                "APPLICATION_FAILURE": "application_failure",
+                "MACHINE_REPLACEMENT": "machine_replacement",
+                "PROVIDER_UNHEALTHY": "provider_unhealthy",
+                "RIGHT_CENSORED_PLANNED_END": "right_censored_planned_end",
+                "RIGHT_CENSORED_COLLECTOR_LOSS": "right_censored_collector_loss",
+                "OPERATOR_CLEANUP": "operator_cleanup",
+                "LAUNCH_FAILURE": "launch_failure",
+                "PAIR_SETUP_FAILURE": "pair_setup_failure",
+            },
+        )
 
 
 class CanaryClassifierTest(unittest.TestCase):
@@ -44,16 +63,19 @@ class CanaryClassifierTest(unittest.TestCase):
             samples=[self.sample(60)],
             operator_cleanup=False,
         )
-        self.assertEqual(result, CensorReason.RIGHT_CENSORED_PLANNED_END)
+        self.assertEqual(result, TerminalReason.RIGHT_CENSORED_PLANNED_END)
 
     def test_disappearance_before_end_is_interruption_candidate(self):
         result = self.classifier.classify(
             planned_end=self.end,
             now=self.start + dt.timedelta(minutes=10),
-            samples=[self.sample(60), self.sample(120, exists=False, provider_state=None, heartbeat_ok=False)],
+            samples=[
+                self.sample(60),
+                self.sample(120, exists=False, provider_state=None, heartbeat_ok=False),
+            ],
             operator_cleanup=False,
         )
-        self.assertEqual(result, CensorReason.PROVIDER_INTERRUPTION_CANDIDATE)
+        self.assertEqual(result, TerminalReason.PROVIDER_INTERRUPTION_CANDIDATE)
 
     def test_single_fresh_missing_sample_is_not_yet_an_interruption(self):
         now = self.start + dt.timedelta(seconds=121)
@@ -83,7 +105,7 @@ class CanaryClassifierTest(unittest.TestCase):
             ],
             operator_cleanup=False,
         )
-        self.assertEqual(result, CensorReason.PROVIDER_INTERRUPTION_CANDIDATE)
+        self.assertEqual(result, TerminalReason.PROVIDER_INTERRUPTION_CANDIDATE)
 
     def test_disappearance_before_first_readiness_is_pre_ready_failure(self):
         result = self.classifier.classify(
@@ -102,7 +124,7 @@ class CanaryClassifierTest(unittest.TestCase):
             ],
             operator_cleanup=False,
         )
-        self.assertEqual(result, CensorReason.PROVIDER_PRE_READY_FAILURE)
+        self.assertEqual(result, TerminalReason.PROVIDER_PRE_READY_FAILURE)
 
     def test_heartbeat_failure_with_healthy_host_is_application_failure(self):
         result = self.classifier.classify(
@@ -115,25 +137,31 @@ class CanaryClassifierTest(unittest.TestCase):
             ],
             operator_cleanup=False,
         )
-        self.assertEqual(result, CensorReason.APPLICATION_FAILURE)
+        self.assertEqual(result, TerminalReason.APPLICATION_FAILURE)
 
     def test_machine_change_is_replacement(self):
         result = self.classifier.classify(
             planned_end=self.end,
             now=self.start + dt.timedelta(minutes=5),
-            samples=[self.sample(60), self.sample(120, machine_id="machine-2", runtime_uptime_seconds=5)],
+            samples=[
+                self.sample(60),
+                self.sample(120, machine_id="machine-2", runtime_uptime_seconds=5),
+            ],
             operator_cleanup=False,
         )
-        self.assertEqual(result, CensorReason.MACHINE_REPLACEMENT)
+        self.assertEqual(result, TerminalReason.MACHINE_REPLACEMENT)
 
     def test_collector_gap_is_right_censored_not_provider_failure(self):
         result = self.classifier.classify(
             planned_end=self.end,
             now=self.start + dt.timedelta(minutes=5),
-            samples=[self.sample(60), self.sample(240, exists=False, heartbeat_ok=False, host_healthy=False)],
+            samples=[
+                self.sample(60),
+                self.sample(240, exists=False, heartbeat_ok=False, host_healthy=False),
+            ],
             operator_cleanup=False,
         )
-        self.assertEqual(result, CensorReason.RIGHT_CENSORED_COLLECTOR_LOSS)
+        self.assertEqual(result, TerminalReason.RIGHT_CENSORED_COLLECTOR_LOSS)
 
     def test_operator_cleanup_has_priority(self):
         result = self.classifier.classify(
@@ -142,7 +170,7 @@ class CanaryClassifierTest(unittest.TestCase):
             samples=[self.sample(60, exists=False)],
             operator_cleanup=True,
         )
-        self.assertEqual(result, CensorReason.OPERATOR_CLEANUP)
+        self.assertEqual(result, TerminalReason.OPERATOR_CLEANUP)
 
 
 class FakeCanaryProvider:
@@ -180,7 +208,7 @@ class FakeCanaryProvider:
 class CanaryRunnerTest(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
-        self.store = ResearchStore(pathlib.Path(self.tempdir.name) / "trace.db")
+        self.store = TraceStore(pathlib.Path(self.tempdir.name) / "trace.db")
         self.run_id = self.store.start_run(
             ExperimentConfig(
                 protocol_version="2.0",
@@ -214,41 +242,11 @@ class CanaryRunnerTest(unittest.TestCase):
         recovered = runner.start_pair(self.run_id, cell, planned_end)
 
         self.assertEqual(provider.created_markets, ["interruptible", "on-demand"])
-        self.assertEqual([lease.id for lease in first], [lease.id for lease in recovered])
+        self.assertEqual(
+            [lease.id for lease in first], [lease.id for lease in recovered]
+        )
         self.assertEqual({lease.interruptible for lease in first}, {True, False})
         self.assertEqual(len(self.store.owned_resources(self.run_id)), 2)
-
-    def test_starts_single_control_without_interruptible_request(self):
-        provider = FakeCanaryProvider()
-        runner = CanaryRunner(self.store, provider)
-        cell = TrialCell(
-            provider="runpod",
-            sku="NVIDIA A40",
-            gpu_type="A40",
-            region=None,
-            resource_class="secure",
-            market="on-demand",
-            image="python:3.12-slim",
-        )
-        planned_end = dt.datetime.now(UTC) + dt.timedelta(hours=1)
-
-        first = runner.start_single(
-            self.run_id,
-            cell,
-            planned_end,
-            group_id="control-epoch-1",
-        )
-        recovered = runner.start_single(
-            self.run_id,
-            cell,
-            planned_end,
-            group_id="control-epoch-1",
-        )
-
-        self.assertEqual(provider.created_markets, ["on-demand"])
-        self.assertEqual(first.id, recovered.id)
-        self.assertFalse(first.interruptible)
-        self.assertEqual(len(self.store.owned_resources(self.run_id)), 1)
 
     def test_stop_requires_remote_disappearance_before_releasing_ownership(self):
         provider = FakeCanaryProvider()
@@ -265,7 +263,7 @@ class CanaryRunnerTest(unittest.TestCase):
             self.run_id, cell, dt.datetime.now(UTC) + dt.timedelta(minutes=1)
         )[0]
 
-        runner.stop(self.run_id, lease, reason=CensorReason.OPERATOR_CLEANUP)
+        runner.stop(self.run_id, lease, reason=TerminalReason.OPERATOR_CLEANUP)
 
         self.assertEqual(provider.verified, [lease.provider_resource_id])
         remaining = self.store.owned_resources(self.run_id)

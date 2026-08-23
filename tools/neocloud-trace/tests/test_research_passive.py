@@ -7,10 +7,15 @@ import unittest
 TRACE_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TRACE_ROOT / "src"))
 
-from neocloud_trace.model import ExperimentConfig
-from neocloud_trace.providers import HTTPResponse, LambdaResearchClient, RunPodResearchClient
-from neocloud_trace.runners.passive import HostMonitor, PassiveWorker
-from neocloud_trace.storage import ResearchStore
+from neocloud_trace.model import CollectionConfig, ExperimentConfig
+from neocloud_trace.providers import (
+    CatalogFetch,
+    HTTPResponse,
+    LambdaResearchClient,
+    RunPodResearchClient,
+)
+from neocloud_trace.runners.passive import HostMonitor, PassiveCollector, PassiveWorker
+from neocloud_trace.storage import TraceStore
 
 
 class ExactCatalogTest(unittest.TestCase):
@@ -132,7 +137,7 @@ class ExactCatalogTest(unittest.TestCase):
 class PassiveWorkerTest(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
-        self.store = ResearchStore(pathlib.Path(self.tempdir.name) / "trace.db")
+        self.store = TraceStore(pathlib.Path(self.tempdir.name) / "trace.db")
         self.run_id = self.store.start_run(
             ExperimentConfig(
                 protocol_version="2.0",
@@ -214,6 +219,50 @@ class PassiveWorkerTest(unittest.TestCase):
 
         self.assertFalse(observation.healthy)
         self.assertEqual(observation.scheduler_drift_ms, 10000)
+
+    def test_collector_starts_and_finishes_a_passive_run(self):
+        class Provider:
+            def catalog_fetches(self, gpu_counts):
+                self.gpu_counts = gpu_counts
+                return [
+                    CatalogFetch(
+                        provider="runpod",
+                        operation="catalog",
+                        response=HTTPResponse(200, 5, payload={}),
+                        quotes=(),
+                    )
+                ]
+
+        provider = Provider()
+        config = CollectionConfig(
+            protocol_version="1.0-passive-catalog",
+            host_id="collector-host",
+            vantage_id="collector-host",
+            providers=("runpod",),
+            gpu_counts=(1, 2),
+        )
+
+        run_id = PassiveCollector(self.store, [provider]).run(config, once=True)
+
+        run = self.store.run_row(run_id)
+        self.assertEqual(run["status"], "complete")
+        self.assertEqual(run["host_id"], "collector-host")
+        self.assertEqual(run["vantage_id"], "collector-host")
+        self.assertEqual(provider.gpu_counts, (1, 2))
+        self.assertEqual(
+            self.store.connection.execute(
+                "SELECT COUNT(*) FROM host_observations WHERE run_id=?",
+                (run_id,),
+            ).fetchone()[0],
+            1,
+        )
+        self.assertEqual(
+            self.store.connection.execute(
+                "SELECT COUNT(*) FROM provider_api_observations_v2 WHERE run_id=?",
+                (run_id,),
+            ).fetchone()[0],
+            1,
+        )
 
 
 if __name__ == "__main__":

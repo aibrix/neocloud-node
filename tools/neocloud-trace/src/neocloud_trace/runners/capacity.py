@@ -7,7 +7,7 @@ from typing import Protocol
 
 from ..model import FailureClass, TrialCell, capacity_stages
 from ..providers import CreateResult, DeleteResult, ProviderAPICall, ResourceObservation
-from ..storage import ResearchStore
+from ..storage import TraceStore
 
 
 @dataclasses.dataclass(frozen=True)
@@ -100,7 +100,7 @@ HARD_STOP_FAILURES = {
 class CapacityRunner:
     def __init__(
         self,
-        store: ResearchStore,
+        store: TraceStore,
         provider: CapacityProvider,
         *,
         poll_interval_seconds: float = 20.0,

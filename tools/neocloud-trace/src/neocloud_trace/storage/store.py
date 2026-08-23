@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import datetime as dt
 import hashlib
+import importlib.resources
 import json
 import pathlib
 import sqlite3
@@ -12,6 +13,7 @@ from typing import Any
 
 from ..model import (
     CatalogQuote,
+    CollectionConfig,
     ExperimentConfig,
     OwnedResource,
     TrialCell,
@@ -62,355 +64,14 @@ def merge_json_text(existing: str, updates: dict[str, Any] | None) -> str:
     return json_text(merged)
 
 
-SCHEMA = """
-PRAGMA foreign_keys=ON;
-
-CREATE TABLE IF NOT EXISTS experiment_runs (
-    id TEXT PRIMARY KEY,
-    protocol_version TEXT NOT NULL,
-    config_hash TEXT NOT NULL,
-    config_json TEXT NOT NULL,
-    host_id TEXT NOT NULL,
-    vantage_id TEXT NOT NULL,
-    collector_revision TEXT,
-    python_version TEXT,
-    started_at TEXT NOT NULL,
-    finished_at TEXT,
-    status TEXT NOT NULL,
-    termination_reason TEXT,
-    total_budget_usd REAL NOT NULL,
-    max_active_gpus_per_provider INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS host_observations (
-    id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL REFERENCES experiment_runs(id),
-    observed_at TEXT NOT NULL,
-    expected_monotonic REAL,
-    actual_monotonic REAL,
-    scheduler_drift_ms INTEGER,
-    healthy INTEGER NOT NULL,
-    network_status TEXT,
-    network_latency_ms INTEGER,
-    db_write_ok INTEGER NOT NULL,
-    details_json TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS provider_api_observations_v2 (
-    id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL REFERENCES experiment_runs(id),
-    observed_at TEXT NOT NULL,
-    provider TEXT NOT NULL,
-    operation TEXT NOT NULL,
-    status TEXT NOT NULL,
-    latency_ms INTEGER,
-    failure_class TEXT,
-    host_observation_id TEXT REFERENCES host_observations(id),
-    response_hash TEXT,
-    raw_json TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS catalog_quotes_v2 (
-    id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL REFERENCES experiment_runs(id),
-    observed_at TEXT NOT NULL,
-    provider TEXT NOT NULL,
-    sku TEXT NOT NULL,
-    gpu_type TEXT NOT NULL,
-    gpu_count INTEGER NOT NULL,
-    region TEXT,
-    datacenter TEXT,
-    resource_class TEXT NOT NULL,
-    market TEXT NOT NULL,
-    stock_status TEXT,
-    available_gpu_counts_json TEXT NOT NULL,
-    available INTEGER,
-    quoted_price_usd_hr REAL,
-    spot_price_usd_hr REAL,
-    vcpus INTEGER,
-    memory_gib REAL,
-    storage_gib REAL,
-    query_json TEXT NOT NULL,
-    raw_hash TEXT NOT NULL,
-    raw_json TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS capacity_trials (
-    id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL REFERENCES experiment_runs(id),
-    provider TEXT NOT NULL,
-    sku TEXT NOT NULL,
-    gpu_type TEXT NOT NULL,
-    gpu_count INTEGER NOT NULL,
-    region TEXT,
-    datacenter TEXT,
-    resource_class TEXT NOT NULL,
-    market TEXT NOT NULL,
-    image TEXT,
-    target_depth INTEGER NOT NULL,
-    requested_depth INTEGER NOT NULL DEFAULT 0,
-    accepted_depth INTEGER NOT NULL DEFAULT 0,
-    provider_ready_depth INTEGER NOT NULL DEFAULT 0,
-    application_ready_depth INTEGER NOT NULL DEFAULT 0,
-    cleaned_depth INTEGER NOT NULL DEFAULT 0,
-    first_failed_stage INTEGER,
-    failure_class TEXT,
-    catalog_quote_id TEXT REFERENCES catalog_quotes_v2(id),
-    started_at TEXT NOT NULL,
-    finished_at TEXT,
-    status TEXT NOT NULL,
-    details_json TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS capacity_replicas (
-    id TEXT PRIMARY KEY,
-    trial_id TEXT NOT NULL REFERENCES capacity_trials(id),
-    stage_target INTEGER NOT NULL,
-    ordinal INTEGER NOT NULL,
-    attempt INTEGER NOT NULL DEFAULT 0,
-    requested_at TEXT NOT NULL,
-    accepted_at TEXT,
-    provider_ready_at TEXT,
-    application_ready_at TEXT,
-    failed_at TEXT,
-    cleaned_at TEXT,
-    provider_resource_id TEXT,
-    provider_location TEXT,
-    machine_id TEXT,
-    failure_class TEXT,
-    failure_message TEXT,
-    realized_price_usd_hr REAL,
-    status TEXT NOT NULL,
-    retry_of TEXT REFERENCES capacity_replicas(id),
-    details_json TEXT NOT NULL,
-    UNIQUE(trial_id, stage_target, ordinal, attempt)
-);
-
-CREATE TABLE IF NOT EXISTS capacity_epochs (
-    id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL REFERENCES experiment_runs(id),
-    cohort_name TEXT NOT NULL,
-    sequence INTEGER NOT NULL,
-    provider TEXT NOT NULL,
-    sku TEXT NOT NULL,
-    gpu_type TEXT NOT NULL,
-    region TEXT,
-    datacenter TEXT,
-    resource_class TEXT NOT NULL,
-    target_depth INTEGER NOT NULL,
-    scheduled_offset_seconds REAL NOT NULL,
-    scheduled_at TEXT NOT NULL,
-    selection_probability REAL NOT NULL,
-    selection_seed INTEGER NOT NULL,
-    started_at TEXT,
-    started_lag_seconds REAL,
-    finished_at TEXT,
-    trial_id TEXT,
-    status TEXT NOT NULL,
-    stop_reason TEXT,
-    details_json TEXT NOT NULL,
-    UNIQUE(run_id, cohort_name, sequence)
-);
-
-CREATE TABLE IF NOT EXISTS capacity_campaigns (
-    campaign_id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL UNIQUE REFERENCES experiment_runs(id),
-    cohort_name TEXT NOT NULL,
-    config_hash TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    finished_at TEXT,
-    status TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS completion_window_epochs (
-    id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL REFERENCES experiment_runs(id),
-    cohort_name TEXT NOT NULL,
-    sequence INTEGER NOT NULL,
-    provider TEXT NOT NULL,
-    sku TEXT NOT NULL,
-    gpu_type TEXT NOT NULL,
-    region TEXT,
-    datacenter TEXT,
-    resource_class TEXT NOT NULL,
-    market TEXT NOT NULL,
-    target_depth INTEGER NOT NULL,
-    arm_name TEXT NOT NULL,
-    launch_fraction REAL NOT NULL,
-    assignment_probability REAL NOT NULL,
-    assignment_seed INTEGER NOT NULL,
-    release_offset_seconds REAL NOT NULL,
-    release_at TEXT NOT NULL,
-    allocation_deadline_at TEXT NOT NULL,
-    planned_launch_at TEXT NOT NULL,
-    released_at TEXT,
-    actual_decision_at TEXT,
-    decision_lag_seconds REAL,
-    release_quote_id TEXT REFERENCES catalog_quotes_v2(id),
-    decision_quote_id TEXT REFERENCES catalog_quotes_v2(id),
-    capacity_epoch_id TEXT,
-    provider_sla_met INTEGER,
-    application_sla_met INTEGER,
-    finished_at TEXT,
-    status TEXT NOT NULL,
-    stop_reason TEXT,
-    details_json TEXT NOT NULL,
-    UNIQUE(run_id, cohort_name, sequence)
-);
-
-CREATE TABLE IF NOT EXISTS canary_leases (
-    id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL REFERENCES experiment_runs(id),
-    provider TEXT NOT NULL,
-    sku TEXT NOT NULL,
-    gpu_type TEXT NOT NULL,
-    region TEXT,
-    datacenter TEXT,
-    resource_class TEXT NOT NULL,
-    market TEXT NOT NULL,
-    interruptible INTEGER NOT NULL,
-    pair_id TEXT,
-    provider_resource_id TEXT,
-    machine_id TEXT,
-    planned_end_at TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    provider_ready_at TEXT,
-    application_ready_at TEXT,
-    last_heartbeat_at TEXT,
-    event_at TEXT,
-    censor_reason TEXT,
-    operator_cleanup_at TEXT,
-    cleaned_at TEXT,
-    status TEXT NOT NULL,
-    details_json TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS canary_epochs (
-    id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL REFERENCES experiment_runs(id),
-    cohort_name TEXT NOT NULL,
-    sequence INTEGER NOT NULL,
-    provider TEXT NOT NULL,
-    sku TEXT NOT NULL,
-    gpu_type TEXT NOT NULL,
-    region TEXT,
-    datacenter TEXT,
-    resource_class TEXT NOT NULL,
-    planned_duration_seconds REAL NOT NULL,
-    interval_seconds REAL NOT NULL,
-    selection_probability REAL NOT NULL,
-    selection_seed INTEGER,
-    selected_at TEXT NOT NULL,
-    started_at TEXT,
-    planned_end_at TEXT,
-    finished_at TEXT,
-    status TEXT NOT NULL,
-    stop_reason TEXT,
-    details_json TEXT NOT NULL,
-    UNIQUE(run_id, cohort_name, sequence)
-);
-
-CREATE TABLE IF NOT EXISTS canary_observations (
-    id TEXT PRIMARY KEY,
-    lease_id TEXT NOT NULL REFERENCES canary_leases(id),
-    observed_at TEXT NOT NULL,
-    provider_state TEXT,
-    machine_id TEXT,
-    runtime_uptime_seconds REAL,
-    realized_price_usd_hr REAL,
-    provider_location TEXT,
-    heartbeat_ok INTEGER,
-    heartbeat_latency_ms INTEGER,
-    heartbeat_version TEXT,
-    host_observation_id TEXT REFERENCES host_observations(id),
-    raw_json TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS cleanup_events (
-    id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL REFERENCES experiment_runs(id),
-    owner_type TEXT NOT NULL,
-    owner_id TEXT NOT NULL,
-    provider TEXT NOT NULL,
-    provider_resource_id TEXT NOT NULL,
-    observed_at TEXT NOT NULL,
-    action TEXT NOT NULL,
-    status TEXT NOT NULL,
-    failure_class TEXT,
-    details_json TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS budget_ledger_v2 (
-    id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL REFERENCES experiment_runs(id),
-    observed_at TEXT NOT NULL,
-    provider TEXT NOT NULL,
-    amount_usd REAL NOT NULL,
-    kind TEXT NOT NULL,
-    reference TEXT,
-    details_json TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS provider_billing_records (
-    id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL REFERENCES experiment_runs(id),
-    provider TEXT NOT NULL,
-    provider_resource_id TEXT,
-    period_start TEXT NOT NULL,
-    amount_usd REAL NOT NULL,
-    billed_duration_ms INTEGER,
-    currency TEXT NOT NULL,
-    source TEXT NOT NULL,
-    source_record_id TEXT NOT NULL,
-    gpu_type TEXT,
-    disk_space_billed_gb REAL,
-    imported_at TEXT NOT NULL,
-    raw_json TEXT NOT NULL,
-    UNIQUE(run_id, provider, source, source_record_id)
-);
-
-CREATE TABLE IF NOT EXISTS cost_reconciliations (
-    id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL REFERENCES experiment_runs(id),
-    provider TEXT NOT NULL,
-    provider_resource_id TEXT NOT NULL,
-    owner_type TEXT,
-    owner_id TEXT,
-    estimated_amount_usd REAL,
-    billed_amount_usd REAL,
-    variance_usd REAL,
-    billing_record_count INTEGER NOT NULL,
-    status TEXT NOT NULL,
-    method TEXT NOT NULL,
-    reconciled_at TEXT NOT NULL,
-    details_json TEXT NOT NULL,
-    UNIQUE(run_id, provider, provider_resource_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_quotes_run_cell_time
-    ON catalog_quotes_v2(run_id, provider, sku, resource_class, observed_at);
-CREATE INDEX IF NOT EXISTS idx_replicas_provider_resource
-    ON capacity_replicas(provider_resource_id, cleaned_at);
-CREATE INDEX IF NOT EXISTS idx_capacity_epochs_run_cohort
-    ON capacity_epochs(run_id, cohort_name, sequence);
-CREATE INDEX IF NOT EXISTS idx_completion_window_epochs_run_cohort
-    ON completion_window_epochs(run_id, cohort_name, sequence);
-CREATE INDEX IF NOT EXISTS idx_canaries_provider_resource
-    ON canary_leases(provider_resource_id, cleaned_at);
-CREATE INDEX IF NOT EXISTS idx_canaries_pair
-    ON canary_leases(pair_id);
-CREATE INDEX IF NOT EXISTS idx_canary_epochs_run_cohort
-    ON canary_epochs(run_id, cohort_name, sequence);
-CREATE INDEX IF NOT EXISTS idx_budget_run_provider
-    ON budget_ledger_v2(run_id, provider);
-CREATE INDEX IF NOT EXISTS idx_billing_run_resource
-    ON provider_billing_records(run_id, provider, provider_resource_id);
-CREATE INDEX IF NOT EXISTS idx_reconciliation_run_status
-    ON cost_reconciliations(run_id, status);
-"""
+SCHEMA = (
+    importlib.resources.files(__package__)
+    .joinpath("schema.sql")
+    .read_text(encoding="utf-8")
+)
 
 
-class ResearchStore:
+class TraceStore:
     def __init__(self, path: str | pathlib.Path):
         self.path = str(path)
         if self.path != ":memory:":
@@ -436,8 +97,51 @@ class ResearchStore:
         collector_revision: str | None = None,
         python_version: str | None = None,
     ) -> str:
+        config_json = json_text(
+            {"experiment": dataclasses.asdict(config), "document": config_document}
+        )
+        return self._start_trace_run(
+            protocol_version=config.protocol_version,
+            config_json=config_json,
+            host_id=config.host_id,
+            vantage_id=config.vantage_id,
+            total_budget_usd=config.total_budget_usd,
+            max_active_gpus_per_provider=config.max_active_gpus_per_provider,
+            collector_revision=collector_revision,
+            python_version=python_version,
+        )
+
+    def start_collection(
+        self,
+        config: CollectionConfig,
+        *,
+        collector_revision: str | None = None,
+        python_version: str | None = None,
+    ) -> str:
+        return self._start_trace_run(
+            protocol_version=config.protocol_version,
+            config_json=json_text({"collection": dataclasses.asdict(config)}),
+            host_id=config.host_id,
+            vantage_id=config.vantage_id,
+            total_budget_usd=0.0,
+            max_active_gpus_per_provider=0,
+            collector_revision=collector_revision,
+            python_version=python_version,
+        )
+
+    def _start_trace_run(
+        self,
+        *,
+        protocol_version: str,
+        config_json: str,
+        host_id: str,
+        vantage_id: str,
+        total_budget_usd: float,
+        max_active_gpus_per_provider: int,
+        collector_revision: str | None,
+        python_version: str | None,
+    ) -> str:
         run_id = str(uuid.uuid4())
-        config_json = json_text({"experiment": dataclasses.asdict(config), "document": config_document})
         config_hash = hashlib.sha256(config_json.encode()).hexdigest()
         with self._lock, self.connection:
             self.connection.execute(
@@ -450,16 +154,16 @@ class ResearchStore:
                 """,
                 (
                     run_id,
-                    config.protocol_version,
+                    protocol_version,
                     config_hash,
                     config_json,
-                    config.host_id,
-                    config.vantage_id,
+                    host_id,
+                    vantage_id,
                     collector_revision,
                     python_version,
                     utc_now(),
-                    config.total_budget_usd,
-                    config.max_active_gpus_per_provider,
+                    total_budget_usd,
+                    max_active_gpus_per_provider,
                 ),
             )
         return run_id
@@ -752,6 +456,422 @@ class ResearchStore:
             )
         return True
 
+    def ensure_stability_campaign(
+        self,
+        config: ExperimentConfig,
+        config_document: dict[str, Any],
+        *,
+        campaign_id: str,
+        cohort_name: str,
+        started_at: str,
+        windows: list[dict[str, Any]],
+        collector_revision: str | None = None,
+        python_version: str | None = None,
+    ) -> tuple[str, bool]:
+        if not campaign_id.strip() or not cohort_name.strip():
+            raise ValueError("stability campaign ID and cohort name are required")
+        if not windows:
+            raise ValueError("stability campaign requires scheduled windows")
+        config_json = json_text(
+            {"experiment": dataclasses.asdict(config), "document": config_document}
+        )
+        config_hash = hashlib.sha256(config_json.encode()).hexdigest()
+        with self._lock:
+            self.connection.execute("BEGIN IMMEDIATE")
+            try:
+                existing = self.connection.execute(
+                    "SELECT * FROM stability_campaigns WHERE campaign_id=?",
+                    (campaign_id,),
+                ).fetchone()
+                if existing is not None:
+                    if (
+                        existing["config_hash"] != config_hash
+                        or existing["cohort_name"] != cohort_name
+                    ):
+                        raise ValueError(
+                            "stability database already uses a different "
+                            "experiment definition"
+                        )
+                    self.connection.commit()
+                    return str(existing["run_id"]), False
+
+                run_id = str(uuid.uuid4())
+                self.connection.execute(
+                    """
+                    INSERT INTO experiment_runs
+                      (id, protocol_version, config_hash, config_json, host_id,
+                       vantage_id, collector_revision, python_version, started_at,
+                       status, total_budget_usd, max_active_gpus_per_provider)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)
+                    """,
+                    (
+                        run_id,
+                        config.protocol_version,
+                        config_hash,
+                        config_json,
+                        config.host_id,
+                        config.vantage_id,
+                        collector_revision,
+                        python_version,
+                        started_at,
+                        config.total_budget_usd,
+                        config.max_active_gpus_per_provider,
+                    ),
+                )
+                self.connection.execute(
+                    """
+                    INSERT INTO stability_campaigns
+                      (campaign_id, run_id, cohort_name, config_hash, created_at,
+                       status)
+                    VALUES (?, ?, ?, ?, ?, 'running')
+                    """,
+                    (campaign_id, run_id, cohort_name, config_hash, started_at),
+                )
+                for window in windows:
+                    self.connection.execute(
+                        """
+                        INSERT INTO stability_windows
+                          (id, run_id, cohort_name, sequence,
+                           scheduled_offset_seconds, scheduled_at,
+                           scheduled_end_at, status, details_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, 'scheduled', ?)
+                        """,
+                        (
+                            str(uuid.uuid4()),
+                            run_id,
+                            cohort_name,
+                            int(window["sequence"]),
+                            float(window["scheduled_offset_seconds"]),
+                            str(window["scheduled_at"]),
+                            str(window["scheduled_end_at"]),
+                            json_text(window.get("details") or {}),
+                        ),
+                    )
+                self.connection.commit()
+                return run_id, True
+            except Exception:
+                self.connection.rollback()
+                raise
+
+    def stability_campaign_row(self, campaign_id: str) -> sqlite3.Row:
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT * FROM stability_campaigns WHERE campaign_id=?",
+                (campaign_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(campaign_id)
+        return row
+
+    def stability_campaign_for_run(self, run_id: str) -> sqlite3.Row | None:
+        with self._lock:
+            return self.connection.execute(
+                "SELECT * FROM stability_campaigns WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+
+    def resume_stability_campaign(self, run_id: str) -> None:
+        with self._lock, self.connection:
+            campaign = self.connection.execute(
+                "SELECT * FROM stability_campaigns WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+            if campaign is None:
+                raise KeyError(run_id)
+            self.connection.execute(
+                """
+                UPDATE stability_campaigns
+                SET status='running', finished_at=NULL WHERE run_id=?
+                """,
+                (run_id,),
+            )
+            self.connection.execute(
+                """
+                UPDATE experiment_runs
+                SET status='running', finished_at=NULL,
+                    termination_reason='resumed_after_collector_loss'
+                WHERE id=?
+                """,
+                (run_id,),
+            )
+
+    def claim_due_stability_window(
+        self,
+        campaign_id: str,
+        *,
+        due_at: str,
+    ) -> tuple[str, sqlite3.Row | None]:
+        with self._lock:
+            self.connection.execute("BEGIN IMMEDIATE")
+            try:
+                campaign = self.connection.execute(
+                    "SELECT * FROM stability_campaigns WHERE campaign_id=?",
+                    (campaign_id,),
+                ).fetchone()
+                if campaign is None:
+                    raise KeyError(campaign_id)
+                if campaign["status"] != "running":
+                    self.connection.commit()
+                    return "complete", None
+                active = self.connection.execute(
+                    """
+                    SELECT * FROM stability_windows
+                    WHERE run_id=? AND cohort_name=?
+                      AND status IN ('claimed', 'running')
+                    ORDER BY sequence LIMIT 1
+                    """,
+                    (campaign["run_id"], campaign["cohort_name"]),
+                ).fetchone()
+                if active is not None:
+                    self.connection.commit()
+                    return "busy", active
+                unresolved = self.connection.execute(
+                    """
+                    SELECT
+                      (SELECT COUNT(*) FROM capacity_replicas
+                       WHERE provider_resource_id IS NOT NULL AND cleaned_at IS NULL)
+                      +
+                      (SELECT COUNT(*) FROM canary_leases
+                       WHERE provider_resource_id IS NOT NULL AND cleaned_at IS NULL)
+                    """
+                ).fetchone()[0]
+                if unresolved:
+                    self.connection.commit()
+                    return "cleanup_blocked", None
+                finished_at = utc_now()
+                self.connection.execute(
+                    """
+                    UPDATE stability_windows
+                    SET status='missed', stop_reason='external_scheduler_late',
+                        finished_at=?
+                    WHERE run_id=? AND cohort_name=? AND status='scheduled'
+                      AND scheduled_end_at<=?
+                    """,
+                    (
+                        finished_at,
+                        campaign["run_id"],
+                        campaign["cohort_name"],
+                        due_at,
+                    ),
+                )
+                window = self.connection.execute(
+                    """
+                    SELECT * FROM stability_windows
+                    WHERE run_id=? AND cohort_name=? AND status='scheduled'
+                      AND scheduled_at<=? AND scheduled_end_at>?
+                    ORDER BY scheduled_at, sequence LIMIT 1
+                    """,
+                    (
+                        campaign["run_id"],
+                        campaign["cohort_name"],
+                        due_at,
+                        due_at,
+                    ),
+                ).fetchone()
+                if window is None:
+                    remaining = self.connection.execute(
+                        """
+                        SELECT COUNT(*) FROM stability_windows
+                        WHERE run_id=? AND cohort_name=? AND status='scheduled'
+                        """,
+                        (campaign["run_id"], campaign["cohort_name"]),
+                    ).fetchone()[0]
+                    self.connection.commit()
+                    return ("idle" if remaining else "complete"), None
+                updated = self.connection.execute(
+                    """
+                    UPDATE stability_windows
+                    SET status='claimed', claimed_at=?
+                    WHERE id=? AND status='scheduled'
+                    """,
+                    (finished_at, window["id"]),
+                )
+                if updated.rowcount != 1:
+                    self.connection.rollback()
+                    return "busy", None
+                claimed = self.connection.execute(
+                    "SELECT * FROM stability_windows WHERE id=?",
+                    (window["id"],),
+                ).fetchone()
+                self.connection.commit()
+                return "claimed", claimed
+            except Exception:
+                self.connection.rollback()
+                raise
+
+    def mark_stability_window_started(
+        self,
+        window_id: str,
+        *,
+        started_at: str,
+    ) -> None:
+        with self._lock, self.connection:
+            updated = self.connection.execute(
+                """
+                UPDATE stability_windows SET status='running', started_at=?
+                WHERE id=? AND status='claimed'
+                """,
+                (started_at, window_id),
+            )
+            if updated.rowcount != 1:
+                raise ValueError("stability window is not claimed")
+
+    def finish_stability_window(
+        self,
+        window_id: str,
+        *,
+        status: str,
+        stop_reason: str | None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        with self._lock, self.connection:
+            row = self.connection.execute(
+                "SELECT details_json FROM stability_windows WHERE id=?",
+                (window_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(window_id)
+            merged = json.loads(row["details_json"])
+            merged.update(details or {})
+            self.connection.execute(
+                """
+                UPDATE stability_windows
+                SET status=?, stop_reason=?, finished_at=?, details_json=?
+                WHERE id=?
+                """,
+                (status, stop_reason, utc_now(), json_text(merged), window_id),
+            )
+
+    def finish_active_stability_windows(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        stop_reason: str,
+        details: dict[str, Any] | None = None,
+    ) -> int:
+        with self._lock:
+            rows = self.connection.execute(
+                """
+                SELECT id, details_json FROM stability_windows
+                WHERE run_id=? AND status IN ('claimed', 'running')
+                """,
+                (run_id,),
+            ).fetchall()
+            with self.connection:
+                for row in rows:
+                    self.connection.execute(
+                        """
+                        UPDATE stability_windows
+                        SET status=?, stop_reason=?, finished_at=?, details_json=?
+                        WHERE id=?
+                        """,
+                        (
+                            status,
+                            stop_reason,
+                            utc_now(),
+                            merge_json_text(row["details_json"], details),
+                            row["id"],
+                        ),
+                    )
+        return len(rows)
+
+    def stop_remaining_stability_windows(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        stop_reason: str,
+    ) -> None:
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                UPDATE stability_windows
+                SET status=?, stop_reason=?, finished_at=?
+                WHERE run_id=? AND status='scheduled'
+                """,
+                (status, stop_reason, utc_now(), run_id),
+            )
+
+    def link_stability_window_epoch(self, window_id: str, epoch_id: str) -> None:
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO stability_window_epochs (window_id, epoch_id)
+                VALUES (?, ?)
+                """,
+                (window_id, epoch_id),
+            )
+
+    def stability_window_epoch_rows(self, window_id: str) -> list[sqlite3.Row]:
+        with self._lock:
+            return self.connection.execute(
+                """
+                SELECT e.* FROM canary_epochs e
+                JOIN stability_window_epochs l ON l.epoch_id=e.id
+                WHERE l.window_id=? ORDER BY e.sequence
+                """,
+                (window_id,),
+            ).fetchall()
+
+    def stability_window_rows(self, run_id: str) -> list[sqlite3.Row]:
+        with self._lock:
+            return self.connection.execute(
+                """
+                SELECT * FROM stability_windows
+                WHERE run_id=? ORDER BY sequence
+                """,
+                (run_id,),
+            ).fetchall()
+
+    def finish_stability_campaign_if_complete(
+        self,
+        campaign_id: str,
+        *,
+        campaign_status: str = "complete",
+        run_status: str = "complete",
+        termination_reason: str | None = None,
+    ) -> bool:
+        with self._lock, self.connection:
+            campaign = self.connection.execute(
+                "SELECT * FROM stability_campaigns WHERE campaign_id=?",
+                (campaign_id,),
+            ).fetchone()
+            if campaign is None:
+                raise KeyError(campaign_id)
+            remaining = self.connection.execute(
+                """
+                SELECT COUNT(*) FROM stability_windows
+                WHERE run_id=? AND cohort_name=?
+                  AND status IN ('scheduled', 'claimed', 'running')
+                """,
+                (campaign["run_id"], campaign["cohort_name"]),
+            ).fetchone()[0]
+            if remaining:
+                return False
+            finished_at = utc_now()
+            self.connection.execute(
+                """
+                UPDATE stability_campaigns
+                SET status=?, finished_at=? WHERE campaign_id=?
+                """,
+                (campaign_status, finished_at, campaign_id),
+            )
+            self.connection.execute(
+                """
+                UPDATE experiment_runs
+                SET status=?, finished_at=?, termination_reason=?
+                WHERE id=?
+                """,
+                (
+                    run_status,
+                    finished_at,
+                    termination_reason,
+                    campaign["run_id"],
+                ),
+            )
+        return True
+
     def finish_run(self, run_id: str, status: str, reason: str | None = None) -> None:
         with self._lock, self.connection:
             self.connection.execute(
@@ -894,7 +1014,9 @@ class ResearchStore:
                 (run_id,),
             ).fetchall()
 
-    def record_quote(self, run_id: str, quote: CatalogQuote, observed_at: str | None = None) -> str:
+    def record_quote(
+        self, run_id: str, quote: CatalogQuote, observed_at: str | None = None
+    ) -> str:
         quote_id = str(uuid.uuid4())
         raw_json = json_text(quote.raw)
         with self._lock, self.connection:
@@ -1118,159 +1240,6 @@ class ResearchStore:
                 (run_id,),
             ).fetchall()
 
-    def schedule_completion_window_epoch(
-        self,
-        run_id: str,
-        *,
-        cohort_name: str,
-        sequence: int,
-        cell: TrialCell,
-        target_depth: int,
-        arm_name: str,
-        launch_fraction: float,
-        assignment_probability: float,
-        assignment_seed: int,
-        release_offset_seconds: float,
-        release_at: str,
-        allocation_deadline_at: str,
-        planned_launch_at: str,
-        details: dict[str, Any] | None = None,
-    ) -> str:
-        if not cohort_name.strip() or not arm_name.strip():
-            raise ValueError("completion-window cohort and arm names are required")
-        if sequence < 0 or release_offset_seconds < 0:
-            raise ValueError("completion-window sequence and offset must not be negative")
-        validate_capacity_target(target_depth, cell.gpu_count)
-        if not 0 <= launch_fraction <= 1:
-            raise ValueError("completion-window launch fraction must be in [0, 1]")
-        if not 0 < assignment_probability <= 1:
-            raise ValueError("assignment_probability must be in (0, 1]")
-        epoch_id = str(uuid.uuid4())
-        with self._lock, self.connection:
-            self.connection.execute(
-                """
-                INSERT INTO completion_window_epochs
-                  (id, run_id, cohort_name, sequence, provider, sku, gpu_type,
-                   region, datacenter, resource_class, market, target_depth,
-                   arm_name, launch_fraction, assignment_probability,
-                   assignment_seed, release_offset_seconds, release_at,
-                   allocation_deadline_at, planned_launch_at, status, details_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                        'scheduled', ?)
-                """,
-                (
-                    epoch_id,
-                    run_id,
-                    cohort_name,
-                    sequence,
-                    cell.provider,
-                    cell.sku,
-                    cell.gpu_type,
-                    cell.region,
-                    cell.datacenter,
-                    cell.resource_class,
-                    cell.market,
-                    target_depth,
-                    arm_name,
-                    launch_fraction,
-                    assignment_probability,
-                    assignment_seed,
-                    release_offset_seconds,
-                    release_at,
-                    allocation_deadline_at,
-                    planned_launch_at,
-                    json_text(details or {}),
-                ),
-            )
-        return epoch_id
-
-    def mark_completion_window_released(
-        self,
-        epoch_id: str,
-        release_quote_id: str | None,
-    ) -> None:
-        with self._lock, self.connection:
-            self.connection.execute(
-                """
-                UPDATE completion_window_epochs
-                SET released_at=?, release_quote_id=?, status='released'
-                WHERE id=?
-                """,
-                (utc_now(), release_quote_id, epoch_id),
-            )
-
-    def mark_completion_window_decided(
-        self,
-        epoch_id: str,
-        *,
-        decision_quote_id: str | None,
-        decision_lag_seconds: float,
-        capacity_epoch_id: str,
-    ) -> None:
-        with self._lock, self.connection:
-            self.connection.execute(
-                """
-                UPDATE completion_window_epochs
-                SET actual_decision_at=?, decision_quote_id=?, decision_lag_seconds=?,
-                    capacity_epoch_id=?, status='decided'
-                WHERE id=?
-                """,
-                (
-                    utc_now(),
-                    decision_quote_id,
-                    decision_lag_seconds,
-                    capacity_epoch_id,
-                    epoch_id,
-                ),
-            )
-
-    def finish_completion_window_epoch(
-        self,
-        epoch_id: str,
-        *,
-        status: str,
-        stop_reason: str,
-        provider_sla_met: bool | None = None,
-        application_sla_met: bool | None = None,
-        details: dict[str, Any] | None = None,
-    ) -> None:
-        with self._lock, self.connection:
-            row = self.connection.execute(
-                "SELECT details_json FROM completion_window_epochs WHERE id=?",
-                (epoch_id,),
-            ).fetchone()
-            if row is None:
-                raise KeyError(epoch_id)
-            merged_details = json.loads(row["details_json"])
-            merged_details.update(details or {})
-            self.connection.execute(
-                """
-                UPDATE completion_window_epochs
-                SET finished_at=?, status=?, stop_reason=?, provider_sla_met=?,
-                    application_sla_met=?, details_json=?
-                WHERE id=?
-                """,
-                (
-                    utc_now(),
-                    status,
-                    stop_reason,
-                    None if provider_sla_met is None else int(provider_sla_met),
-                    None if application_sla_met is None else int(application_sla_met),
-                    json_text(merged_details),
-                    epoch_id,
-                ),
-            )
-
-    def completion_window_epoch_rows(self, run_id: str) -> list[sqlite3.Row]:
-        with self._lock:
-            return self.connection.execute(
-                """
-                SELECT * FROM completion_window_epochs
-                WHERE run_id=? ORDER BY cohort_name, sequence
-                """,
-                (run_id,),
-            ).fetchall()
-
     def start_replica(
         self,
         trial_id: str,
@@ -1289,7 +1258,15 @@ class ResearchStore:
                    status, retry_of, details_json)
                 VALUES (?, ?, ?, ?, ?, ?, 'requested', ?, '{}')
                 """,
-                (replica_id, trial_id, stage_target, ordinal, attempt, utc_now(), retry_of),
+                (
+                    replica_id,
+                    trial_id,
+                    stage_target,
+                    ordinal,
+                    attempt,
+                    utc_now(),
+                    retry_of,
+                ),
             )
             if retry_of is None:
                 self.connection.execute(
@@ -1344,7 +1321,8 @@ class ResearchStore:
     def mark_replica_cleaned(self, replica_id: str) -> None:
         with self._lock, self.connection:
             row = self.connection.execute(
-                "SELECT trial_id, cleaned_at FROM capacity_replicas WHERE id=?", (replica_id,)
+                "SELECT trial_id, cleaned_at FROM capacity_replicas WHERE id=?",
+                (replica_id,),
             ).fetchone()
             if row is None:
                 raise KeyError(replica_id)
@@ -1410,8 +1388,16 @@ class ResearchStore:
             ).fetchone()
             if row is None:
                 raise KeyError(replica_id)
-            provider_ready_at = utc_now() if provider_ready and row["provider_ready_at"] is None else row["provider_ready_at"]
-            application_ready_at = utc_now() if application_ready is True and row["application_ready_at"] is None else row["application_ready_at"]
+            provider_ready_at = (
+                utc_now()
+                if provider_ready and row["provider_ready_at"] is None
+                else row["provider_ready_at"]
+            )
+            application_ready_at = (
+                utc_now()
+                if application_ready is True and row["application_ready_at"] is None
+                else row["application_ready_at"]
+            )
             self.connection.execute(
                 """
                 UPDATE capacity_replicas
@@ -1428,7 +1414,11 @@ class ResearchStore:
                     provider_location,
                     machine_id,
                     realized_price_usd_hr,
-                    "application_ready" if application_ready_at else "provider_ready" if provider_ready_at else "accepted",
+                    "application_ready"
+                    if application_ready_at
+                    else "provider_ready"
+                    if provider_ready_at
+                    else "accepted",
                     merge_json_text(row["details_json"], details),
                     replica_id,
                 ),
@@ -1461,7 +1451,14 @@ class ResearchStore:
                     details_json=?
                 WHERE id=?
                 """,
-                (utc_now(), status, first_failed_stage, failure_class, json_text(details or {}), trial_id),
+                (
+                    utc_now(),
+                    status,
+                    first_failed_stage,
+                    failure_class,
+                    json_text(details or {}),
+                    trial_id,
+                ),
             )
 
     def capacity_trial_row(self, trial_id: str) -> sqlite3.Row:
@@ -1541,7 +1538,16 @@ class ResearchStore:
                   (id, run_id, observed_at, provider, amount_usd, kind, reference, details_json)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (entry_id, run_id, utc_now(), provider, amount_usd, kind, reference, json_text(details or {})),
+                (
+                    entry_id,
+                    run_id,
+                    utc_now(),
+                    provider,
+                    amount_usd,
+                    kind,
+                    reference,
+                    json_text(details or {}),
+                ),
             )
         return entry_id
 
@@ -1607,7 +1613,9 @@ class ResearchStore:
             ).fetchone()
         return float(row[0])
 
-    def owned_resources(self, run_id: str, provider: str | None = None) -> list[OwnedResource]:
+    def owned_resources(
+        self, run_id: str, provider: str | None = None
+    ) -> list[OwnedResource]:
         provider_clause = " AND t.provider=?" if provider else ""
         params: list[Any] = [run_id]
         if provider:
@@ -1636,11 +1644,25 @@ class ResearchStore:
                 canary_params,
             ).fetchall()
         resources = [
-            OwnedResource("capacity_replica", row["owner_id"], row["run_id"], row["provider"], row["provider_resource_id"], "gpu")
+            OwnedResource(
+                "capacity_replica",
+                row["owner_id"],
+                row["run_id"],
+                row["provider"],
+                row["provider_resource_id"],
+                "gpu",
+            )
             for row in replica_rows
         ]
         resources.extend(
-            OwnedResource("canary_lease", row["owner_id"], row["run_id"], row["provider"], row["provider_resource_id"], "gpu")
+            OwnedResource(
+                "canary_lease",
+                row["owner_id"],
+                row["run_id"],
+                row["provider"],
+                row["provider_resource_id"],
+                "gpu",
+            )
             for row in canary_rows
         )
         return resources
@@ -1951,7 +1973,13 @@ class ResearchStore:
                     datacenter=COALESCE(?, datacenter), status='active', details_json=?
                 WHERE id=?
                 """,
-                (provider_resource_id, machine_id, datacenter, json_text(details or {}), lease_id),
+                (
+                    provider_resource_id,
+                    machine_id,
+                    datacenter,
+                    json_text(details or {}),
+                    lease_id,
+                ),
             )
 
     def record_canary_observation(
@@ -1998,7 +2026,10 @@ class ResearchStore:
                     json_text(raw or {}),
                 ),
             )
-            fields = ["machine_id=COALESCE(?, machine_id)", "datacenter=COALESCE(?, datacenter)"]
+            fields = [
+                "machine_id=COALESCE(?, machine_id)",
+                "datacenter=COALESCE(?, datacenter)",
+            ]
             params: list[Any] = [machine_id, provider_location]
             if heartbeat_ok:
                 fields.append("provider_ready_at=COALESCE(provider_ready_at, ?)")
@@ -2011,7 +2042,9 @@ class ResearchStore:
             elif provider_state in ("RUNNING", "active"):
                 fields.append("provider_ready_at=COALESCE(provider_ready_at, ?)")
                 params.append(at)
-                fields.append("status=CASE WHEN status='application_ready' THEN status ELSE 'provider_ready' END")
+                fields.append(
+                    "status=CASE WHEN status='application_ready' THEN status ELSE 'provider_ready' END"
+                )
             params.append(lease_id)
             self.connection.execute(
                 f"UPDATE canary_leases SET {', '.join(fields)} WHERE id=?",

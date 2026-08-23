@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import dataclasses
+import platform
+import threading
 import time
 import urllib.request
 from collections.abc import Callable, Iterable
 
-from ..model import HostObservation
+from ..model import CollectionConfig, HostObservation
 from ..providers import CatalogFetch, classify_failure
-from ..storage import ResearchStore
+from ..storage import TraceStore
 
 
 @dataclasses.dataclass(frozen=True)
@@ -18,7 +20,7 @@ class PassiveResult:
 
 
 class PassiveWorker:
-    def __init__(self, store: ResearchStore, providers: Iterable[object]) -> None:
+    def __init__(self, store: TraceStore, providers: Iterable[object]) -> None:
         self.store = store
         self.providers = tuple(providers)
 
@@ -73,7 +75,7 @@ def default_network_probe(url: str, timeout: int = 10) -> tuple[str, int]:
 class HostMonitor:
     def __init__(
         self,
-        store: ResearchStore,
+        store: TraceStore,
         *,
         drift_threshold_seconds: float = 5.0,
         monotonic: Callable[[], float] = time.monotonic,
@@ -114,3 +116,94 @@ class HostMonitor:
             network_status=network_status,
             network_latency_ms=network_latency_ms,
         )
+
+
+class PassiveCollector:
+    def __init__(
+        self,
+        store: TraceStore,
+        providers: Iterable[object],
+        *,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.store = store
+        self.providers = tuple(providers)
+        self.monotonic = monotonic
+        self.stop_event = threading.Event()
+
+    def request_stop(self) -> None:
+        self.stop_event.set()
+
+    def run(self, config: CollectionConfig, *, once: bool = False) -> str:
+        run_id = self.store.start_collection(
+            config,
+            python_version=platform.python_version(),
+        )
+        worker = PassiveWorker(self.store, self.providers)
+        host_monitor = HostMonitor(
+            self.store,
+            monotonic=self.monotonic,
+            network_control_url=config.network_control_url,
+        )
+        started = self.monotonic()
+        deadline = (
+            started + config.duration_seconds
+            if config.duration_seconds is not None
+            else None
+        )
+        next_host = started
+        next_catalog = started
+        latest_host_id: str | None = None
+        try:
+            while True:
+                now = self.monotonic()
+                if now >= next_host:
+                    host = host_monitor.sample(run_id, next_host)
+                    latest_host_id = host.id
+                    next_host = self._next_deadline(
+                        next_host,
+                        config.host_interval_seconds,
+                        now,
+                    )
+                if now >= next_catalog:
+                    worker.run_once(
+                        run_id,
+                        gpu_counts=config.gpu_counts,
+                        host_observation_id=latest_host_id,
+                    )
+                    next_catalog = self._next_deadline(
+                        next_catalog,
+                        config.catalog_interval_seconds,
+                        now,
+                    )
+                if once:
+                    break
+                now = self.monotonic()
+                if self.stop_event.is_set() or (
+                    deadline is not None and now >= deadline
+                ):
+                    break
+                wake_at = min(next_host, next_catalog)
+                if deadline is not None:
+                    wake_at = min(wake_at, deadline)
+                self.stop_event.wait(max(0.0, wake_at - now))
+            if self.stop_event.is_set():
+                self.store.finish_run(run_id, "stopped", "operator_stop")
+            else:
+                self.store.finish_run(run_id, "complete")
+            return run_id
+        except Exception as error:
+            self.store.finish_run(
+                run_id,
+                "failed",
+                f"{type(error).__name__}: {error}",
+            )
+            raise
+
+    @staticmethod
+    def _next_deadline(scheduled: float, interval: float, now: float) -> float:
+        next_deadline = scheduled + interval
+        if next_deadline <= now:
+            missed = int((now - next_deadline) // interval) + 1
+            next_deadline += missed * interval
+        return next_deadline
