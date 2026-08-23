@@ -1,4 +1,4 @@
-ARG BUILDER_IMAGE=golang:1.25.12-bookworm
+ARG BUILDER_IMAGE=golang:1.25.13-bookworm
 ARG RUNTIME_IMAGE=gcr.io/distroless/static-debian12:nonroot
 
 FROM --platform=$BUILDPLATFORM ${BUILDER_IMAGE} AS builder
