@@ -32,6 +32,7 @@ import (
 	"github.com/aibrix/neocloud-node/pkg/core"
 	lambdacloud "github.com/aibrix/neocloud-node/pkg/providers/lambda"
 	"github.com/aibrix/neocloud-node/pkg/providers/runpod"
+	"github.com/aibrix/neocloud-node/pkg/providers/vast"
 	burstresource "github.com/aibrix/neocloud-node/pkg/resource"
 	"github.com/aibrix/neocloud-node/pkg/runner"
 	kstore "github.com/aibrix/neocloud-node/pkg/store/kubernetes"
@@ -44,6 +45,7 @@ const (
 	ProviderFake   = "fake"
 	ProviderRunPod = "runpod"
 	ProviderLambda = "lambda"
+	ProviderVast   = "vast"
 
 	BindingStoreMemory     = "memory"
 	BindingStoreKubernetes = "kubernetes"
@@ -75,6 +77,13 @@ type Options struct {
 	LambdaDefaultRegion string
 	LambdaInstanceType  string
 	LambdaSSHKeyNames   string
+
+	VastAPIKey             string
+	VastBaseURL            string
+	VastV1BaseURL          string
+	VastDiskGB             float64
+	VastMinimumReliability float64
+	VastOfferLimit         int
 
 	RequireMaxPrice bool
 	MaxGPUCount     int
@@ -126,6 +135,13 @@ func ParseOptions(args []string, getenv func(string) string) (Options, error) {
 		LambdaInstanceType:  envOr(getenv, "GPU_BURST_LAMBDA_INSTANCE_TYPE", ""),
 		LambdaSSHKeyNames:   envOr(getenv, "GPU_BURST_LAMBDA_SSH_KEY_NAMES", ""),
 
+		VastAPIKey:             envOr(getenv, "VAST_API_KEY", ""),
+		VastBaseURL:            envOr(getenv, "GPU_BURST_VAST_BASE_URL", ""),
+		VastV1BaseURL:          envOr(getenv, "GPU_BURST_VAST_V1_BASE_URL", ""),
+		VastDiskGB:             floatEnv(getenv, "GPU_BURST_VAST_DISK_GB", 20),
+		VastMinimumReliability: floatEnv(getenv, "GPU_BURST_VAST_MIN_RELIABILITY", 0.95),
+		VastOfferLimit:         intEnv(getenv, "GPU_BURST_VAST_OFFER_LIMIT", 100),
+
 		KubeletAPIEnabled: boolEnv(getenv, "GPU_BURST_ENABLE_KUBELET_API", false),
 		RequireMaxPrice:   boolEnv(getenv, "GPU_BURST_REQUIRE_MAX_PRICE", false),
 		AdvertiseGPUCount: intEnv(getenv, "GPU_BURST_ADVERTISE_GPU_COUNT", 100),
@@ -147,7 +163,7 @@ func ParseOptions(args []string, getenv func(string) string) (Options, error) {
 	fs := flag.NewFlagSet("neocloud-node", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.StringVar(&options.NodeName, "node-name", options.NodeName, "virtual node name")
-	fs.StringVar(&options.Provider, "provider", options.Provider, "provider adapter: fake, runpod or lambda")
+	fs.StringVar(&options.Provider, "provider", options.Provider, "provider adapter: fake, runpod, lambda or vast")
 	fs.StringVar(&options.FallbackProviders, "fallback-providers", options.FallbackProviders, "comma-separated provider adapters to try after the primary provider fails with a fallback-safe error")
 	fs.StringVar(&options.BindingStore, "binding-store", options.BindingStore, "binding store backend: kubernetes or memory")
 	fs.StringVar(&options.Kubeconfig, "kubeconfig", options.Kubeconfig, "path to kubeconfig")
@@ -165,6 +181,12 @@ func ParseOptions(args []string, getenv func(string) string) (Options, error) {
 	fs.StringVar(&options.LambdaDefaultRegion, "lambda-region", options.LambdaDefaultRegion, "default Lambda Cloud region")
 	fs.StringVar(&options.LambdaInstanceType, "lambda-instance-type", options.LambdaInstanceType, "default Lambda Cloud instance type")
 	fs.StringVar(&options.LambdaSSHKeyNames, "lambda-ssh-key-names", options.LambdaSSHKeyNames, "comma-separated default Lambda Cloud SSH key names")
+	fs.StringVar(&options.VastAPIKey, "vast-api-key", options.VastAPIKey, "Vast.ai API key")
+	fs.StringVar(&options.VastBaseURL, "vast-base-url", options.VastBaseURL, "Vast.ai v0 REST API base URL")
+	fs.StringVar(&options.VastV1BaseURL, "vast-v1-base-url", options.VastV1BaseURL, "Vast.ai v1 REST API base URL")
+	fs.Float64Var(&options.VastDiskGB, "vast-disk-gb", options.VastDiskGB, "default Vast.ai local disk size in GiB")
+	fs.Float64Var(&options.VastMinimumReliability, "vast-min-reliability", options.VastMinimumReliability, "minimum Vast.ai host reliability greater than 0 and at most 1")
+	fs.IntVar(&options.VastOfferLimit, "vast-offer-limit", options.VastOfferLimit, "maximum Vast.ai offers considered per search")
 	fs.BoolVar(&options.RequireMaxPrice, "require-max-price", options.RequireMaxPrice, "reject pods without max price annotation")
 	fs.IntVar(&options.MaxGPUCount, "max-gpu-count", intEnv(getenv, "GPU_BURST_MAX_GPU_COUNT", 0), "maximum GPUs per pod; 0 disables the guard")
 	fs.IntVar(&options.MaxPorts, "max-ports", intEnv(getenv, "GPU_BURST_MAX_PORTS", 0), "maximum exposed container ports per pod; 0 disables the guard")
@@ -648,6 +670,15 @@ func providerAdapterFor(options Options, provider string) (core.ProviderAdapter,
 			DefaultInstanceType: options.LambdaInstanceType,
 			DefaultSSHKeyNames:  commaSeparated(options.LambdaSSHKeyNames),
 		}), nil
+	case ProviderVast:
+		return vast.NewClient(vast.Config{
+			APIKey:             options.VastAPIKey,
+			BaseURL:            options.VastBaseURL,
+			V1BaseURL:          options.VastV1BaseURL,
+			DiskGB:             options.VastDiskGB,
+			MinimumReliability: options.VastMinimumReliability,
+			OfferLimit:         options.VastOfferLimit,
+		}), nil
 	default:
 		return nil, fmt.Errorf("unsupported provider %q", provider)
 	}
@@ -853,6 +884,10 @@ func validateOptions(options Options) error {
 		if strings.TrimSpace(options.LambdaAPIKey) == "" {
 			return errors.New("lambda provider requires --lambda-api-key or LAMBDA_API_KEY")
 		}
+	case ProviderVast:
+		if strings.TrimSpace(options.VastAPIKey) == "" {
+			return errors.New("vast provider requires --vast-api-key or VAST_API_KEY")
+		}
 	default:
 		return fmt.Errorf("unsupported provider %q", options.Provider)
 	}
@@ -890,6 +925,15 @@ func validateOptions(options Options) error {
 	if options.PlacementSignalCooldown < 0 {
 		return errors.New("placement signal cooldown cannot be negative")
 	}
+	if options.VastDiskGB <= 0 {
+		return errors.New("vast disk size must be greater than zero")
+	}
+	if options.VastMinimumReliability <= 0 || options.VastMinimumReliability > 1 {
+		return errors.New("vast minimum reliability must be greater than zero and at most one")
+	}
+	if options.VastOfferLimit <= 0 || options.VastOfferLimit > 1000 {
+		return errors.New("vast offer limit must be between 1 and 1000")
+	}
 	return nil
 }
 
@@ -905,6 +949,11 @@ func validateProviderConfigured(options Options, provider string) error {
 	case ProviderLambda:
 		if strings.TrimSpace(options.LambdaAPIKey) == "" {
 			return errors.New("lambda fallback provider requires --lambda-api-key or LAMBDA_API_KEY")
+		}
+		return nil
+	case ProviderVast:
+		if strings.TrimSpace(options.VastAPIKey) == "" {
+			return errors.New("vast fallback provider requires --vast-api-key or VAST_API_KEY")
 		}
 		return nil
 	default:
@@ -1001,6 +1050,18 @@ func intEnv(getenv func(string) string, key string, fallback int) int {
 		return fallback
 	}
 	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func floatEnv(getenv func(string) string, key string, fallback float64) float64 {
+	value := strings.TrimSpace(getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
 	if err != nil {
 		return fallback
 	}

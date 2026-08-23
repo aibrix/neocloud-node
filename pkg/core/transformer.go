@@ -27,6 +27,11 @@ const (
 	AnnotationLambdaImageID        = "cloud.aibrix.ai/lambda-image-id"
 	AnnotationLambdaFirewallIDs    = "cloud.aibrix.ai/lambda-firewall-ids"
 	AnnotationLambdaCallbackSecret = "cloud.aibrix.ai/lambda-callback-secret"
+
+	AnnotationVastVerified  = "cloud.aibrix.ai/vast-verified"
+	AnnotationVastMachineID = "cloud.aibrix.ai/vast-machine-id"
+	AnnotationVastDiskGB    = "cloud.aibrix.ai/vast-disk-gb"
+	AnnotationVastOfferID   = "cloud.aibrix.ai/vast-offer-id"
 )
 
 const (
@@ -223,6 +228,10 @@ func providerHints(annotations map[string]string) map[string]string {
 		AnnotationLambdaImageID,
 		AnnotationLambdaFirewallIDs,
 		AnnotationLambdaCallbackSecret,
+		AnnotationVastVerified,
+		AnnotationVastMachineID,
+		AnnotationVastDiskGB,
+		AnnotationVastOfferID,
 	} {
 		if value := strings.TrimSpace(annotations[key]); value != "" {
 			hints[key] = value

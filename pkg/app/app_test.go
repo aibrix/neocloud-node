@@ -427,6 +427,61 @@ func TestParseOptionsRequiresRunPodAPIKey(t *testing.T) {
 	}
 }
 
+func TestParseOptionsReadsVastConfiguration(t *testing.T) {
+	env := mapEnv(map[string]string{
+		"VAST_API_KEY":                   "vast-key",
+		"GPU_BURST_PROVIDER":             ProviderVast,
+		"GPU_BURST_VAST_BASE_URL":        "https://vast.example/api/v0",
+		"GPU_BURST_VAST_V1_BASE_URL":     "https://vast.example/api/v1",
+		"GPU_BURST_VAST_DISK_GB":         "30",
+		"GPU_BURST_VAST_MIN_RELIABILITY": "0.98",
+		"GPU_BURST_VAST_OFFER_LIMIT":     "250",
+	})
+
+	options, err := ParseOptions([]string{
+		"--binding-store=memory",
+		"--vast-disk-gb=25",
+		"--vast-offer-limit=120",
+	}, env)
+	if err != nil {
+		t.Fatalf("ParseOptions() error = %v", err)
+	}
+	if options.Provider != ProviderVast || options.VastAPIKey != "vast-key" {
+		t.Fatalf("provider/key = %q/%q, want vast/vast-key", options.Provider, options.VastAPIKey)
+	}
+	if options.VastBaseURL != "https://vast.example/api/v0" || options.VastV1BaseURL != "https://vast.example/api/v1" {
+		t.Fatalf("Vast URLs = %q/%q", options.VastBaseURL, options.VastV1BaseURL)
+	}
+	if options.VastDiskGB != 25 || options.VastMinimumReliability != 0.98 || options.VastOfferLimit != 120 {
+		t.Fatalf("Vast search config = disk:%v reliability:%v limit:%d", options.VastDiskGB, options.VastMinimumReliability, options.VastOfferLimit)
+	}
+	adapter, err := newProviderAdapter(options)
+	if err != nil || adapter == nil {
+		t.Fatalf("newProviderAdapter() = %#v, %v", adapter, err)
+	}
+}
+
+func TestParseOptionsRequiresVastAPIKey(t *testing.T) {
+	_, err := ParseOptions([]string{"--provider=vast"}, emptyEnv)
+	if err == nil {
+		t.Fatal("ParseOptions() error = nil, want missing Vast API key error")
+	}
+}
+
+func TestParseOptionsValidatesVastSearchConfiguration(t *testing.T) {
+	for _, args := range [][]string{
+		{"--vast-disk-gb=0"},
+		{"--vast-min-reliability=0"},
+		{"--vast-min-reliability=1.1"},
+		{"--vast-offer-limit=0"},
+		{"--vast-offer-limit=1001"},
+	} {
+		if _, err := ParseOptions(args, emptyEnv); err == nil {
+			t.Fatalf("ParseOptions(%v) error = nil", args)
+		}
+	}
+}
+
 func TestParseOptionsReadsLambdaOptions(t *testing.T) {
 	env := mapEnv(map[string]string{
 		"LAMBDA_API_KEY":                   "lambda-key",
