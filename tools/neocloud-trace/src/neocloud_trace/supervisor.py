@@ -1239,6 +1239,30 @@ class PilotSupervisor:
         ).total_seconds()
         if remaining_seconds <= 0:
             raise RuntimeError("claimed stability window has already ended")
+        if remaining_seconds < cohort.min_remaining_seconds:
+            self.store.finish_stability_window(
+                window["id"],
+                status="missed",
+                stop_reason="external_scheduler_late",
+                details={
+                    "remaining_seconds_at_claim": remaining_seconds,
+                    "minimum_remaining_seconds": cohort.min_remaining_seconds,
+                },
+            )
+            campaign_complete = self.store.finish_stability_campaign_if_complete(
+                campaign_id
+            )
+            return {
+                "campaign_id": campaign_id,
+                "campaign_created": campaign_created,
+                "run_id": run_id,
+                "cohort_name": cohort.name,
+                "status": "missed",
+                "window_id": window["id"],
+                "window_sequence": sequence,
+                "window_status": "missed",
+                "campaign_complete": campaign_complete,
+            }
         hard_deadline = self.monotonic() + remaining_seconds
         self.store.mark_stability_window_started(
             window["id"],
@@ -1265,13 +1289,14 @@ class PilotSupervisor:
                 daemon=True,
             ),
         ]
-        for thread in threads:
-            thread.start()
-
         window_status = "complete"
         stop_reason: str | None = "window_elapsed"
         caught_error: Exception | None = None
+        started_threads: list[threading.Thread] = []
         try:
+            for thread in threads:
+                thread.start()
+                started_threads.append(thread)
             completed = self._run_canary_cohort(
                 run_id,
                 cohort,
@@ -1314,7 +1339,7 @@ class PilotSupervisor:
                 plan.host_interval_seconds,
                 plan.passive_interval_seconds,
             ) + 5
-            for thread in threads:
+            for thread in started_threads:
                 thread.join(timeout=join_timeout)
             censor_reason = (
                 TerminalReason.RIGHT_CENSORED_COLLECTOR_LOSS

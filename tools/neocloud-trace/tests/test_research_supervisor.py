@@ -1672,6 +1672,45 @@ class ResearchSupervisorTest(unittest.TestCase):
         )
         self.assertEqual(windows[0]["stop_reason"], "external_scheduler_late")
 
+    def test_stability_run_does_not_complete_a_too_late_zero_pair_window(self):
+        document = stability_plan_document()
+        document["canary_cohorts"][0]["min_remaining_seconds"] = 0.05
+        document["stability_schedule"] = {
+            "window_count": 1,
+            "schedule_seed": 31,
+            "initial_delay_seconds": 0.1,
+            "interval_seconds": 0.3,
+            "jitter_seconds": 0,
+        }
+        self.plan_path.write_text(json.dumps(document), encoding="utf-8")
+        plan = load_plan(self.plan_path)
+        store = TraceStore(self.root / "stability-too-late.db")
+        self.addCleanup(store.close)
+        now = dt.datetime(2026, 8, 11, tzinfo=dt.timezone.utc)
+        provider = FastFailingCanaryProvider()
+
+        initialized = PilotSupervisor(store, {"lambda": provider}).stability_run(
+            plan,
+            campaign_id="stability-too-late",
+            enable_active=True,
+            now=now,
+        )
+        late = PilotSupervisor(store, {"lambda": provider}).stability_run(
+            plan,
+            campaign_id="stability-too-late",
+            enable_active=True,
+            now=now + dt.timedelta(seconds=0.28),
+        )
+
+        windows = store.stability_window_rows(initialized["run_id"])
+        self.assertEqual(initialized["status"], "idle")
+        self.assertEqual(late["status"], "missed")
+        self.assertEqual(late["window_status"], "missed")
+        self.assertTrue(late["campaign_complete"])
+        self.assertEqual(windows[0]["stop_reason"], "external_scheduler_late")
+        self.assertEqual(store.canary_epoch_rows(initialized["run_id"]), [])
+        self.assertEqual(provider.created, [])
+
     def test_stability_run_executes_one_window_and_links_canary_epochs(self):
         document = stability_plan_document()
         self.plan_path.write_text(json.dumps(document), encoding="utf-8")
