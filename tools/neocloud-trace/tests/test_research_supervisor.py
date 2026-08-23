@@ -268,7 +268,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         plan = load_plan(self.plan_path)
         trial = plan.capacity_cohorts[0].cells[0]
 
-        self.assertEqual(trial.target_depth, 32)
+        self.assertEqual(trial.target_gpu_depth, 32)
         self.assertEqual(trial.cell.gpu_count, 4)
         self.assertEqual(trial.target_instance_count, 8)
         self.assertAlmostEqual(trial.budget_upper_bound_usd, 6.9)
@@ -371,8 +371,6 @@ class ResearchSupervisorTest(unittest.TestCase):
         self.assertIn("run", top_level_help)
         self.assertIn("tick", top_level_help)
         self.assertIn("catalog", top_level_help)
-        self.assertNotIn("capacity-once", top_level_help)
-        self.assertNotIn("capacity-tick", top_level_help)
 
         output = io.StringIO()
         with contextlib.redirect_stdout(output), self.assertRaises(SystemExit):
@@ -387,11 +385,6 @@ class ResearchSupervisorTest(unittest.TestCase):
             "--experiment-id",
         ):
             self.assertIn(option, run_help)
-        self.assertNotIn("--target", run_help)
-        self.assertNotIn("--index", run_help)
-        self.assertNotIn("--campaign-id", run_help)
-        self.assertNotIn("--enable-active", run_help)
-
         output = io.StringIO()
         with contextlib.redirect_stdout(output), self.assertRaises(SystemExit):
             parser.parse_args(["catalog", "--help"])
@@ -400,9 +393,6 @@ class ResearchSupervisorTest(unittest.TestCase):
         self.assertIn("--vantage-id", catalog_help)
         self.assertNotIn("--plan", catalog_help)
         self.assertNotIn("--host-id", catalog_help)
-
-        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-            parser.parse_args(["collect", "--db", "trace.db", "--provider", "runpod"])
 
     def test_catalog_cli_deduplicates_repeated_query_dimensions(self):
         args = trace_cli.build_parser().parse_args(
@@ -463,7 +453,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         self.assertEqual(result["workflow"], "catalog")
         self.assertIsNone(result["experiment_id"])
         self.assertEqual(result["counts"]["host_observations"], 1)
-        self.assertEqual(result["counts"]["provider_api_observations_v2"], 1)
+        self.assertEqual(result["counts"]["provider_api_observations"], 1)
 
     def test_cli_metadata_has_one_resolution_rule_for_every_plan_command(self):
         document = plan_document()
@@ -557,7 +547,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         store = TraceStore(db_path)
         run_id = store.start_run(plan.experiment, plan.raw_document)
         cell = plan.capacity_cohorts[0].cells[0].cell
-        trial_id = store.start_capacity_trial(run_id, cell, target_depth=1)
+        trial_id = store.start_capacity_trial(run_id, cell, target_gpu_depth=1)
         replica_id = store.start_replica(trial_id, stage_target=1, ordinal=0)
         store.mark_replica_created(replica_id, "preview-instance", 0.6)
         store.close()
@@ -602,7 +592,7 @@ class ResearchSupervisorTest(unittest.TestCase):
                                 "region": "us-east-1",
                                 "resource_class": "on-demand",
                                 "market": "on-demand",
-                                "target_depth": 1,
+                                "target_gpu_depth": 1,
                                 "ready_timeout_seconds": 1,
                                 "max_lease_seconds": 60,
                                 "estimated_price_usd_hr": 0.6,
@@ -688,9 +678,9 @@ class ResearchSupervisorTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exactly one capacity_cohorts"):
             module.execute(args)
 
-    def test_tick_contract_rejects_legacy_trials_before_db_or_provider(self):
+    def test_tick_contract_rejects_unknown_plan_fields_before_db_or_provider(self):
         document = plan_document()
-        document["capacity_trials"] = [document["capacity_cohorts"][0]["cells"][0]]
+        document["unexpected_section"] = {"enabled": True}
         self.plan_path.write_text(json.dumps(document), encoding="utf-8")
         db_path = self.root / "invalid-capacity.db"
         args = trace_cli.build_parser().parse_args(
@@ -707,7 +697,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         with mock.patch.object(trace_cli, "_provider_clients") as clients:
             with self.assertRaisesRegex(
                 ValueError,
-                "unsupported active plan sections: capacity_trials",
+                "unsupported plan fields: unexpected_section",
             ):
                 trace_cli.execute(args)
 
@@ -733,7 +723,7 @@ class ResearchSupervisorTest(unittest.TestCase):
                                 "region": "us-east-1",
                                 "resource_class": "on-demand",
                                 "market": "on-demand",
-                                "target_depth": 1,
+                                "target_gpu_depth": 1,
                                 "ready_timeout_seconds": 1,
                                 "max_lease_seconds": 60,
                                 "estimated_price_usd_hr": 0.6,
@@ -761,11 +751,9 @@ class ResearchSupervisorTest(unittest.TestCase):
 
         self.assertFalse(db_path.exists())
 
-    def test_run_contract_rejects_mixed_plan_before_db_or_provider(self):
+    def test_run_contract_rejects_unknown_plan_fields_before_db_or_provider(self):
         document = stability_plan_document()
-        document["capacity_trials"] = [
-            plan_document()["capacity_cohorts"][0]["cells"][0]
-        ]
+        document["unexpected_section"] = {"enabled": True}
         self.plan_path.write_text(json.dumps(document), encoding="utf-8")
         db_path = self.root / "invalid-stability.db"
         args = trace_cli.build_parser().parse_args(
@@ -782,34 +770,12 @@ class ResearchSupervisorTest(unittest.TestCase):
         with mock.patch.object(trace_cli, "_provider_clients") as clients:
             with self.assertRaisesRegex(
                 ValueError,
-                "unsupported active plan sections: capacity_trials",
+                "unsupported plan fields: unexpected_section",
             ):
                 trace_cli.execute(args)
 
         clients.assert_not_called()
         self.assertFalse(db_path.exists())
-
-    def test_active_commands_have_no_plan_section_selectors(self):
-        self.plan_path.write_text(
-            json.dumps(stability_plan_document()),
-            encoding="utf-8",
-        )
-        parser = trace_cli.build_parser()
-        for command, selector in (("run", "--target"), ("tick", "--index")):
-            with contextlib.redirect_stderr(io.StringIO()):
-                with self.assertRaises(SystemExit):
-                    parser.parse_args(
-                        [
-                            command,
-                            "--db",
-                            str(self.root / f"{command}.db"),
-                            "--plan",
-                            str(self.plan_path),
-                            selector,
-                            "0",
-                            "--execute",
-                        ]
-                    )
 
     def test_run_cli_reuses_durable_stability_experiment(self):
         document = stability_plan_document()
@@ -920,7 +886,7 @@ class ResearchSupervisorTest(unittest.TestCase):
             market="on-demand",
             gpu_count=4,
         )
-        trial_id = store.start_capacity_trial(run_id, cell, target_depth=32)
+        trial_id = store.start_capacity_trial(run_id, cell, target_gpu_depth=32)
         replica_id = store.start_replica(trial_id, stage_target=4, ordinal=0)
         store.mark_replica_created(
             replica_id,
@@ -976,7 +942,7 @@ class ResearchSupervisorTest(unittest.TestCase):
 
         self.assertAlmostEqual(store.provider_spend(run_id, "lambda"), 1.0)
         settlements = store.connection.execute(
-            "SELECT COUNT(*) FROM budget_ledger_v2 "
+            "SELECT COUNT(*) FROM budget_ledger "
             "WHERE run_id=? AND reference='pair-1' AND kind='settled_runtime_estimate'",
             (run_id,),
         ).fetchone()[0]
@@ -1093,9 +1059,9 @@ class ResearchSupervisorTest(unittest.TestCase):
         run_id = result["run_id"]
 
         reasons = {
-            row["interruptible"]: row["censor_reason"]
+            row["interruptible"]: row["terminal_reason"]
             for row in store.connection.execute(
-                "SELECT interruptible, censor_reason FROM canary_leases WHERE run_id=?",
+                "SELECT interruptible, terminal_reason FROM canary_leases WHERE run_id=?",
                 (run_id,),
             ).fetchall()
         }
@@ -1191,23 +1157,23 @@ class ResearchSupervisorTest(unittest.TestCase):
             planned_end_at="2026-08-10T01:00:00+00:00",
         )
         store.mark_canary_created(lease_id, provider_resource_id="instance-1")
-        legacy_lease_id = store.start_canary(
+        unlinked_lease_id = store.start_canary(
             run_id,
             cell,
-            pair_id="legacy-pair-without-epoch",
+            pair_id="unlinked-pair-without-epoch",
             interruptible=False,
             planned_end_at="2026-08-10T01:00:00+00:00",
         )
         store.mark_canary_created(
-            legacy_lease_id,
-            provider_resource_id="instance-legacy",
+            unlinked_lease_id,
+            provider_resource_id="instance-unlinked",
         )
         capacity_epoch_id = store.schedule_capacity_epoch(
             run_id,
             cohort_name="recovery-depth",
             sequence=0,
             cell=cell,
-            target_depth=1,
+            target_gpu_depth=1,
             scheduled_offset_seconds=0,
             scheduled_at="2026-08-10T00:00:00+00:00",
             selection_probability=1,
@@ -1221,7 +1187,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         store.start_capacity_trial(
             run_id,
             cell,
-            target_depth=1,
+            target_gpu_depth=1,
             trial_id=capacity_epoch_id,
         )
         replica_id = store.start_replica(
@@ -1237,11 +1203,11 @@ class ResearchSupervisorTest(unittest.TestCase):
 
         self.assertEqual(remaining, [])
         self.assertEqual(
-            store.canary_row(lease_id)["censor_reason"],
+            store.canary_row(lease_id)["terminal_reason"],
             "right_censored_collector_loss",
         )
         self.assertEqual(
-            store.canary_row(legacy_lease_id)["censor_reason"],
+            store.canary_row(unlinked_lease_id)["terminal_reason"],
             "right_censored_collector_loss",
         )
         self.assertEqual(
@@ -1281,7 +1247,7 @@ class ResearchSupervisorTest(unittest.TestCase):
             cohort_name="operator-depth",
             sequence=0,
             cell=cell,
-            target_depth=1,
+            target_gpu_depth=1,
             scheduled_offset_seconds=0,
             scheduled_at="2026-08-10T00:00:00+00:00",
             selection_probability=1,
@@ -1295,7 +1261,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         store.start_capacity_trial(
             run_id,
             cell,
-            target_depth=1,
+            target_gpu_depth=1,
             trial_id=capacity_epoch_id,
         )
         replica_id = store.start_replica(
@@ -1344,7 +1310,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         )
         self.assertEqual(capacity_epoch["status"], "operator_stop")
         self.assertEqual(
-            store.canary_row(lease_id)["censor_reason"],
+            store.canary_row(lease_id)["terminal_reason"],
             "operator_cleanup",
         )
         self.assertEqual(
@@ -1356,7 +1322,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         document = plan_document()
         document.update(
             {
-                "protocol_version": "5.0-capacity-tick",
+                "protocol_version": "5.0-capacity",
                 "duration_seconds": 180,
                 "max_active_gpus_per_provider": 1,
                 "provider_budgets_usd": {"runpod": 1.0},
@@ -1378,7 +1344,7 @@ class ResearchSupervisorTest(unittest.TestCase):
                                 "gpu_type": "A40",
                                 "resource_class": "secure",
                                 "market": "on-demand",
-                                "target_depth": 1,
+                                "target_gpu_depth": 1,
                                 "ready_timeout_seconds": 1,
                                 "max_lease_seconds": 60,
                                 "estimated_price_usd_hr": 0.3,
@@ -1392,7 +1358,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         )
         self.plan_path.write_text(json.dumps(document), encoding="utf-8")
         plan = load_plan(self.plan_path)
-        store = TraceStore(self.root / "capacity-tick.db")
+        store = TraceStore(self.root / "capacity.db")
         self.addCleanup(store.close)
         provider = ReadyCapacityProvider()
         supervisor = PilotSupervisor(store, {"runpod": provider})
@@ -1434,7 +1400,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         document = plan_document()
         document.update(
             {
-                "protocol_version": "5.0-capacity-tick",
+                "protocol_version": "5.0-capacity",
                 "duration_seconds": 180,
                 "capacity_cohorts": [
                     {
@@ -1453,7 +1419,7 @@ class ResearchSupervisorTest(unittest.TestCase):
                                 "region": "us-east-1",
                                 "resource_class": "on-demand",
                                 "market": "on-demand",
-                                "target_depth": 1,
+                                "target_gpu_depth": 1,
                                 "ready_timeout_seconds": 1,
                                 "max_lease_seconds": 60,
                                 "estimated_price_usd_hr": 0.6,
@@ -1490,7 +1456,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         document = plan_document()
         document.update(
             {
-                "protocol_version": "5.0-capacity-tick",
+                "protocol_version": "5.0-capacity",
                 "duration_seconds": 300,
                 "max_active_gpus_per_provider": 1,
                 "provider_budgets_usd": {"runpod": 1.0},
@@ -1512,7 +1478,7 @@ class ResearchSupervisorTest(unittest.TestCase):
                                 "gpu_type": "A40",
                                 "resource_class": "secure",
                                 "market": "on-demand",
-                                "target_depth": 1,
+                                "target_gpu_depth": 1,
                                 "ready_timeout_seconds": 1,
                                 "max_lease_seconds": 60,
                                 "estimated_price_usd_hr": 0.3,

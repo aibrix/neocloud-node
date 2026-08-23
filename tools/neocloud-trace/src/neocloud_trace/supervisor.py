@@ -25,6 +25,23 @@ from .storage import TraceStore
 
 
 UTC = dt.timezone.utc
+PLAN_FIELDS = {
+    "protocol_version",
+    "host_id",
+    "vantage_id",
+    "duration_seconds",
+    "passive_interval_seconds",
+    "host_interval_seconds",
+    "canary_interval_seconds",
+    "max_active_gpus_per_provider",
+    "provider_budgets_usd",
+    "total_budget_usd",
+    "capacity_cohorts",
+    "canary_cohorts",
+    "stability_schedule",
+    "network_control_url",
+    "gpu_counts",
+}
 
 
 class ExecutionDisabled(RuntimeError):
@@ -38,7 +55,7 @@ class BudgetExceeded(RuntimeError):
 @dataclasses.dataclass(frozen=True)
 class CapacityTrialPlan:
     cell: TrialCell
-    target_depth: int
+    target_gpu_depth: int
     ready_timeout_seconds: float
     max_lease_seconds: float
     estimated_price_usd_hr: float
@@ -48,7 +65,7 @@ class CapacityTrialPlan:
     settlement_safety_multiplier: float = 1.0
 
     def __post_init__(self) -> None:
-        validate_capacity_target(self.target_depth, self.cell.gpu_count)
+        validate_capacity_target(self.target_gpu_depth, self.cell.gpu_count)
         if self.ready_timeout_seconds <= 0 or self.max_lease_seconds <= 0:
             raise ValueError("capacity timeouts must be positive")
         if self.max_lease_seconds < self.ready_timeout_seconds:
@@ -68,7 +85,7 @@ class CapacityTrialPlan:
     def budget_upper_bound_usd(self) -> float:
         billable_seconds = max(self.max_lease_seconds, self.billing_minimum_seconds)
         return (
-            self.target_depth
+            self.target_gpu_depth
             // self.cell.gpu_count
             * self.estimated_price_usd_hr
             * billable_seconds
@@ -78,7 +95,7 @@ class CapacityTrialPlan:
 
     @property
     def target_instance_count(self) -> int:
-        return self.target_depth // self.cell.gpu_count
+        return self.target_gpu_depth // self.cell.gpu_count
 
 
 @dataclasses.dataclass(frozen=True)
@@ -213,7 +230,7 @@ class CanaryTrialResult:
     pair_id: str
     cleanup_verified: bool
     estimated_cost_usd: float | None
-    censor_reasons: tuple[str, ...]
+    terminal_reasons: tuple[str, ...]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -256,7 +273,7 @@ class PilotPlan:
         for cohort in self.capacity_cohorts:
             for trial in cohort.cells:
                 provider = trial.cell.provider
-                if trial.target_depth > self.experiment.max_active_gpus_per_provider:
+                if trial.target_gpu_depth > self.experiment.max_active_gpus_per_provider:
                     raise ValueError("capacity cohort target exceeds provider GPU cap")
                 if provider not in self.experiment.provider_budgets:
                     raise ValueError(f"missing provider budget for {provider}")
@@ -342,22 +359,11 @@ def _canary_trial_plan(
 
 def _capacity_trial_plan(document: Mapping[str, Any]) -> CapacityTrialPlan:
     target_gpu_depth = document.get("target_gpu_depth")
-    legacy_target_depth = document.get("target_depth")
     if target_gpu_depth is None:
-        if legacy_target_depth is None:
-            raise ValueError("capacity cell requires target_gpu_depth")
-        if int(document.get("gpu_count", 1)) != 1:
-            raise ValueError(
-                "multi-GPU capacity cells must use target_gpu_depth, not target_depth"
-            )
-        target_gpu_depth = legacy_target_depth
-    elif legacy_target_depth is not None and int(legacy_target_depth) != int(
-        target_gpu_depth
-    ):
-        raise ValueError("target_gpu_depth and target_depth disagree")
+        raise ValueError("capacity cell requires target_gpu_depth")
     return CapacityTrialPlan(
         cell=_trial_cell(document),
-        target_depth=int(target_gpu_depth),
+        target_gpu_depth=int(target_gpu_depth),
         ready_timeout_seconds=float(document["ready_timeout_seconds"]),
         max_lease_seconds=float(document["max_lease_seconds"]),
         estimated_price_usd_hr=float(document["estimated_price_usd_hr"]),
@@ -379,15 +385,9 @@ def load_plan(
     raw = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         raise ValueError("pilot plan must be a JSON object")
-    removed_sections = (
-        "capacity_trials",
-        "canary_trials",
-        "completion_window_cohorts",
-        "control_cohorts",
-    )
-    present = [section for section in removed_sections if raw.get(section)]
-    if present:
-        raise ValueError("unsupported active plan sections: " + ", ".join(present))
+    unsupported_fields = sorted(raw.keys() - PLAN_FIELDS)
+    if unsupported_fields:
+        raise ValueError("unsupported plan fields: " + ", ".join(unsupported_fields))
     provider_budgets = {
         str(provider): float(amount)
         for provider, amount in (raw.get("provider_budgets_usd") or {}).items()
@@ -614,7 +614,7 @@ class PilotSupervisor:
             raise ValueError(f"missing provider clients: {', '.join(missing)}")
         current = now or dt.datetime.now(UTC)
         if current.tzinfo is None:
-            raise ValueError("capacity-tick now must be timezone-aware")
+            raise ValueError("capacity tick now must be timezone-aware")
         current = current.astimezone(UTC)
 
         rng = random.Random(cohort.selection_seed)
@@ -636,7 +636,7 @@ class PilotSupervisor:
                 {
                     "sequence": sequence,
                     "cell": trial.cell,
-                    "target_depth": trial.target_depth,
+                    "target_gpu_depth": trial.target_gpu_depth,
                     "scheduled_offset_seconds": offset,
                     "scheduled_at": (
                         current + dt.timedelta(seconds=offset)
@@ -645,7 +645,7 @@ class PilotSupervisor:
                     "selection_seed": cohort.selection_seed,
                     "details": {
                         "gpu_count_per_instance": trial.cell.gpu_count,
-                        "target_gpu_depth": trial.target_depth,
+                        "target_gpu_depth": trial.target_gpu_depth,
                         "target_instance_count": trial.target_instance_count,
                         "estimated_price_usd_hr": trial.estimated_price_usd_hr,
                         "max_lease_seconds": trial.max_lease_seconds,
@@ -718,7 +718,7 @@ class PilotSupervisor:
         if (
             epoch["provider"] != trial.cell.provider
             or epoch["sku"] != trial.cell.sku
-            or int(epoch["target_depth"]) != trial.target_depth
+            or int(epoch["target_gpu_depth"]) != trial.target_gpu_depth
         ):
             raise RuntimeError("persisted capacity epoch does not match the plan")
 
@@ -969,12 +969,12 @@ class PilotSupervisor:
             )
             for thread in started_threads:
                 thread.join(timeout=join_timeout)
-            censor_reason = (
+            terminal_reason = (
                 TerminalReason.RIGHT_CENSORED_COLLECTOR_LOSS
                 if window_status == "failed"
                 else TerminalReason.OPERATOR_CLEANUP
             )
-            self._censor_unfinished_canaries(run_id, censor_reason)
+            self._censor_unfinished_canaries(run_id, terminal_reason)
             self._cleanup_owned(run_id)
             unfinished_status = (
                 "collector_loss"
@@ -988,7 +988,7 @@ class PilotSupervisor:
             self._finish_unfinished_canary_epochs(
                 run_id,
                 status=unfinished_status,
-                reason=censor_reason.value,
+                reason=terminal_reason.value,
                 cleanup_verified=not self.store.owned_resources(run_id),
             )
             self._settle_cleaned_canary_epochs(run_id, guard)
@@ -1128,7 +1128,7 @@ class PilotSupervisor:
             result = runner.run_trial(
                 run_id,
                 trial.cell,
-                target_depth=trial.target_depth,
+                target_gpu_depth=trial.target_gpu_depth,
                 trial_id=epoch_id,
             )
         except Exception as error:
@@ -1277,7 +1277,7 @@ class PilotSupervisor:
             status=status,
             stop_reason="pair_terminal",
             details={
-                "censor_reasons": list(result.censor_reasons),
+                "terminal_reasons": list(result.terminal_reasons),
                 "estimated_cost_usd": result.estimated_cost_usd,
                 "cleanup_verified": result.cleanup_verified,
             },
@@ -1421,15 +1421,15 @@ class PilotSupervisor:
             trial=trial,
         )
         reasons = tuple(
-            str(row["censor_reason"])
+            str(row["terminal_reason"])
             for row in self.store.canary_rows_for_pair(pair_id)
-            if row["censor_reason"]
+            if row["terminal_reason"]
         )
         return CanaryTrialResult(
             pair_id=pair_id,
             cleanup_verified=cleanup_verified,
             estimated_cost_usd=estimated_cost,
-            censor_reasons=reasons,
+            terminal_reasons=reasons,
         )
 
     def _canary_pair_cost(
@@ -1580,7 +1580,7 @@ class PilotSupervisor:
         reason: TerminalReason,
     ) -> None:
         for lease in self.store.canary_rows(run_id):
-            if lease["censor_reason"] is not None:
+            if lease["terminal_reason"] is not None:
                 continue
             self.store.finish_canary(
                 lease["id"],

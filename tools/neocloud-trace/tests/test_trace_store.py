@@ -1,7 +1,6 @@
 import json
 import datetime as dt
 import pathlib
-import sqlite3
 import sys
 import tempfile
 import unittest
@@ -35,7 +34,7 @@ class TraceStoreTest(unittest.TestCase):
             max_active_gpus_per_provider=8,
         )
 
-    def test_creates_all_v2_tables_and_run_metadata(self):
+    def test_creates_current_tables_and_run_metadata(self):
         run_id = self.store.start_run(self.config(), config_document={"mode": "test"})
 
         tables = {
@@ -48,20 +47,18 @@ class TraceStoreTest(unittest.TestCase):
             {
                 "experiment_runs",
                 "host_observations",
-                "provider_api_observations_v2",
-                "catalog_quotes_v2",
+                "provider_api_observations",
+                "catalog_quotes",
                 "capacity_trials",
                 "capacity_replicas",
                 "canary_leases",
                 "canary_observations",
                 "cleanup_events",
-                "budget_ledger_v2",
+                "budget_ledger",
             }.issubset(tables)
         )
         self.assertNotIn("capacity_experiments", tables)
         self.assertNotIn("stability_experiments", tables)
-        self.assertNotIn("capacity_campaigns", tables)
-        self.assertNotIn("stability_campaigns", tables)
         row = self.store.connection.execute(
             """
             SELECT workflow, protocol_version, host_id, vantage_id, status
@@ -73,81 +70,6 @@ class TraceStoreTest(unittest.TestCase):
             tuple(row),
             ("standalone", "2.0", "test-host", "test-vantage", "running"),
         )
-
-    def test_migrates_legacy_experiment_identity_without_dropping_data(self):
-        legacy_path = pathlib.Path(self.tempdir.name) / "legacy.db"
-        connection = sqlite3.connect(legacy_path)
-        connection.executescript(
-            """
-            CREATE TABLE experiment_runs (
-                id TEXT PRIMARY KEY,
-                protocol_version TEXT NOT NULL,
-                config_hash TEXT NOT NULL,
-                config_json TEXT NOT NULL,
-                host_id TEXT NOT NULL,
-                vantage_id TEXT NOT NULL,
-                collector_revision TEXT,
-                python_version TEXT,
-                started_at TEXT NOT NULL,
-                finished_at TEXT,
-                status TEXT NOT NULL,
-                termination_reason TEXT,
-                total_budget_usd REAL NOT NULL,
-                max_active_gpus_per_provider INTEGER NOT NULL
-            );
-            CREATE TABLE capacity_campaigns (
-                campaign_id TEXT PRIMARY KEY,
-                run_id TEXT NOT NULL UNIQUE,
-                cohort_name TEXT NOT NULL,
-                config_hash TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                finished_at TEXT,
-                status TEXT NOT NULL
-            );
-            INSERT INTO experiment_runs VALUES (
-                'run-1', 'capacity-v1', 'hash', '{}', 'host', 'vantage',
-                NULL, NULL, '2026-08-11T00:00:00+00:00', NULL, 'running',
-                NULL, 1.0, 8
-            );
-            INSERT INTO experiment_runs VALUES (
-                'run-2', '1.0-passive-catalog', 'catalog-hash',
-                '{"collection": {}}', 'host', 'vantage', NULL, NULL,
-                '2026-08-11T00:00:00+00:00', NULL, 'complete', NULL, 0.0, 0
-            );
-            INSERT INTO capacity_campaigns VALUES (
-                'capacity-60d', 'run-1', 'depth', 'hash',
-                '2026-08-11T00:00:00+00:00',
-                '2026-08-12T00:00:00+00:00', 'complete'
-            );
-            """
-        )
-        connection.close()
-
-        migrated = TraceStore(legacy_path)
-        self.addCleanup(migrated.close)
-        row = migrated.run_row("run-1")
-
-        self.assertEqual(row["workflow"], "capacity")
-        self.assertEqual(row["experiment_id"], "capacity-60d")
-        self.assertEqual(row["cohort_name"], "depth")
-        self.assertEqual(row["status"], "complete")
-        self.assertEqual(row["finished_at"], "2026-08-12T00:00:00+00:00")
-        self.assertEqual(migrated.run_row("run-2")["workflow"], "catalog")
-        self.assertTrue(migrated._table_exists("capacity_campaigns"))
-
-        with migrated.connection:
-            migrated.connection.execute(
-                """
-                UPDATE experiment_runs
-                SET status='running', finished_at=NULL
-                WHERE id='run-1'
-                """
-            )
-        reopened = TraceStore(legacy_path)
-        self.addCleanup(reopened.close)
-        reopened_row = reopened.run_row("run-1")
-        self.assertEqual(reopened_row["status"], "running")
-        self.assertIsNone(reopened_row["finished_at"])
 
     def test_redacts_nested_secrets_before_persisting_raw_provider_data(self):
         run_id = self.store.start_run(self.config(), config_document={"mode": "test"})
@@ -176,7 +98,7 @@ class TraceStoreTest(unittest.TestCase):
         self.store.record_quote(run_id, quote)
 
         raw_json = self.store.connection.execute(
-            "SELECT raw_json FROM catalog_quotes_v2 WHERE run_id=?", (run_id,)
+            "SELECT raw_json FROM catalog_quotes WHERE run_id=?", (run_id,)
         ).fetchone()[0]
         persisted = json.loads(raw_json)
         self.assertEqual(persisted["api_key"], "[REDACTED]")
@@ -198,7 +120,7 @@ class TraceStoreTest(unittest.TestCase):
             resource_class="secure",
             market="on-demand",
         )
-        trial_id = self.store.start_capacity_trial(run_id, cell, target_depth=8)
+        trial_id = self.store.start_capacity_trial(run_id, cell, target_gpu_depth=8)
         replica_id = self.store.start_replica(trial_id, stage_target=1, ordinal=0)
         self.store.mark_replica_created(
             replica_id,
@@ -236,7 +158,7 @@ class TraceStoreTest(unittest.TestCase):
             {
                 "sequence": 0,
                 "cell": cell,
-                "target_depth": 1,
+                "target_gpu_depth": 1,
                 "scheduled_offset_seconds": 0,
                 "scheduled_at": now.isoformat(),
                 "selection_probability": 1,
@@ -245,7 +167,7 @@ class TraceStoreTest(unittest.TestCase):
         ]
         first_run, first_created = self.store.ensure_capacity_experiment(
             self.config(),
-            {"mode": "capacity-tick"},
+            {"mode": "capacity"},
             experiment_id="shared-experiment",
             cohort_name="depth",
             started_at=now.isoformat(),
@@ -255,7 +177,7 @@ class TraceStoreTest(unittest.TestCase):
         self.addCleanup(other.close)
         second_run, second_created = other.ensure_capacity_experiment(
             self.config(),
-            {"mode": "capacity-tick"},
+            {"mode": "capacity"},
             experiment_id="shared-experiment",
             cohort_name="depth",
             started_at=now.isoformat(),

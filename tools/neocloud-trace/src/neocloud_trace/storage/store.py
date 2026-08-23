@@ -83,101 +83,7 @@ class TraceStore:
             if self.path != ":memory:":
                 self.connection.execute("PRAGMA journal_mode=WAL")
             self.connection.executescript(SCHEMA)
-            self._migrate_experiment_identity()
             self.connection.commit()
-
-    def _table_exists(self, table: str) -> bool:
-        return (
-            self.connection.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-                (table,),
-            ).fetchone()
-            is not None
-        )
-
-    def _column_names(self, table: str) -> set[str]:
-        return {
-            str(row["name"])
-            for row in self.connection.execute(f"PRAGMA table_info({table})")
-        }
-
-    def _migrate_experiment_identity(self) -> None:
-        self.connection.execute("BEGIN IMMEDIATE")
-        try:
-            columns = self._column_names("experiment_runs")
-            for column in ("workflow", "experiment_id", "cohort_name"):
-                if column in columns:
-                    continue
-                self.connection.execute(
-                    f"ALTER TABLE experiment_runs ADD COLUMN {column} TEXT"
-                )
-
-            legacy_tables = (
-                ("capacity_campaigns", "capacity"),
-                ("stability_campaigns", "stability"),
-            )
-            for table, workflow in legacy_tables:
-                if not self._table_exists(table):
-                    continue
-                self.connection.execute(
-                    f"""
-                    UPDATE experiment_runs
-                    SET workflow=?,
-                        experiment_id=(
-                            SELECT campaign_id FROM {table} legacy
-                            WHERE legacy.run_id=experiment_runs.id
-                        ),
-                        cohort_name=(
-                            SELECT cohort_name FROM {table} legacy
-                            WHERE legacy.run_id=experiment_runs.id
-                        ),
-                        status=(
-                            SELECT status FROM {table} legacy
-                            WHERE legacy.run_id=experiment_runs.id
-                        ),
-                        finished_at=COALESCE(
-                            (
-                                SELECT finished_at FROM {table} legacy
-                                WHERE legacy.run_id=experiment_runs.id
-                            ),
-                            experiment_runs.finished_at
-                        )
-                    WHERE (
-                        experiment_runs.workflow IS NULL
-                        OR experiment_runs.workflow=''
-                        OR experiment_runs.experiment_id IS NULL
-                    ) AND EXISTS (
-                        SELECT 1 FROM {table} legacy
-                        WHERE legacy.run_id=experiment_runs.id
-                    )
-                    """,
-                    (workflow,),
-                )
-
-            self.connection.execute(
-                """
-                UPDATE experiment_runs
-                SET workflow=CASE
-                    WHEN config_json LIKE '%\"catalog\"%'
-                      OR config_json LIKE '%\"collection\"%'
-                    THEN 'catalog'
-                    ELSE 'standalone'
-                END
-                WHERE workflow IS NULL OR workflow=''
-                """
-            )
-            self.connection.execute(
-                """
-                CREATE UNIQUE INDEX IF NOT EXISTS
-                  experiment_runs_workflow_experiment_id_uq
-                ON experiment_runs(workflow, experiment_id)
-                WHERE experiment_id IS NOT NULL
-                """
-            )
-            self.connection.commit()
-        except Exception:
-            self.connection.rollback()
-            raise
 
     def close(self) -> None:
         with self._lock:
@@ -338,13 +244,13 @@ class TraceStore:
                 )
                 for epoch in epochs:
                     cell = epoch["cell"]
-                    validate_capacity_target(int(epoch["target_depth"]), cell.gpu_count)
+                    validate_capacity_target(int(epoch["target_gpu_depth"]), cell.gpu_count)
                     self.connection.execute(
                         """
                         INSERT INTO capacity_epochs
                           (id, run_id, cohort_name, sequence, provider, sku,
                            gpu_type, region, datacenter, resource_class,
-                           target_depth, scheduled_offset_seconds, scheduled_at,
+                           target_gpu_depth, scheduled_offset_seconds, scheduled_at,
                            selection_probability, selection_seed, status,
                            details_json)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
@@ -361,7 +267,7 @@ class TraceStore:
                             cell.region,
                             cell.datacenter,
                             cell.resource_class,
-                            int(epoch["target_depth"]),
+                            int(epoch["target_gpu_depth"]),
                             float(epoch["scheduled_offset_seconds"]),
                             str(epoch["scheduled_at"]),
                             float(epoch["selection_probability"]),
@@ -1106,7 +1012,7 @@ class TraceStore:
         with self._lock, self.connection:
             self.connection.execute(
                 """
-                INSERT INTO catalog_quotes_v2
+                INSERT INTO catalog_quotes
                   (id, run_id, observed_at, provider, sku, gpu_type, gpu_count,
                    region, datacenter, resource_class, market, stock_status,
                    available_gpu_counts_json, available, quoted_price_usd_hr,
@@ -1166,7 +1072,7 @@ class TraceStore:
         with self._lock:
             row = self.connection.execute(
                 f"""
-                SELECT id FROM catalog_quotes_v2
+                SELECT id FROM catalog_quotes
                 WHERE run_id=? AND provider=? AND sku=? AND gpu_count=?
                   AND resource_class=? AND market=?
                   AND ((? IS NULL AND region IS NULL) OR region=?)
@@ -1182,11 +1088,11 @@ class TraceStore:
         self,
         run_id: str,
         cell: TrialCell,
-        target_depth: int,
+        target_gpu_depth: int,
         *,
         trial_id: str | None = None,
     ) -> str:
-        validate_capacity_target(target_depth, cell.gpu_count)
+        validate_capacity_target(target_gpu_depth, cell.gpu_count)
         trial_id = trial_id or str(uuid.uuid4())
         catalog_quote_id = self.latest_quote_id(run_id, cell)
         with self._lock, self.connection:
@@ -1194,7 +1100,7 @@ class TraceStore:
                 """
                 INSERT INTO capacity_trials
                   (id, run_id, provider, sku, gpu_type, gpu_count, region, datacenter,
-                   resource_class, market, image, target_depth, started_at, status,
+                   resource_class, market, image, target_gpu_depth, started_at, status,
                    catalog_quote_id, details_json)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, '{}')
                 """,
@@ -1210,7 +1116,7 @@ class TraceStore:
                     cell.resource_class,
                     cell.market,
                     cell.image,
-                    target_depth,
+                    target_gpu_depth,
                     utc_now(),
                     catalog_quote_id,
                 ),
@@ -1224,7 +1130,7 @@ class TraceStore:
         cohort_name: str,
         sequence: int,
         cell: TrialCell,
-        target_depth: int,
+        target_gpu_depth: int,
         scheduled_offset_seconds: float,
         scheduled_at: str,
         selection_probability: float,
@@ -1235,7 +1141,7 @@ class TraceStore:
             raise ValueError("capacity cohort name is required")
         if sequence < 0 or scheduled_offset_seconds < 0:
             raise ValueError("capacity epoch sequence and offset must not be negative")
-        validate_capacity_target(target_depth, cell.gpu_count)
+        validate_capacity_target(target_gpu_depth, cell.gpu_count)
         if not 0 < selection_probability <= 1:
             raise ValueError("selection_probability must be in (0, 1]")
         epoch_id = str(uuid.uuid4())
@@ -1244,7 +1150,7 @@ class TraceStore:
                 """
                 INSERT INTO capacity_epochs
                   (id, run_id, cohort_name, sequence, provider, sku, gpu_type,
-                   region, datacenter, resource_class, target_depth,
+                   region, datacenter, resource_class, target_gpu_depth,
                    scheduled_offset_seconds, scheduled_at, selection_probability,
                    selection_seed, status, details_json)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?)
@@ -1260,7 +1166,7 @@ class TraceStore:
                     cell.region,
                     cell.datacenter,
                     cell.resource_class,
-                    target_depth,
+                    target_gpu_depth,
                     scheduled_offset_seconds,
                     scheduled_at,
                     selection_probability,
@@ -1354,7 +1260,7 @@ class TraceStore:
             )
             if retry_of is None:
                 self.connection.execute(
-                    "UPDATE capacity_trials SET requested_depth=requested_depth+1 WHERE id=?",
+                    "UPDATE capacity_trials SET requested_instance_count=requested_instance_count+1 WHERE id=?",
                     (trial_id,),
                 )
         return replica_id
@@ -1398,7 +1304,7 @@ class TraceStore:
             )
             if newly_accepted:
                 self.connection.execute(
-                    "UPDATE capacity_trials SET accepted_depth=accepted_depth+1 WHERE id=?",
+                    "UPDATE capacity_trials SET accepted_instance_count=accepted_instance_count+1 WHERE id=?",
                     (row["trial_id"],),
                 )
 
@@ -1417,7 +1323,7 @@ class TraceStore:
             )
             if newly_cleaned:
                 self.connection.execute(
-                    "UPDATE capacity_trials SET cleaned_depth=cleaned_depth+1 WHERE id=?",
+                    "UPDATE capacity_trials SET cleaned_instance_count=cleaned_instance_count+1 WHERE id=?",
                     (row["trial_id"],),
                 )
 
@@ -1509,12 +1415,12 @@ class TraceStore:
             )
             if provider_ready and row["provider_ready_at"] is None:
                 self.connection.execute(
-                    "UPDATE capacity_trials SET provider_ready_depth=provider_ready_depth+1 WHERE id=?",
+                    "UPDATE capacity_trials SET provider_ready_instance_count=provider_ready_instance_count+1 WHERE id=?",
                     (row["trial_id"],),
                 )
             if application_ready is True and row["application_ready_at"] is None:
                 self.connection.execute(
-                    "UPDATE capacity_trials SET application_ready_depth=application_ready_depth+1 WHERE id=?",
+                    "UPDATE capacity_trials SET application_ready_instance_count=application_ready_instance_count+1 WHERE id=?",
                     (row["trial_id"],),
                 )
 
@@ -1618,7 +1524,7 @@ class TraceStore:
         with self._lock, self.connection:
             self.connection.execute(
                 """
-                INSERT INTO budget_ledger_v2
+                INSERT INTO budget_ledger
                   (id, run_id, observed_at, provider, amount_usd, kind, reference, details_json)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
@@ -1649,7 +1555,7 @@ class TraceStore:
         with self._lock, self.connection:
             self.connection.execute(
                 """
-                INSERT INTO budget_ledger_v2
+                INSERT INTO budget_ledger
                   (id, run_id, observed_at, provider, amount_usd, kind, reference, details_json)
                 VALUES (?, ?, ?, ?, ?, 'released_unused_commitment', ?, ?)
                 """,
@@ -1674,7 +1580,7 @@ class TraceStore:
         with self._lock:
             return self.connection.execute(
                 """
-                SELECT * FROM budget_ledger_v2
+                SELECT * FROM budget_ledger
                 WHERE run_id=? AND provider=? AND reference=?
                 ORDER BY observed_at, id
                 """,
@@ -1684,7 +1590,7 @@ class TraceStore:
     def provider_spend(self, run_id: str, provider: str) -> float:
         with self._lock:
             row = self.connection.execute(
-                "SELECT COALESCE(SUM(amount_usd), 0) FROM budget_ledger_v2 WHERE run_id=? AND provider=?",
+                "SELECT COALESCE(SUM(amount_usd), 0) FROM budget_ledger WHERE run_id=? AND provider=?",
                 (run_id, provider),
             ).fetchone()
         return float(row[0])
@@ -1692,7 +1598,7 @@ class TraceStore:
     def total_spend(self, run_id: str) -> float:
         with self._lock:
             row = self.connection.execute(
-                "SELECT COALESCE(SUM(amount_usd), 0) FROM budget_ledger_v2 WHERE run_id=?",
+                "SELECT COALESCE(SUM(amount_usd), 0) FROM budget_ledger WHERE run_id=?",
                 (run_id,),
             ).fetchone()
         return float(row[0])
@@ -1834,7 +1740,7 @@ class TraceStore:
         with self._lock, self.connection:
             self.connection.execute(
                 """
-                INSERT INTO provider_api_observations_v2
+                INSERT INTO provider_api_observations
                   (id, run_id, observed_at, provider, operation, status, latency_ms,
                    failure_class, host_observation_id, response_hash, raw_json)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -2149,7 +2055,7 @@ class TraceStore:
             self.connection.execute(
                 """
                 UPDATE canary_leases
-                SET event_at=?, censor_reason=?, status='finished',
+                SET event_at=?, terminal_reason=?, status='finished',
                     operator_cleanup_at=CASE WHEN ? THEN ? ELSE operator_cleanup_at END
                 WHERE id=?
                 """,

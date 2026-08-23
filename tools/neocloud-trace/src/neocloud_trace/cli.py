@@ -471,8 +471,8 @@ def _status(store: TraceStore, run_id: str | None) -> dict[str, Any]:
     counts = {}
     for table in (
         "host_observations",
-        "provider_api_observations_v2",
-        "catalog_quotes_v2",
+        "provider_api_observations",
+        "catalog_quotes",
         "capacity_trials",
         "capacity_epochs",
         "stability_windows",
@@ -500,7 +500,7 @@ def _status(store: TraceStore, run_id: str | None) -> dict[str, Any]:
     exposure = {
         row["provider"]: row["amount"]
         for row in store.connection.execute(
-            "SELECT provider, SUM(amount_usd) amount FROM budget_ledger_v2 "
+            "SELECT provider, SUM(amount_usd) amount FROM budget_ledger "
             "WHERE run_id=? GROUP BY provider",
             (selected,),
         ).fetchall()

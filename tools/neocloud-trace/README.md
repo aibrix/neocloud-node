@@ -37,7 +37,8 @@ opened.
 A database can contain multiple runs and workflow types; three database files
 are not required. An active experiment must keep using the same plan, database,
 and experiment ID. Use `--run-id` when querying or exporting a database
-containing several runs.
+containing several runs. Database files must match the current schema; create a
+fresh database after an incompatible schema change.
 
 ## Credentials and Safety
 
@@ -127,7 +128,7 @@ neocloud-trace catalog \
   --provider runpod \
   --once
 
-# Timed collection
+# Timed sampling
 neocloud-trace catalog \
   --db data/neocloud-trace/trace.db \
   --provider lambda \

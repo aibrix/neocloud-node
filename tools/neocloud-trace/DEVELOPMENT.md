@@ -150,9 +150,8 @@ operations are implemented in `storage/store.py`. Opening a database runs the
 idempotent schema statements and enables WAL mode.
 
 Active experiment identity, workflow, cohort, configuration, and lifecycle are
-stored together in `experiment_runs`. Older databases are migrated in place;
-retired identity-mapping tables are left untouched for recovery safety but are
-not used after their values have been imported.
+stored together in `experiment_runs`. Database schemas are not migrated; use a
+fresh database after an incompatible schema change.
 
 For schema or exporter changes:
 
@@ -161,7 +160,7 @@ For schema or exporter changes:
 3. keep provider-ready and application-ready fields separate;
 4. keep instance counts, GPU depth, estimates, and provider bills explicit;
 5. update fixture tests and user-facing documentation;
-6. verify old databases or provide a deliberate migration path.
+6. document incompatible schema changes and update fresh-database fixtures.
 
 Stability has two distinct row grains. `stability_windows` is the scheduled
 outer sampling unit and must include missed windows. `canary_epochs` is an

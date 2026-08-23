@@ -190,7 +190,7 @@ class SurvivalExportTest(unittest.TestCase):
             cohort_name="runpod-depth",
             sequence=0,
             cell=cell,
-            target_depth=1,
+            target_gpu_depth=1,
             scheduled_offset_seconds=300,
             scheduled_at="2026-08-10T00:05:00+00:00",
             selection_probability=1,
@@ -204,7 +204,7 @@ class SurvivalExportTest(unittest.TestCase):
         self.store.start_capacity_trial(
             self.run_id,
             cell,
-            target_depth=1,
+            target_gpu_depth=1,
             trial_id=epoch_id,
         )
         replica_id = self.store.start_replica(epoch_id, stage_target=1, ordinal=0)
@@ -233,7 +233,7 @@ class SurvivalExportTest(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["cohort_name"], "runpod-depth")
         self.assertEqual(rows[0]["stock_status"], "High")
-        self.assertEqual(rows[0]["application_ready_depth"], 1)
+        self.assertEqual(rows[0]["application_ready_instance_count"], 1)
         self.assertEqual(rows[0]["depth_success"], 1)
         self.assertEqual(rows[0]["started_lag_seconds"], 2.5)
 
@@ -258,7 +258,7 @@ class SurvivalExportTest(unittest.TestCase):
         trial_id = self.store.start_capacity_trial(
             self.run_id,
             cell,
-            target_depth=32,
+            target_gpu_depth=32,
         )
         replica_id = self.store.start_replica(
             trial_id,

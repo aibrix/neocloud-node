@@ -189,11 +189,11 @@ class PassiveWorkerTest(unittest.TestCase):
         self.assertEqual(result.api_calls, 2)
         self.assertEqual(result.quotes, 2)
         self.assertEqual(
-            self.store.connection.execute("SELECT count(*) FROM provider_api_observations_v2").fetchone()[0],
+            self.store.connection.execute("SELECT count(*) FROM provider_api_observations").fetchone()[0],
             2,
         )
         self.assertEqual(
-            self.store.connection.execute("SELECT count(*) FROM catalog_quotes_v2").fetchone()[0],
+            self.store.connection.execute("SELECT count(*) FROM catalog_quotes").fetchone()[0],
             2,
         )
 
@@ -213,7 +213,7 @@ class PassiveWorkerTest(unittest.TestCase):
 
         self.assertEqual(result.failures, 1)
         row = self.store.connection.execute(
-            "SELECT failure_class FROM provider_api_observations_v2"
+            "SELECT failure_class FROM provider_api_observations"
         ).fetchone()
         self.assertEqual(row["failure_class"], "auth")
 
@@ -267,7 +267,7 @@ class PassiveWorkerTest(unittest.TestCase):
         )
         self.assertEqual(
             self.store.connection.execute(
-                "SELECT COUNT(*) FROM provider_api_observations_v2 WHERE run_id=?",
+                "SELECT COUNT(*) FROM provider_api_observations WHERE run_id=?",
                 (run_id,),
             ).fetchone()[0],
             1,

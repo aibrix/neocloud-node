@@ -20,6 +20,10 @@ CREATE TABLE IF NOT EXISTS experiment_runs (
     max_active_gpus_per_provider INTEGER NOT NULL
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS experiment_runs_workflow_experiment_id_uq
+ON experiment_runs(workflow, experiment_id)
+WHERE experiment_id IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS host_observations (
     id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES experiment_runs(id),
@@ -34,7 +38,7 @@ CREATE TABLE IF NOT EXISTS host_observations (
     details_json TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS provider_api_observations_v2 (
+CREATE TABLE IF NOT EXISTS provider_api_observations (
     id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES experiment_runs(id),
     observed_at TEXT NOT NULL,
@@ -48,7 +52,7 @@ CREATE TABLE IF NOT EXISTS provider_api_observations_v2 (
     raw_json TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS catalog_quotes_v2 (
+CREATE TABLE IF NOT EXISTS catalog_quotes (
     id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES experiment_runs(id),
     observed_at TEXT NOT NULL,
@@ -85,15 +89,15 @@ CREATE TABLE IF NOT EXISTS capacity_trials (
     resource_class TEXT NOT NULL,
     market TEXT NOT NULL,
     image TEXT,
-    target_depth INTEGER NOT NULL,
-    requested_depth INTEGER NOT NULL DEFAULT 0,
-    accepted_depth INTEGER NOT NULL DEFAULT 0,
-    provider_ready_depth INTEGER NOT NULL DEFAULT 0,
-    application_ready_depth INTEGER NOT NULL DEFAULT 0,
-    cleaned_depth INTEGER NOT NULL DEFAULT 0,
+    target_gpu_depth INTEGER NOT NULL,
+    requested_instance_count INTEGER NOT NULL DEFAULT 0,
+    accepted_instance_count INTEGER NOT NULL DEFAULT 0,
+    provider_ready_instance_count INTEGER NOT NULL DEFAULT 0,
+    application_ready_instance_count INTEGER NOT NULL DEFAULT 0,
+    cleaned_instance_count INTEGER NOT NULL DEFAULT 0,
     first_failed_stage INTEGER,
     failure_class TEXT,
-    catalog_quote_id TEXT REFERENCES catalog_quotes_v2(id),
+    catalog_quote_id TEXT REFERENCES catalog_quotes(id),
     started_at TEXT NOT NULL,
     finished_at TEXT,
     status TEXT NOT NULL,
@@ -135,7 +139,7 @@ CREATE TABLE IF NOT EXISTS capacity_epochs (
     region TEXT,
     datacenter TEXT,
     resource_class TEXT NOT NULL,
-    target_depth INTEGER NOT NULL,
+    target_gpu_depth INTEGER NOT NULL,
     scheduled_offset_seconds REAL NOT NULL,
     scheduled_at TEXT NOT NULL,
     selection_probability REAL NOT NULL,
@@ -187,9 +191,7 @@ CREATE TABLE IF NOT EXISTS canary_leases (
     application_ready_at TEXT,
     last_heartbeat_at TEXT,
     event_at TEXT,
-    -- Legacy column name retained for existing trace databases. The value can
-    -- represent either an observed terminal event or statistical censoring.
-    censor_reason TEXT,
+    terminal_reason TEXT,
     operator_cleanup_at TEXT,
     cleaned_at TEXT,
     status TEXT NOT NULL,
@@ -257,7 +259,7 @@ CREATE TABLE IF NOT EXISTS cleanup_events (
     details_json TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS budget_ledger_v2 (
+CREATE TABLE IF NOT EXISTS budget_ledger (
     id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES experiment_runs(id),
     observed_at TEXT NOT NULL,
@@ -305,7 +307,7 @@ CREATE TABLE IF NOT EXISTS cost_reconciliations (
 );
 
 CREATE INDEX IF NOT EXISTS idx_quotes_run_cell_time
-    ON catalog_quotes_v2(run_id, provider, sku, resource_class, observed_at);
+    ON catalog_quotes(run_id, provider, sku, resource_class, observed_at);
 CREATE INDEX IF NOT EXISTS idx_replicas_provider_resource
     ON capacity_replicas(provider_resource_id, cleaned_at);
 CREATE INDEX IF NOT EXISTS idx_capacity_epochs_run_cohort
@@ -321,7 +323,7 @@ CREATE INDEX IF NOT EXISTS idx_stability_windows_run_cohort
 CREATE INDEX IF NOT EXISTS idx_stability_windows_status_time
     ON stability_windows(status, scheduled_at, scheduled_end_at);
 CREATE INDEX IF NOT EXISTS idx_budget_run_provider
-    ON budget_ledger_v2(run_id, provider);
+    ON budget_ledger(run_id, provider);
 CREATE INDEX IF NOT EXISTS idx_billing_run_resource
     ON provider_billing_records(run_id, provider, provider_resource_id);
 CREATE INDEX IF NOT EXISTS idx_reconciliation_run_status
