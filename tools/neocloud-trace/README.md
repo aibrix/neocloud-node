@@ -5,8 +5,8 @@ availability, capacity, and Spot stability. It stores observations, experiment
 state, cleanup evidence, budgets, and billing records in SQLite and exports
 analysis-ready CSV files.
 
-Lambda Cloud and RunPod are supported. The runtime uses only the Python standard
-library and SQLite.
+Lambda Cloud, RunPod, and Vast.ai are supported. The runtime uses only the
+Python standard library and SQLite.
 
 ## Installation
 
@@ -48,6 +48,7 @@ Credentials are read from environment variables and are not written to SQLite:
 export LAMBDA_CLOUD_API_KEY=...
 export LAMBDA_CLOUD_SSH_KEYS=public-key-name
 export RUNPOD_API_KEY=...
+export VAST_API_KEY=...
 ```
 
 `LAMBDA_CLOUD_SSH_KEYS` is a comma-separated list required for Lambda instance
@@ -57,7 +58,12 @@ creation. Optional endpoint overrides are:
 export LAMBDA_CLOUD_BASE_URL=https://cloud.lambda.ai/api/v1
 export RUNPOD_BASE_URL=https://rest.runpod.io/v1
 export RUNPOD_GRAPHQL_URL=https://api.runpod.io/graphql
+export VAST_BASE_URL=https://console.vast.ai/api/v0
 ```
+
+Vast credentials use the official Bearer-token API and should be scoped to the
+catalog, instance, and billing operations needed by the collector. Never put an
+API key in a plan, database, command example, or tracked file.
 
 Commands that can create, delete, or advance resources run in dry-run mode by
 default: `run`, `tick`, `cleanup`, and `recover`. Dry-run validates the request
@@ -124,6 +130,7 @@ neocloud-trace catalog \
   --db data/neocloud-trace/trace.db \
   --provider lambda \
   --provider runpod \
+  --provider vast \
   --duration-seconds 3600
 ```
 
@@ -203,6 +210,49 @@ Use the same plan and database for every invocation. `--experiment-id` can set
 an explicit identity; otherwise the single Stability experiment already in the
 database is reused.
 
+## Vast.ai Plan Cells
+
+Vast offers are marketplace listings that can disappear after another renter
+accepts them. Plans therefore identify a reusable GPU shape instead of a
+one-time offer ID. The provider searches immediately before each create batch,
+assigns a different offer to each requested replica, and launches the assigned
+offers concurrently.
+
+```json
+{
+  "provider": "vast",
+  "sku": "RTX 4090",
+  "gpu_type": "RTX 4090",
+  "region": "US",
+  "resource_class": "verified",
+  "market": "on-demand",
+  "gpu_count": 1,
+  "image": "python:3.12-slim"
+}
+```
+
+Vast cell fields have these meanings:
+
+| Field | Vast value |
+| --- | --- |
+| `sku` | Exact `gpu_name` returned by the offer API, such as `RTX 4090` |
+| `resource_class` | `verified`, `community`, or `marketplace` |
+| `market` | `on-demand` or `interruptible` |
+| `region` | Optional exact `geolocation` filter |
+| `datacenter` | Optional numeric Vast `machine_id` |
+
+Active searches require machine reliability of at least `0.95`, sufficient disk
+space, and a direct port for the application-health probe. Stability runs still
+define one base cell: the runner creates the matched interruptible and on-demand
+leases from separate Vast searches. Interruptible creation passes the offer's
+current `min_bid`; omitting that price would create an on-demand rental instead.
+
+An outbid Vast instance can remain stopped while storage charges continue. Keep
+the normal trace cleanup and recovery procedures enabled and do not treat a
+stopped interruptible instance as deleted. See the
+[Vast instance documentation](https://docs.vast.ai/guides/instances/overview)
+and [API reference](https://docs.vast.ai/api-reference/introduction).
+
 ## Status, Cleanup, and Recovery
 
 ```bash
@@ -263,7 +313,7 @@ Reusable SQL queries are in `sql/research-trace-queries.sql`.
 
 ## Billing
 
-Sync RunPod billing records attributable to resources in a run:
+Sync RunPod or Vast billing records attributable to resources in a run:
 
 ```bash
 neocloud-trace billing sync \
@@ -271,6 +321,10 @@ neocloud-trace billing sync \
   --provider runpod \
   --run-id RUN_ID
 ```
+
+For Vast, use the same command with `--provider vast`. The collector reads the
+paginated per-instance Charges API and retains only instance IDs owned by the
+selected trace run.
 
 Lambda has no public usage endpoint. Import a console or invoice export:
 

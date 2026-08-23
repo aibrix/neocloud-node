@@ -14,6 +14,7 @@ from .common import (
 )
 from .lambda_cloud import LambdaResearchClient
 from .runpod import RunPodResearchClient, research_health_command
+from .vast import VastResearchClient
 
 __all__ = [
     "CatalogFetch",
@@ -25,6 +26,7 @@ __all__ = [
     "ProviderBillingRecord",
     "ResourceObservation",
     "RunPodResearchClient",
+    "VastResearchClient",
     "classify_failure",
     "probe_heartbeat",
     "request_json",

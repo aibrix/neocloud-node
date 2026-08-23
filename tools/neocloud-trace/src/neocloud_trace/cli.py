@@ -18,13 +18,13 @@ from .analysis import (
 )
 from .analysis.billing import import_billing_file, reconcile_costs
 from .model import CatalogConfig
-from .providers import LambdaResearchClient, RunPodResearchClient
+from .providers import LambdaResearchClient, RunPodResearchClient, VastResearchClient
 from .runners import CatalogCollector
 from .storage import TraceStore
 from .supervisor import ExecutionDisabled, PilotSupervisor, load_plan
 
 
-SUPPORTED_PROVIDERS = ("lambda", "runpod")
+SUPPORTED_PROVIDERS = ("lambda", "runpod", "vast")
 CATALOG_PROTOCOL_VERSION = "1.0-passive-catalog"
 ACTIVE_PLAN_SECTIONS = ("capacity_cohorts", "canary_cohorts")
 
@@ -192,7 +192,7 @@ def build_parser() -> argparse.ArgumentParser:
     sync_billing.add_argument("--run-id")
     sync_billing.add_argument(
         "--provider",
-        choices=("runpod", "lambda"),
+        choices=SUPPORTED_PROVIDERS,
         required=True,
     )
     sync_billing.add_argument("--start-time")
@@ -222,6 +222,8 @@ def _provider_clients(names: set[str]) -> dict[str, object]:
         clients["lambda"] = LambdaResearchClient()
     if "runpod" in names:
         clients["runpod"] = RunPodResearchClient()
+    if "vast" in names:
+        clients["vast"] = VastResearchClient()
     unsupported = names - clients.keys()
     if unsupported:
         raise ValueError(f"unsupported providers: {', '.join(sorted(unsupported))}")

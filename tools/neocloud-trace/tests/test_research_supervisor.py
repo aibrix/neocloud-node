@@ -414,6 +414,22 @@ class ResearchSupervisorTest(unittest.TestCase):
         self.assertEqual(config.providers, ("runpod",))
         self.assertEqual(config.gpu_counts, (1, 4))
 
+    def test_cli_accepts_vast_for_catalog_and_billing_sync(self):
+        parser = trace_cli.build_parser()
+        database = str(self.root / "vast.db")
+
+        catalog = parser.parse_args(
+            ["catalog", "--db", database, "--provider", "vast"]
+        )
+        billing = parser.parse_args(
+            ["billing", "sync", "--db", database, "--provider", "vast"]
+        )
+        clients = trace_cli._provider_clients({"vast"})
+
+        self.assertEqual(catalog.provider, ["vast"])
+        self.assertEqual(billing.provider, "vast")
+        self.assertEqual(clients["vast"].provider, "vast")
+
     def test_catalog_cli_executes_one_passive_snapshot(self):
         class Provider:
             def catalog_fetches(self, gpu_counts):
