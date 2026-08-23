@@ -105,9 +105,9 @@ neocloud-trace init \
   --vantage-id us-west-office
 ```
 
-The examples in `plans/` include current and historical experiment shapes.
-`run` and `tick` apply their stricter command contracts even when a plan passes
-general `init` validation.
+`plans/capacity-epoch.json` and `plans/stability-windows.json` are the two
+supported active-plan shapes. `run` and `tick` apply their command-specific
+contracts even when a plan passes general `init` validation.
 
 ## Passive Collection
 
@@ -240,10 +240,6 @@ neocloud-trace export survival \
 neocloud-trace export depth \
   --db data/neocloud-trace/trace.db \
   --output data/neocloud-trace/capacity-depth.csv
-
-neocloud-trace export window \
-  --db data/neocloud-trace/trace.db \
-  --output data/neocloud-trace/completion-window.csv
 ```
 
 | Export | One row per | Scheduled-but-not-run rows |
@@ -251,7 +247,6 @@ neocloud-trace export window \
 | `stability` | Scheduled Stability window | Included |
 | `survival` | Canary lease | Use with the Stability-window export |
 | `depth` | Scheduled capacity epoch | Included |
-| `window` | Historical completion-window opportunity | Included |
 
 `trial` prints one capacity trial as detailed JSON:
 
@@ -313,10 +308,7 @@ SQLite records include:
 Databases and their `-wal` and `-shm` files are runtime data and are excluded
 from Git, as are credentials, Python caches, and temporary exports.
 
-## Development and Legacy Code
+## Development
 
 See [DEVELOPMENT.md](DEVELOPMENT.md) for Python setup, tests, package
 verification, and the change checklist.
-
-The original single-file collector remains under `legacy/` for historical
-workflows. New work should use the packaged `neocloud-trace` command.

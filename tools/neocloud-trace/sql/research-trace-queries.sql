@@ -202,49 +202,8 @@ WHERE t.run_id = :run_id AND r.failure_class IS NOT NULL
 GROUP BY t.provider, t.sku, t.gpu_count, r.stage_target, r.attempt, r.failure_class
 ORDER BY t.provider, t.sku, t.gpu_count, r.stage_target, r.attempt, r.failure_class;
 
--- 9. Randomized completion-window opportunities. This keeps treatment
--- assignment and all non-launch stopping mechanisms in the analysis table.
-SELECT
-  w.cohort_name,
-  w.sequence,
-  w.arm_name,
-  w.launch_fraction,
-  w.assignment_probability,
-  w.assignment_seed,
-  w.provider,
-  w.sku,
-  COALESCE(w.region, w.datacenter, 'provider-selected') AS location,
-  w.release_at,
-  w.allocation_deadline_at,
-  w.planned_launch_at,
-  w.actual_decision_at,
-  w.decision_lag_seconds,
-  qr.stock_status AS release_stock_status,
-  qr.available AS release_advertised_available,
-  qr.quoted_price_usd_hr AS release_price_usd_hr,
-  qd.stock_status AS decision_stock_status,
-  qd.available AS decision_advertised_available,
-  qd.quoted_price_usd_hr AS decision_price_usd_hr,
-  qd.quoted_price_usd_hr - qr.quoted_price_usd_hr AS quoted_price_delta_usd_hr,
-  w.provider_sla_met,
-  w.application_sla_met,
-  w.status AS window_status,
-  w.stop_reason AS window_stop_reason,
-  ce.status AS capacity_epoch_status,
-  t.accepted_depth,
-  t.provider_ready_depth,
-  t.application_ready_depth,
-  t.first_failed_stage,
-  t.failure_class
-FROM completion_window_epochs w
-LEFT JOIN catalog_quotes_v2 qr ON qr.id = w.release_quote_id
-LEFT JOIN catalog_quotes_v2 qd ON qd.id = w.decision_quote_id
-LEFT JOIN capacity_epochs ce ON ce.id = w.capacity_epoch_id
-LEFT JOIN capacity_trials t ON t.id = ce.trial_id
-WHERE w.run_id = :run_id
-ORDER BY w.cohort_name, w.sequence;
 
--- 10. Continuous cohort epochs. Budget exhaustion is an observed stopping
+-- 9. Continuous cohort epochs. Budget exhaustion is an observed stopping
 -- mechanism and must remain visible when estimating survival.
 SELECT
   e.cohort_name,
@@ -267,15 +226,11 @@ WHERE e.run_id = :run_id
 GROUP BY e.id
 ORDER BY e.cohort_name, e.sequence;
 
--- 11. Matched canary outcomes and conditional observation quality.
+-- 10. Matched canary outcomes and conditional observation quality.
 SELECT
   l.pair_id,
-  COALESCE(e.cohort_name, 'legacy') AS cohort_name,
-  COALESCE(
-    json_extract(e.details_json, '$.design'),
-    CASE WHEN (SELECT COUNT(*) FROM canary_leases p WHERE p.pair_id=l.pair_id) = 2
-      THEN 'matched_interruptible_control' ELSE 'legacy_unspecified' END
-  ) AS cohort_design,
+  e.cohort_name,
+  json_extract(e.details_json, '$.design') AS cohort_design,
   e.sequence AS epoch_sequence,
   e.selection_probability,
   l.interruptible,
@@ -300,13 +255,13 @@ SELECT
   MIN(o.realized_price_usd_hr) AS minimum_realized_price,
   MAX(o.realized_price_usd_hr) AS maximum_realized_price
 FROM canary_leases l
-LEFT JOIN canary_epochs e ON e.id = l.pair_id
+JOIN canary_epochs e ON e.id = l.pair_id
 LEFT JOIN canary_observations o ON o.lease_id = l.id
 WHERE l.run_id = :run_id
 GROUP BY l.id
 ORDER BY l.pair_id, l.interruptible DESC;
 
--- 12. Provider billing and resource-level reconciliation coverage. Missing
+-- 11. Provider billing and resource-level reconciliation coverage. Missing
 -- billing is not zero cost; aggregate invoice rows remain unattributed.
 SELECT
   provider,
@@ -332,7 +287,7 @@ WHERE run_id = :run_id
 GROUP BY provider, status
 ORDER BY provider, status;
 
--- 13. Cleanup correctness and unresolved billable ownership.
+-- 12. Cleanup correctness and unresolved billable ownership.
 SELECT action, status, COALESCE(failure_class, 'none') AS failure_class, COUNT(*) AS events
 FROM cleanup_events
 WHERE run_id = :run_id
@@ -352,7 +307,7 @@ WHERE l.run_id = :run_id
   AND l.provider_resource_id IS NOT NULL
   AND l.cleaned_at IS NULL;
 
--- 14. Durable Stability-window coverage. Keep missed windows with zero linked
+-- 13. Durable Stability-window coverage. Keep missed windows with zero linked
 -- epochs or leases in the denominator.
 SELECT
   c.campaign_id,

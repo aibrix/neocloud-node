@@ -53,7 +53,7 @@ Run a real command in the same way:
 
 ```bash
 python3 -m neocloud_trace init \
-  --plan ../plans/research-runpod-pilot-3h.json \
+  --plan ../plans/capacity-epoch.json \
   --db /tmp/neocloud-trace-dev.db \
   --vantage-id local-development
 ```
@@ -62,7 +62,7 @@ The normal installed form remains preferred for user documentation:
 
 ```bash
 neocloud-trace init \
-  --plan tools/neocloud-trace/plans/research-runpod-pilot-3h.json \
+  --plan tools/neocloud-trace/plans/capacity-epoch.json \
   --db /tmp/neocloud-trace-dev.db \
   --vantage-id local-development
 ```
@@ -115,7 +115,6 @@ tools/neocloud-trace/
 │   ├── storage/               SQLite schema and persistence operations
 │   └── analysis/              CSV export and billing reconciliation
 ├── tests/                     unit and workflow tests
-└── legacy/                    archived single-file collector
 ```
 
 ## CLI Development
@@ -143,9 +142,6 @@ The active command contracts are intentionally narrow:
   `stability_schedule`;
 - both reject every other active section before opening SQLite or constructing
   provider clients.
-
-Keep the command-level validation separate from lower-level historical runners
-until their stored data no longer needs compatibility support.
 
 ## Storage and Data Changes
 
