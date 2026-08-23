@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: neocloud-node-vast-smoke
+  annotations:
+    cloud.aibrix.ai/provider: vast
+    cloud.aibrix.ai/gpu-type: GTX 1070
+    cloud.aibrix.ai/max-price: "0.10"
+    cloud.aibrix.ai/vast-verified: "true"
+    cloud.aibrix.ai/vast-disk-gb: "20"
+spec:
+  restartPolicy: Never
+  nodeSelector:
+    cloud.aibrix.ai/provider: vast
+  tolerations:
+    - key: cloud.aibrix.ai/provider
+      operator: Equal
+      value: vast
+      effect: NoSchedule
+  containers:
+    - name: smoke
+      image: python:3.12-slim
+      command: ["/bin/sh", "-lc"]
+      args: ["echo neocloud-node-vast-smoke; exec sleep 600"]
+      resources:
+        limits:
+          nvidia.com/gpu: "1"

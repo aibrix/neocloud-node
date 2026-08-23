@@ -180,6 +180,40 @@ func TestTransformerMapsSupportedCompatibilityFields(t *testing.T) {
 	}
 }
 
+func TestTransformerPreservesVastProviderHints(t *testing.T) {
+	t.Parallel()
+
+	request, err := (DefaultTransformer{}).Transform(PodSpec{
+		Annotations: map[string]string{
+			AnnotationProvider:      "vast",
+			AnnotationVastVerified:  "true",
+			AnnotationVastMachineID: "27850",
+			AnnotationVastDiskGB:    "25",
+			AnnotationVastOfferID:   "12345",
+		},
+		Containers: []ContainerSpec{{
+			Image:     "python:3.12-slim",
+			Resources: ResourceSpec{GPUCount: 1},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Transform() error = %v", err)
+	}
+	if request.Provider != "vast" {
+		t.Fatalf("provider = %q, want vast", request.Provider)
+	}
+	for key, want := range map[string]string{
+		AnnotationVastVerified:  "true",
+		AnnotationVastMachineID: "27850",
+		AnnotationVastDiskGB:    "25",
+		AnnotationVastOfferID:   "12345",
+	} {
+		if got := request.ProviderHints[key]; got != want {
+			t.Fatalf("provider hint %s = %q, want %q", key, got, want)
+		}
+	}
+}
+
 func TestTransformerRejectsPhase1UnsupportedSpecs(t *testing.T) {
 	t.Parallel()
 

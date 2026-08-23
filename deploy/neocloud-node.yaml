@@ -322,6 +322,18 @@ spec:
               key: apiKey
               name: aibrix-neocloud-node-lambda
               optional: true
+        - name: VAST_API_KEY
+          valueFrom:
+            secretKeyRef:
+              key: apiKey
+              name: aibrix-neocloud-node-vast
+              optional: true
+        - name: GPU_BURST_VAST_DISK_GB
+          value: "20"
+        - name: GPU_BURST_VAST_MIN_RELIABILITY
+          value: "0.95"
+        - name: GPU_BURST_VAST_OFFER_LIMIT
+          value: "100"
         - name: GPU_BURST_LAMBDA_CALLBACK_URL
           value: ""
         - name: GPU_BURST_LAMBDA_REGION

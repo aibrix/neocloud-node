@@ -24,7 +24,7 @@ This project is experimental and not production-ready.
 The current implementation focuses on a reliable Kubernetes control-plane path:
 durable workload bindings, provider-neutral Pod transformation, idempotent
 remote lifecycle reconciliation, fake-provider conformance tests, and provider
-adapters for RunPod and Lambda Cloud.
+adapters for RunPod, Lambda Cloud, and Vast.ai.
 
 Real cloud smoke tests are gated by explicit environment variables because they
 create paid GPU resources.
@@ -38,6 +38,8 @@ create paid GPU resources.
 - Fake provider tests for local control-plane validation.
 - RunPod Pod lifecycle adapter with create/get/delete/list-by-external-name.
 - Lambda Cloud VM adapter with cloud-init runner callback support.
+- Vast.ai marketplace adapter with offer search, price/reliability constraints,
+  create/get/delete, deterministic recovery, and paginated resource listing.
 - Provider error classification, fallback hooks, orphan sweeper mechanics, and
   basic burn-rate metrics.
 
@@ -87,6 +89,14 @@ To switch the deployment to RunPod, set `GPU_BURST_PROVIDER=runpod` and provide
 `RUNPOD_API_KEY` through the `aibrix-neocloud-node-runpod` Secret referenced by
 the deployment. Provider credentials are never included in the repository.
 
+To use Vast.ai, set `GPU_BURST_PROVIDER=vast` and provide `VAST_API_KEY` through
+the optional `aibrix-neocloud-node-vast` Secret. The adapter defaults to 20 GiB
+of disk, verified hosts, reliability of at least 0.95, and on-demand pricing.
+Pods can narrow placement with `cloud.aibrix.ai/vast-verified`,
+`cloud.aibrix.ai/vast-machine-id`, `cloud.aibrix.ai/vast-disk-gb`, and
+`cloud.aibrix.ai/vast-offer-id`. The generic `cloud.aibrix.ai/max-price`
+annotation is enforced during offer search and again before rental.
+
 ## RunPod E2E Smoke Test
 
 The real RunPod smoke test is gated so it never creates cloud resources by
@@ -129,6 +139,30 @@ export LAMBDA_API_KEY=...
 export LAMBDA_E2E_SSH_KEY_NAMES=public-key-dev
 hack/e2e/lambda-smoke.sh
 ```
+
+## Vast.ai E2E Smoke Tests
+
+Both Vast tests are explicitly gated because they create a paid instance. The
+provider smoke exercises the Go adapter directly, including deterministic
+create recovery, readiness, paginated listing, deletion, and final lookup:
+
+```bash
+export VAST_API_KEY=...
+VAST_E2E=1 hack/e2e/vast-provider-smoke.sh
+```
+
+The Kubernetes smoke additionally builds and runs the local virtual-kubelet
+controller, creates a Pod and `CloudPodBinding`, waits for the remote instance,
+deletes the Pod, and verifies that no Vast resource remains by ID or label:
+
+```bash
+export VAST_API_KEY=...
+VAST_E2E=1 hack/e2e/vast-smoke.sh
+```
+
+Defaults use one verified `GTX 1070`, 20 GiB disk, reliability >= 0.95, and a
+maximum rental price of $0.10/hour. Override them with `VAST_E2E_GPU_TYPE`,
+`VAST_E2E_DISK_GB`, `VAST_E2E_MIN_RELIABILITY`, and `VAST_E2E_MAX_PRICE`.
 
 ## Resource Broker Direction
 
