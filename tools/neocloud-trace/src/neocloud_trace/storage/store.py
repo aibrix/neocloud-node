@@ -97,7 +97,9 @@ class TraceStore:
         collector_revision: str | None = None,
         python_version: str | None = None,
     ) -> str:
-        config_json = json_text({"experiment": dataclasses.asdict(config), "document": config_document})
+        config_json = json_text(
+            {"experiment": dataclasses.asdict(config), "document": config_document}
+        )
         return self._start_trace_run(
             protocol_version=config.protocol_version,
             config_json=config_json,
@@ -1012,7 +1014,9 @@ class TraceStore:
                 (run_id,),
             ).fetchall()
 
-    def record_quote(self, run_id: str, quote: CatalogQuote, observed_at: str | None = None) -> str:
+    def record_quote(
+        self, run_id: str, quote: CatalogQuote, observed_at: str | None = None
+    ) -> str:
         quote_id = str(uuid.uuid4())
         raw_json = json_text(quote.raw)
         with self._lock, self.connection:
@@ -1236,159 +1240,6 @@ class TraceStore:
                 (run_id,),
             ).fetchall()
 
-    def schedule_completion_window_epoch(
-        self,
-        run_id: str,
-        *,
-        cohort_name: str,
-        sequence: int,
-        cell: TrialCell,
-        target_depth: int,
-        arm_name: str,
-        launch_fraction: float,
-        assignment_probability: float,
-        assignment_seed: int,
-        release_offset_seconds: float,
-        release_at: str,
-        allocation_deadline_at: str,
-        planned_launch_at: str,
-        details: dict[str, Any] | None = None,
-    ) -> str:
-        if not cohort_name.strip() or not arm_name.strip():
-            raise ValueError("completion-window cohort and arm names are required")
-        if sequence < 0 or release_offset_seconds < 0:
-            raise ValueError("completion-window sequence and offset must not be negative")
-        validate_capacity_target(target_depth, cell.gpu_count)
-        if not 0 <= launch_fraction <= 1:
-            raise ValueError("completion-window launch fraction must be in [0, 1]")
-        if not 0 < assignment_probability <= 1:
-            raise ValueError("assignment_probability must be in (0, 1]")
-        epoch_id = str(uuid.uuid4())
-        with self._lock, self.connection:
-            self.connection.execute(
-                """
-                INSERT INTO completion_window_epochs
-                  (id, run_id, cohort_name, sequence, provider, sku, gpu_type,
-                   region, datacenter, resource_class, market, target_depth,
-                   arm_name, launch_fraction, assignment_probability,
-                   assignment_seed, release_offset_seconds, release_at,
-                   allocation_deadline_at, planned_launch_at, status, details_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                        'scheduled', ?)
-                """,
-                (
-                    epoch_id,
-                    run_id,
-                    cohort_name,
-                    sequence,
-                    cell.provider,
-                    cell.sku,
-                    cell.gpu_type,
-                    cell.region,
-                    cell.datacenter,
-                    cell.resource_class,
-                    cell.market,
-                    target_depth,
-                    arm_name,
-                    launch_fraction,
-                    assignment_probability,
-                    assignment_seed,
-                    release_offset_seconds,
-                    release_at,
-                    allocation_deadline_at,
-                    planned_launch_at,
-                    json_text(details or {}),
-                ),
-            )
-        return epoch_id
-
-    def mark_completion_window_released(
-        self,
-        epoch_id: str,
-        release_quote_id: str | None,
-    ) -> None:
-        with self._lock, self.connection:
-            self.connection.execute(
-                """
-                UPDATE completion_window_epochs
-                SET released_at=?, release_quote_id=?, status='released'
-                WHERE id=?
-                """,
-                (utc_now(), release_quote_id, epoch_id),
-            )
-
-    def mark_completion_window_decided(
-        self,
-        epoch_id: str,
-        *,
-        decision_quote_id: str | None,
-        decision_lag_seconds: float,
-        capacity_epoch_id: str,
-    ) -> None:
-        with self._lock, self.connection:
-            self.connection.execute(
-                """
-                UPDATE completion_window_epochs
-                SET actual_decision_at=?, decision_quote_id=?, decision_lag_seconds=?,
-                    capacity_epoch_id=?, status='decided'
-                WHERE id=?
-                """,
-                (
-                    utc_now(),
-                    decision_quote_id,
-                    decision_lag_seconds,
-                    capacity_epoch_id,
-                    epoch_id,
-                ),
-            )
-
-    def finish_completion_window_epoch(
-        self,
-        epoch_id: str,
-        *,
-        status: str,
-        stop_reason: str,
-        provider_sla_met: bool | None = None,
-        application_sla_met: bool | None = None,
-        details: dict[str, Any] | None = None,
-    ) -> None:
-        with self._lock, self.connection:
-            row = self.connection.execute(
-                "SELECT details_json FROM completion_window_epochs WHERE id=?",
-                (epoch_id,),
-            ).fetchone()
-            if row is None:
-                raise KeyError(epoch_id)
-            merged_details = json.loads(row["details_json"])
-            merged_details.update(details or {})
-            self.connection.execute(
-                """
-                UPDATE completion_window_epochs
-                SET finished_at=?, status=?, stop_reason=?, provider_sla_met=?,
-                    application_sla_met=?, details_json=?
-                WHERE id=?
-                """,
-                (
-                    utc_now(),
-                    status,
-                    stop_reason,
-                    None if provider_sla_met is None else int(provider_sla_met),
-                    None if application_sla_met is None else int(application_sla_met),
-                    json_text(merged_details),
-                    epoch_id,
-                ),
-            )
-
-    def completion_window_epoch_rows(self, run_id: str) -> list[sqlite3.Row]:
-        with self._lock:
-            return self.connection.execute(
-                """
-                SELECT * FROM completion_window_epochs
-                WHERE run_id=? ORDER BY cohort_name, sequence
-                """,
-                (run_id,),
-            ).fetchall()
-
     def start_replica(
         self,
         trial_id: str,
@@ -1407,7 +1258,15 @@ class TraceStore:
                    status, retry_of, details_json)
                 VALUES (?, ?, ?, ?, ?, ?, 'requested', ?, '{}')
                 """,
-                (replica_id, trial_id, stage_target, ordinal, attempt, utc_now(), retry_of),
+                (
+                    replica_id,
+                    trial_id,
+                    stage_target,
+                    ordinal,
+                    attempt,
+                    utc_now(),
+                    retry_of,
+                ),
             )
             if retry_of is None:
                 self.connection.execute(
@@ -1462,7 +1321,8 @@ class TraceStore:
     def mark_replica_cleaned(self, replica_id: str) -> None:
         with self._lock, self.connection:
             row = self.connection.execute(
-                "SELECT trial_id, cleaned_at FROM capacity_replicas WHERE id=?", (replica_id,)
+                "SELECT trial_id, cleaned_at FROM capacity_replicas WHERE id=?",
+                (replica_id,),
             ).fetchone()
             if row is None:
                 raise KeyError(replica_id)
@@ -1528,8 +1388,16 @@ class TraceStore:
             ).fetchone()
             if row is None:
                 raise KeyError(replica_id)
-            provider_ready_at = utc_now() if provider_ready and row["provider_ready_at"] is None else row["provider_ready_at"]
-            application_ready_at = utc_now() if application_ready is True and row["application_ready_at"] is None else row["application_ready_at"]
+            provider_ready_at = (
+                utc_now()
+                if provider_ready and row["provider_ready_at"] is None
+                else row["provider_ready_at"]
+            )
+            application_ready_at = (
+                utc_now()
+                if application_ready is True and row["application_ready_at"] is None
+                else row["application_ready_at"]
+            )
             self.connection.execute(
                 """
                 UPDATE capacity_replicas
@@ -1546,7 +1414,11 @@ class TraceStore:
                     provider_location,
                     machine_id,
                     realized_price_usd_hr,
-                    "application_ready" if application_ready_at else "provider_ready" if provider_ready_at else "accepted",
+                    "application_ready"
+                    if application_ready_at
+                    else "provider_ready"
+                    if provider_ready_at
+                    else "accepted",
                     merge_json_text(row["details_json"], details),
                     replica_id,
                 ),
@@ -1579,7 +1451,14 @@ class TraceStore:
                     details_json=?
                 WHERE id=?
                 """,
-                (utc_now(), status, first_failed_stage, failure_class, json_text(details or {}), trial_id),
+                (
+                    utc_now(),
+                    status,
+                    first_failed_stage,
+                    failure_class,
+                    json_text(details or {}),
+                    trial_id,
+                ),
             )
 
     def capacity_trial_row(self, trial_id: str) -> sqlite3.Row:
@@ -1659,7 +1538,16 @@ class TraceStore:
                   (id, run_id, observed_at, provider, amount_usd, kind, reference, details_json)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (entry_id, run_id, utc_now(), provider, amount_usd, kind, reference, json_text(details or {})),
+                (
+                    entry_id,
+                    run_id,
+                    utc_now(),
+                    provider,
+                    amount_usd,
+                    kind,
+                    reference,
+                    json_text(details or {}),
+                ),
             )
         return entry_id
 
@@ -1725,7 +1613,9 @@ class TraceStore:
             ).fetchone()
         return float(row[0])
 
-    def owned_resources(self, run_id: str, provider: str | None = None) -> list[OwnedResource]:
+    def owned_resources(
+        self, run_id: str, provider: str | None = None
+    ) -> list[OwnedResource]:
         provider_clause = " AND t.provider=?" if provider else ""
         params: list[Any] = [run_id]
         if provider:
@@ -1754,11 +1644,25 @@ class TraceStore:
                 canary_params,
             ).fetchall()
         resources = [
-            OwnedResource("capacity_replica", row["owner_id"], row["run_id"], row["provider"], row["provider_resource_id"], "gpu")
+            OwnedResource(
+                "capacity_replica",
+                row["owner_id"],
+                row["run_id"],
+                row["provider"],
+                row["provider_resource_id"],
+                "gpu",
+            )
             for row in replica_rows
         ]
         resources.extend(
-            OwnedResource("canary_lease", row["owner_id"], row["run_id"], row["provider"], row["provider_resource_id"], "gpu")
+            OwnedResource(
+                "canary_lease",
+                row["owner_id"],
+                row["run_id"],
+                row["provider"],
+                row["provider_resource_id"],
+                "gpu",
+            )
             for row in canary_rows
         )
         return resources
@@ -2069,7 +1973,13 @@ class TraceStore:
                     datacenter=COALESCE(?, datacenter), status='active', details_json=?
                 WHERE id=?
                 """,
-                (provider_resource_id, machine_id, datacenter, json_text(details or {}), lease_id),
+                (
+                    provider_resource_id,
+                    machine_id,
+                    datacenter,
+                    json_text(details or {}),
+                    lease_id,
+                ),
             )
 
     def record_canary_observation(
@@ -2116,7 +2026,10 @@ class TraceStore:
                     json_text(raw or {}),
                 ),
             )
-            fields = ["machine_id=COALESCE(?, machine_id)", "datacenter=COALESCE(?, datacenter)"]
+            fields = [
+                "machine_id=COALESCE(?, machine_id)",
+                "datacenter=COALESCE(?, datacenter)",
+            ]
             params: list[Any] = [machine_id, provider_location]
             if heartbeat_ok:
                 fields.append("provider_ready_at=COALESCE(provider_ready_at, ?)")
@@ -2129,7 +2042,9 @@ class TraceStore:
             elif provider_state in ("RUNNING", "active"):
                 fields.append("provider_ready_at=COALESCE(provider_ready_at, ?)")
                 params.append(at)
-                fields.append("status=CASE WHEN status='application_ready' THEN status ELSE 'provider_ready' END")
+                fields.append(
+                    "status=CASE WHEN status='application_ready' THEN status ELSE 'provider_ready' END"
+                )
             params.append(lease_id)
             self.connection.execute(
                 f"UPDATE canary_leases SET {', '.join(fields)} WHERE id=?",

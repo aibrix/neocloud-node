@@ -3,12 +3,9 @@ import io
 import json
 import datetime as dt
 import pathlib
-import random
 import socket
 import sys
 import tempfile
-import threading
-import time
 import unittest
 from unittest import mock
 
@@ -37,7 +34,7 @@ from neocloud_trace.supervisor import (
 
 def plan_document():
     return {
-        "protocol_version": "2.0",
+        "protocol_version": "3.0-capacity",
         "host_id": "test-host",
         "vantage_id": "test-vantage",
         "duration_seconds": 0.15,
@@ -47,22 +44,33 @@ def plan_document():
         "max_active_gpus_per_provider": 8,
         "provider_budgets_usd": {"lambda": 1.0},
         "total_budget_usd": 1.0,
-        "capacity_trials": [
+        "capacity_cohorts": [
             {
-                "provider": "lambda",
-                "sku": "gpu_1x_a10",
-                "gpu_type": "A10",
-                "region": "us-east-1",
-                "resource_class": "on-demand",
-                "market": "on-demand",
-                "target_depth": 1,
-                "ready_timeout_seconds": 1,
-                "max_lease_seconds": 60,
-                "estimated_price_usd_hr": 0.6,
-                "require_application_ready": False,
+                "name": "lambda-capacity",
+                "max_trials": 1,
+                "selection_seed": 17,
+                "initial_delay_seconds": 0,
+                "interval_seconds": 60,
+                "jitter_seconds": 0,
+                "min_remaining_seconds": 0.01,
+                "cells": [
+                    {
+                        "provider": "lambda",
+                        "sku": "gpu_1x_a10",
+                        "gpu_type": "A10",
+                        "region": "us-east-1",
+                        "resource_class": "on-demand",
+                        "market": "on-demand",
+                        "target_gpu_depth": 1,
+                        "ready_timeout_seconds": 1,
+                        "max_lease_seconds": 60,
+                        "estimated_price_usd_hr": 0.6,
+                        "require_application_ready": False,
+                    }
+                ],
             }
         ],
-        "canary_trials": [],
+        "canary_cohorts": [],
     }
 
 
@@ -73,11 +81,7 @@ def stability_plan_document():
             "protocol_version": "3.0-stability",
             "duration_seconds": 0.2,
             "max_active_gpus_per_provider": 2,
-            "capacity_trials": [],
             "capacity_cohorts": [],
-            "completion_window_cohorts": [],
-            "canary_trials": [],
-            "control_cohorts": [],
             "canary_cohorts": [
                 {
                     "name": "lambda-stability",
@@ -126,7 +130,9 @@ class CountingCatalogProvider:
             region="us-east-1",
             available=True,
         )
-        return [CatalogFetch("lambda", "instance-types", HTTPResponse(200, 1, {}), (quote,))]
+        return [
+            CatalogFetch("lambda", "instance-types", HTTPResponse(200, 1, {}), (quote,))
+        ]
 
 
 class FastFailingCanaryProvider:
@@ -219,19 +225,6 @@ class ReadyCapacityProvider:
         return DeleteResult(True, missing=True)
 
 
-class BlockingCapacityRunner:
-    entered = threading.Event()
-    release = threading.Event()
-
-    def __init__(self, *args, **kwargs):
-        pass
-
-    def run_trial(self, run_id, cell, target_depth=8):
-        self.entered.set()
-        self.release.wait(timeout=1)
-        return None
-
-
 class ResearchSupervisorTest(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
@@ -240,8 +233,6 @@ class ResearchSupervisorTest(unittest.TestCase):
         self.plan_path.write_text(json.dumps(plan_document()), encoding="utf-8")
 
     def tearDown(self):
-        BlockingCapacityRunner.entered.clear()
-        BlockingCapacityRunner.release.clear()
         self.tempdir.cleanup()
 
     def test_load_plan_requires_positive_explicit_budgets(self):
@@ -253,34 +244,29 @@ class ResearchSupervisorTest(unittest.TestCase):
 
     def test_capacity_plan_accepts_explicit_d32_gpu_depth_and_shape(self):
         document = plan_document()
-        document.update(
+        document["max_active_gpus_per_provider"] = 32
+        document["provider_budgets_usd"] = {"runpod": 20.0}
+        document["total_budget_usd"] = 20.0
+        document["capacity_cohorts"][0]["cells"] = [
             {
-                "max_active_gpus_per_provider": 32,
-                "provider_budgets_usd": {"runpod": 20.0},
-                "total_budget_usd": 20.0,
-                "capacity_trials": [
-                    {
-                        "provider": "runpod",
-                        "sku": "NVIDIA A40",
-                        "gpu_type": "A40",
-                        "resource_class": "secure",
-                        "market": "on-demand",
-                        "gpu_count": 4,
-                        "target_gpu_depth": 32,
-                        "ready_timeout_seconds": 600,
-                        "max_lease_seconds": 900,
-                        "estimated_price_usd_hr": 3.0,
-                        "require_application_ready": True,
-                        "settlement_safety_multiplier": 1.15,
-                    }
-                ],
-                "canary_trials": [],
+                "provider": "runpod",
+                "sku": "NVIDIA A40",
+                "gpu_type": "A40",
+                "resource_class": "secure",
+                "market": "on-demand",
+                "gpu_count": 4,
+                "target_gpu_depth": 32,
+                "ready_timeout_seconds": 600,
+                "max_lease_seconds": 900,
+                "estimated_price_usd_hr": 3.0,
+                "require_application_ready": True,
+                "settlement_safety_multiplier": 1.15,
             }
-        )
+        ]
         self.plan_path.write_text(json.dumps(document), encoding="utf-8")
 
         plan = load_plan(self.plan_path)
-        trial = plan.capacity_trials[0]
+        trial = plan.capacity_cohorts[0].cells[0]
 
         self.assertEqual(trial.target_depth, 32)
         self.assertEqual(trial.cell.gpu_count, 4)
@@ -288,44 +274,27 @@ class ResearchSupervisorTest(unittest.TestCase):
         self.assertAlmostEqual(trial.budget_upper_bound_usd, 6.9)
 
     def test_canary_budget_applies_billing_floor_and_safety_multiplier(self):
-        document = plan_document()
-        document["capacity_trials"] = []
-        document["canary_trials"] = [
+        document = stability_plan_document()
+        cell = document["canary_cohorts"][0]["cells"][0]
+        cell.update(
             {
-                "provider": "lambda",
-                "sku": "gpu_1x_a10",
-                "gpu_type": "A10",
-                "region": "us-east-1",
-                "resource_class": "on-demand",
-                "market": "on-demand",
                 "duration_seconds": 30,
                 "interval_seconds": 1,
-                "interruptible_price_usd_hr": 0.3,
-                "on_demand_price_usd_hr": 0.3,
                 "billing_minimum_seconds": 60,
                 "settlement_safety_multiplier": 1.2,
             }
-        ]
+        )
         self.plan_path.write_text(json.dumps(document), encoding="utf-8")
 
-        trial = load_plan(self.plan_path).canary_trials[0]
+        trial = load_plan(self.plan_path).canary_cohorts[0].cells[0]
 
         self.assertAlmostEqual(trial.budget_upper_bound_usd, 0.012)
 
-        document = plan_document()
+        document = stability_plan_document()
         document["max_active_gpus_per_provider"] = 33
         self.plan_path.write_text(json.dumps(document), encoding="utf-8")
         with self.assertRaises(ValueError):
             load_plan(self.plan_path)
-
-    def test_active_plan_cannot_run_without_explicit_enable_flag(self):
-        plan = load_plan(self.plan_path)
-        store = TraceStore(self.root / "trace.db")
-        self.addCleanup(store.close)
-        supervisor = PilotSupervisor(store, providers={})
-
-        with self.assertRaises(ActiveRunDisabled):
-            supervisor.run(plan, enable_active=False)
 
     def test_cli_marks_every_billable_command_as_active(self):
         module = trace_cli
@@ -334,9 +303,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         plan = str(self.plan_path)
 
         for command in ("run", "tick"):
-            args = parser.parse_args(
-                [command, "--db", database, "--plan", plan]
-            )
+            args = parser.parse_args([command, "--db", database, "--plan", plan])
             with self.assertRaises(ActiveRunDisabled):
                 module.require_active(args)
 
@@ -371,9 +338,7 @@ class ResearchSupervisorTest(unittest.TestCase):
             ]
         )
         module.require_active(sync_billing)
-        reconcile = parser.parse_args(
-            ["billing", "reconcile", "--db", database]
-        )
+        reconcile = parser.parse_args(["billing", "reconcile", "--db", database])
         module.require_active(reconcile)
 
         identified = parser.parse_args(
@@ -482,8 +447,6 @@ class ResearchSupervisorTest(unittest.TestCase):
         document.update(
             {
                 "host_id": "replace-with-stable-host-id",
-                "capacity_trials": [],
-                "canary_trials": [],
                 "capacity_cohorts": [
                     {
                         "name": "atomic-depth",
@@ -566,13 +529,7 @@ class ResearchSupervisorTest(unittest.TestCase):
 
     def test_tick_cli_requires_a_capacity_cohort(self):
         document = plan_document()
-        document.update(
-            {
-                "capacity_trials": [],
-                "canary_trials": [],
-                "capacity_cohorts": [],
-            }
-        )
+        document["capacity_cohorts"] = []
         self.plan_path.write_text(json.dumps(document), encoding="utf-8")
         module = trace_cli
         args = module.build_parser().parse_args(
@@ -590,7 +547,9 @@ class ResearchSupervisorTest(unittest.TestCase):
             module.execute(args)
 
     def test_tick_contract_rejects_legacy_trials_before_db_or_provider(self):
-        self.plan_path.write_text(json.dumps(plan_document()), encoding="utf-8")
+        document = plan_document()
+        document["capacity_trials"] = [document["capacity_cohorts"][0]["cells"][0]]
+        self.plan_path.write_text(json.dumps(document), encoding="utf-8")
         db_path = self.root / "invalid-capacity.db"
         args = trace_cli.build_parser().parse_args(
             [
@@ -604,7 +563,10 @@ class ResearchSupervisorTest(unittest.TestCase):
         )
 
         with mock.patch.object(trace_cli, "_provider_clients") as clients:
-            with self.assertRaisesRegex(ValueError, "capacity_trials=1"):
+            with self.assertRaisesRegex(
+                ValueError,
+                "unsupported active plan sections: capacity_trials",
+            ):
                 trace_cli.execute(args)
 
         clients.assert_not_called()
@@ -614,8 +576,6 @@ class ResearchSupervisorTest(unittest.TestCase):
         document = plan_document()
         document.update(
             {
-                "capacity_trials": [],
-                "canary_trials": [],
                 "capacity_cohorts": [
                     {
                         "name": "invalid-batch",
@@ -654,14 +614,16 @@ class ResearchSupervisorTest(unittest.TestCase):
             ]
         )
 
-        with self.assertRaisesRegex(ValueError, "max_trials=1"):
+        with self.assertRaisesRegex(ValueError, "max_trials must be one"):
             trace_cli.execute(args)
 
         self.assertFalse(db_path.exists())
 
     def test_run_contract_rejects_mixed_plan_before_db_or_provider(self):
         document = stability_plan_document()
-        document["capacity_trials"] = plan_document()["capacity_trials"]
+        document["capacity_trials"] = [
+            plan_document()["capacity_cohorts"][0]["cells"][0]
+        ]
         self.plan_path.write_text(json.dumps(document), encoding="utf-8")
         db_path = self.root / "invalid-stability.db"
         args = trace_cli.build_parser().parse_args(
@@ -676,7 +638,10 @@ class ResearchSupervisorTest(unittest.TestCase):
         )
 
         with mock.patch.object(trace_cli, "_provider_clients") as clients:
-            with self.assertRaisesRegex(ValueError, "capacity_trials=1"):
+            with self.assertRaisesRegex(
+                ValueError,
+                "unsupported active plan sections: capacity_trials",
+            ):
                 trace_cli.execute(args)
 
         clients.assert_not_called()
@@ -741,11 +706,9 @@ class ResearchSupervisorTest(unittest.TestCase):
         self.assertEqual(len(provider.created), 2)
 
     def test_init_reports_dynamic_cohort_pair_cost_bounds(self):
-        document = plan_document()
+        document = stability_plan_document()
         document.update(
             {
-                "capacity_trials": [],
-                "canary_trials": [],
                 "canary_cohorts": [
                     {
                         "name": "cost-bounds",
@@ -792,36 +755,13 @@ class ResearchSupervisorTest(unittest.TestCase):
 
         result = module.execute(args)
 
-        self.assertEqual(result["static_planned_upper_bound_usd"], 0)
-        self.assertAlmostEqual(result["canary_cohorts"][0]["min_pair_upper_bound_usd"], 0.01)
-        self.assertAlmostEqual(result["canary_cohorts"][0]["max_pair_upper_bound_usd"], 0.02)
+        self.assertAlmostEqual(
+            result["canary_cohorts"][0]["min_pair_upper_bound_usd"], 0.01
+        )
+        self.assertAlmostEqual(
+            result["canary_cohorts"][0]["max_pair_upper_bound_usd"], 0.02
+        )
         self.assertEqual(result["total_budget_usd"], 1.0)
-
-    def test_init_reports_complete_d32_capacity_cohort_cost_bound(self):
-        plan_path = (
-            TRACE_ROOT
-            / "plans"
-            / "research-capacity-fragmentation-d32-pilot.json"
-        )
-        module = trace_cli
-        args = module.build_parser().parse_args(
-            [
-                "init",
-                "--db",
-                str(self.root / "d32.db"),
-                "--plan",
-                str(plan_path),
-                "--vantage-id",
-                "test-vantage",
-            ]
-        )
-
-        result = module.execute(args)
-
-        cohort = result["capacity_cohorts"][0]
-        self.assertAlmostEqual(cohort["planned_cohort_upper_bound_usd"], 46.0)
-        self.assertEqual(cohort["planned_provider_upper_bounds_usd"]["runpod"], 18.4)
-        self.assertEqual(cohort["planned_provider_upper_bounds_usd"]["lambda"], 27.6)
 
     def test_show_depth_trial_cli_returns_shape_aware_payload(self):
         db_path = self.root / "payload.db"
@@ -862,7 +802,9 @@ class ResearchSupervisorTest(unittest.TestCase):
         self.assertEqual(result["schema_version"], "capacity-trial-payload/v1")
         self.assertEqual(result["trial"]["target_gpu_depth"], 32)
         self.assertEqual(result["trial"]["target_instance_count"], 8)
-        self.assertEqual(result["stages"][0]["attempts"][0]["provider_resource_id"], "pod-1")
+        self.assertEqual(
+            result["stages"][0]["attempts"][0]["provider_resource_id"], "pod-1"
+        )
 
     def test_budget_guard_records_conservative_hold_and_rejects_overspend(self):
         plan = load_plan(self.plan_path)
@@ -898,7 +840,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         self.assertEqual(settlements, 1)
 
     def test_continuous_cohort_replaces_failed_pairs_until_max_pairs(self):
-        document = plan_document()
+        document = stability_plan_document()
         document.update(
             {
                 "protocol_version": "3.0-survival-cohort",
@@ -906,8 +848,6 @@ class ResearchSupervisorTest(unittest.TestCase):
                 "max_active_gpus_per_provider": 2,
                 "provider_budgets_usd": {"runpod": 1.0},
                 "total_budget_usd": 1.0,
-                "capacity_trials": [],
-                "canary_trials": [],
                 "canary_cohorts": [
                     {
                         "name": "runpod-spot-survival",
@@ -940,7 +880,13 @@ class ResearchSupervisorTest(unittest.TestCase):
         provider = FastFailingCanaryProvider()
         supervisor = PilotSupervisor(store, providers={"runpod": provider})
 
-        run_id = supervisor.run(plan, enable_active=True)
+        result = supervisor.stability_run(
+            plan,
+            campaign_id="replacement-test",
+            enable_active=True,
+            now=dt.datetime(2026, 8, 11, tzinfo=dt.timezone.utc),
+        )
+        run_id = result["run_id"]
 
         epochs = store.connection.execute(
             "SELECT sequence, status, stop_reason FROM canary_epochs "
@@ -958,7 +904,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         self.assertEqual(store.owned_resources(run_id), [])
 
     def test_failed_spot_launch_immediately_censors_and_cleans_control(self):
-        document = plan_document()
+        document = stability_plan_document()
         document.update(
             {
                 "protocol_version": "3.0-survival-cohort",
@@ -966,8 +912,6 @@ class ResearchSupervisorTest(unittest.TestCase):
                 "max_active_gpus_per_provider": 2,
                 "provider_budgets_usd": {"runpod": 1.0},
                 "total_budget_usd": 1.0,
-                "capacity_trials": [],
-                "canary_trials": [],
                 "canary_cohorts": [
                     {
                         "name": "launch-failure",
@@ -997,9 +941,13 @@ class ResearchSupervisorTest(unittest.TestCase):
         self.addCleanup(store.close)
         provider = SpotLaunchFailProvider()
 
-        run_id = PilotSupervisor(store, {"runpod": provider}).run(
-            plan, enable_active=True
+        result = PilotSupervisor(store, {"runpod": provider}).stability_run(
+            plan,
+            campaign_id="pair-setup-test",
+            enable_active=True,
+            now=dt.datetime(2026, 8, 11, tzinfo=dt.timezone.utc),
         )
+        run_id = result["run_id"]
 
         reasons = {
             row["interruptible"]: row["censor_reason"]
@@ -1014,7 +962,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         self.assertEqual(store.owned_resources(run_id), [])
 
     def test_continuous_cohort_stops_replacement_when_cleanup_is_unresolved(self):
-        document = plan_document()
+        document = stability_plan_document()
         document.update(
             {
                 "protocol_version": "3.0-survival-cohort",
@@ -1022,8 +970,6 @@ class ResearchSupervisorTest(unittest.TestCase):
                 "max_active_gpus_per_provider": 2,
                 "provider_budgets_usd": {"runpod": 1.0},
                 "total_budget_usd": 1.0,
-                "capacity_trials": [],
-                "canary_trials": [],
                 "canary_cohorts": [
                     {
                         "name": "cleanup-guard",
@@ -1052,9 +998,16 @@ class ResearchSupervisorTest(unittest.TestCase):
         store = TraceStore(self.root / "trace.db")
         self.addCleanup(store.close)
 
-        run_id = PilotSupervisor(store, {"runpod": CleanupFailProvider()}).run(
-            plan, enable_active=True
+        result = PilotSupervisor(
+            store,
+            {"runpod": CleanupFailProvider()},
+        ).stability_run(
+            plan,
+            campaign_id="cleanup-guard-test",
+            enable_active=True,
+            now=dt.datetime(2026, 8, 11, tzinfo=dt.timezone.utc),
         )
+        run_id = result["run_id"]
 
         epoch_count = store.connection.execute(
             "SELECT COUNT(*) FROM canary_epochs WHERE run_id=?", (run_id,)
@@ -1256,69 +1209,6 @@ class ResearchSupervisorTest(unittest.TestCase):
             "operator_stop",
         )
 
-    def test_capacity_cohort_runs_precomputed_depth_epochs(self):
-        document = plan_document()
-        document.update(
-            {
-                "protocol_version": "3.0-capacity-cohort",
-                "duration_seconds": 0.35,
-                "max_active_gpus_per_provider": 2,
-                "provider_budgets_usd": {"runpod": 1.0},
-                "total_budget_usd": 1.0,
-                "capacity_trials": [],
-                "canary_trials": [],
-                "canary_cohorts": [],
-                "capacity_cohorts": [
-                    {
-                        "name": "runpod-depth",
-                        "max_trials": 3,
-                        "selection_seed": 23,
-                        "initial_delay_seconds": 0,
-                        "interval_seconds": 0.03,
-                        "jitter_seconds": 0,
-                        "min_remaining_seconds": 0.01,
-                        "cells": [
-                            {
-                                "provider": "runpod",
-                                "sku": "NVIDIA A40",
-                                "gpu_type": "A40",
-                                "resource_class": "secure",
-                                "market": "on-demand",
-                                "target_depth": 1,
-                                "ready_timeout_seconds": 1,
-                                "max_lease_seconds": 60,
-                                "estimated_price_usd_hr": 0.3,
-                                "require_application_ready": True,
-                                "billing_minimum_seconds": 60,
-                            }
-                        ],
-                    }
-                ],
-            }
-        )
-        self.plan_path.write_text(json.dumps(document), encoding="utf-8")
-        plan = load_plan(self.plan_path)
-        store = TraceStore(self.root / "trace.db")
-        self.addCleanup(store.close)
-        provider = ReadyCapacityProvider()
-
-        run_id = PilotSupervisor(store, {"runpod": provider}).run(
-            plan, enable_active=True
-        )
-
-        epochs = store.connection.execute(
-            "SELECT sequence, status, selection_probability, trial_id "
-            "FROM capacity_epochs WHERE run_id=? ORDER BY sequence",
-            (run_id,),
-        ).fetchall()
-        self.assertEqual(len(epochs), 3)
-        self.assertEqual([row["sequence"] for row in epochs], [0, 1, 2])
-        self.assertTrue(all(row["status"] == "complete" for row in epochs))
-        self.assertTrue(all(row["selection_probability"] == 1 for row in epochs))
-        self.assertTrue(all(row["trial_id"] is not None for row in epochs))
-        self.assertEqual(len(provider.created), 3)
-        self.assertEqual(store.owned_resources(run_id), [])
-
     def test_capacity_tick_reuses_campaign_and_executes_at_most_one_due_epoch(self):
         document = plan_document()
         document.update(
@@ -1328,13 +1218,11 @@ class ResearchSupervisorTest(unittest.TestCase):
                 "max_active_gpus_per_provider": 1,
                 "provider_budgets_usd": {"runpod": 1.0},
                 "total_budget_usd": 1.0,
-                "capacity_trials": [],
-                "canary_trials": [],
                 "canary_cohorts": [],
                 "capacity_cohorts": [
                     {
                         "name": "atomic-depth",
-                        "max_trials": 2,
+                        "max_trials": 1,
                         "selection_seed": 23,
                         "initial_delay_seconds": 0,
                         "interval_seconds": 60,
@@ -1382,35 +1270,20 @@ class ResearchSupervisorTest(unittest.TestCase):
 
         self.assertEqual(first["status"], "executed")
         self.assertTrue(first["campaign_created"])
-        self.assertEqual(duplicate["status"], "idle")
+        self.assertEqual(duplicate["status"], "complete")
         self.assertFalse(duplicate["campaign_created"])
         self.assertEqual(first["run_id"], duplicate["run_id"])
         self.assertEqual(len(provider.created), 1)
         epochs = store.capacity_epoch_rows(first["run_id"])
-        self.assertEqual([row["status"] for row in epochs], ["complete", "scheduled"])
-
-        second = supervisor.capacity_tick(
-            plan,
-            campaign_id="capacity-60d",
-            enable_active=True,
-            now=started_at + dt.timedelta(seconds=61),
-        )
-        completed = supervisor.capacity_tick(
-            plan,
-            campaign_id="capacity-60d",
-            enable_active=True,
-            now=started_at + dt.timedelta(seconds=62),
-        )
-
-        self.assertEqual(second["status"], "executed")
-        self.assertEqual(completed["status"], "complete")
-        self.assertEqual(len(provider.created), 2)
+        self.assertEqual([row["status"] for row in epochs], ["complete"])
         self.assertEqual(
             store.run_row(first["run_id"])["status"],
             "complete",
         )
         self.assertEqual(
-            store.connection.execute("SELECT COUNT(*) FROM experiment_runs").fetchone()[0],
+            store.connection.execute("SELECT COUNT(*) FROM experiment_runs").fetchone()[
+                0
+            ],
             1,
         )
 
@@ -1420,8 +1293,6 @@ class ResearchSupervisorTest(unittest.TestCase):
             {
                 "protocol_version": "5.0-capacity-tick",
                 "duration_seconds": 180,
-                "capacity_trials": [],
-                "canary_trials": [],
                 "capacity_cohorts": [
                     {
                         "name": "atomic-depth",
@@ -1481,15 +1352,13 @@ class ResearchSupervisorTest(unittest.TestCase):
                 "max_active_gpus_per_provider": 1,
                 "provider_budgets_usd": {"runpod": 1.0},
                 "total_budget_usd": 1.0,
-                "capacity_trials": [],
-                "canary_trials": [],
                 "canary_cohorts": [],
                 "capacity_cohorts": [
                     {
                         "name": "atomic-depth",
-                        "max_trials": 3,
+                        "max_trials": 1,
                         "selection_seed": 23,
-                        "initial_delay_seconds": 0,
+                        "initial_delay_seconds": 60,
                         "interval_seconds": 60,
                         "jitter_seconds": 0,
                         "min_remaining_seconds": 1,
@@ -1533,98 +1402,16 @@ class ResearchSupervisorTest(unittest.TestCase):
         )
 
         epochs = store.capacity_epoch_rows(first["run_id"])
-        self.assertEqual(len(provider.created), 1)
+        self.assertEqual(first["status"], "idle")
+        self.assertEqual(len(provider.created), 0)
         self.assertEqual(after_outage["status"], "complete")
         self.assertEqual(
             [row["status"] for row in epochs],
-            ["complete", "not_run_missed_slot", "not_run_missed_slot"],
+            ["not_run_missed_slot"],
         )
         self.assertEqual(
-            [row["stop_reason"] for row in epochs[1:]],
-            ["external_scheduler_late", "external_scheduler_late"],
-        )
-
-    def test_capacity_campaign_recovery_preserves_future_schedule(self):
-        document = plan_document()
-        document.update(
-            {
-                "protocol_version": "5.0-capacity-tick",
-                "duration_seconds": 180,
-                "capacity_trials": [],
-                "canary_trials": [],
-                "capacity_cohorts": [
-                    {
-                        "name": "recoverable-depth",
-                        "max_trials": 2,
-                        "selection_seed": 23,
-                        "initial_delay_seconds": 60,
-                        "interval_seconds": 60,
-                        "jitter_seconds": 0,
-                        "min_remaining_seconds": 1,
-                        "cells": [
-                            {
-                                "provider": "lambda",
-                                "sku": "gpu_1x_a10",
-                                "gpu_type": "A10",
-                                "region": "us-east-1",
-                                "resource_class": "on-demand",
-                                "market": "on-demand",
-                                "target_depth": 1,
-                                "ready_timeout_seconds": 1,
-                                "max_lease_seconds": 60,
-                                "estimated_price_usd_hr": 0.6,
-                                "require_application_ready": False,
-                            }
-                        ],
-                    }
-                ],
-            }
-        )
-        self.plan_path.write_text(json.dumps(document), encoding="utf-8")
-        plan = load_plan(self.plan_path)
-        store = TraceStore(self.root / "campaign-recovery.db")
-        self.addCleanup(store.close)
-        provider = CountingCatalogProvider()
-        supervisor = PilotSupervisor(store, {"lambda": provider})
-        now = dt.datetime(2026, 8, 11, 0, 0, tzinfo=dt.timezone.utc)
-
-        initialized = supervisor.capacity_tick(
-            plan,
-            campaign_id="recoverable-campaign",
-            enable_active=True,
-            now=now - dt.timedelta(seconds=1),
-        )
-        run_id = initialized["run_id"]
-        # Simulate collector loss after the next epoch was claimed and started.
-        claim_at = now + dt.timedelta(seconds=60)
-        claim_status, claimed = store.claim_due_capacity_epoch(
-            "recoverable-campaign",
-            due_at=claim_at.isoformat(),
-            expired_before=(claim_at - dt.timedelta(seconds=60)).isoformat(),
-        )
-        self.assertEqual(claim_status, "claimed")
-        store.mark_capacity_epoch_started(
-            claimed["id"],
-            trial_id=claimed["id"],
-            started_lag_seconds=0,
-        )
-        store.start_capacity_trial(
-            run_id,
-            plan.capacity_cohorts[0].cells[0].cell,
-            target_depth=1,
-            trial_id=claimed["id"],
-        )
-
-        remaining = supervisor.recover_run(run_id)
-
-        recovered_epochs = store.capacity_epoch_rows(run_id)
-        self.assertEqual(remaining, [])
-        self.assertEqual(recovered_epochs[0]["status"], "collector_loss")
-        self.assertEqual(recovered_epochs[1]["status"], "scheduled")
-        self.assertEqual(store.run_row(run_id)["status"], "running")
-        self.assertEqual(
-            store.capacity_campaign_row("recoverable-campaign")["status"],
-            "running",
+            epochs[0]["stop_reason"],
+            "external_scheduler_late",
         )
 
     def test_stability_run_persists_all_windows_and_marks_missed_denominators(self):
@@ -1768,7 +1555,9 @@ class ResearchSupervisorTest(unittest.TestCase):
             store.stability_campaign_row("stability-cleanup-failure")["status"],
             "cleanup_incomplete",
         )
-        self.assertEqual(store.run_row(result["run_id"])["status"], "cleanup_incomplete")
+        self.assertEqual(
+            store.run_row(result["run_id"])["status"], "cleanup_incomplete"
+        )
         self.assertEqual(len(store.owned_resources(result["run_id"])), 2)
 
     def test_stability_recovery_preserves_future_windows(self):
@@ -1818,340 +1607,6 @@ class ResearchSupervisorTest(unittest.TestCase):
             store.stability_campaign_row("recoverable-stability")["status"],
             "running",
         )
-
-    def test_capacity_balanced_cycle_covers_every_cell_before_repeating(self):
-        document = plan_document()
-        cell = {
-            "provider": "lambda",
-            "gpu_type": "A10",
-            "region": "us-east-1",
-            "resource_class": "on-demand",
-            "market": "on-demand",
-            "target_depth": 1,
-            "ready_timeout_seconds": 1,
-            "max_lease_seconds": 60,
-            "estimated_price_usd_hr": 0.3,
-        }
-        document.update(
-            {
-                "capacity_trials": [],
-                "capacity_cohorts": [
-                    {
-                        "name": "balanced",
-                        "max_trials": 4,
-                        "selection_seed": 3,
-                        "selection_strategy": "balanced_cycle",
-                        "interval_seconds": 60,
-                        "jitter_seconds": 0,
-                        "min_remaining_seconds": 1,
-                        "cells": [
-                            {**cell, "sku": "cell-a"},
-                            {**cell, "sku": "cell-b"},
-                        ],
-                    }
-                ],
-            }
-        )
-        self.plan_path.write_text(json.dumps(document), encoding="utf-8")
-        cohort = load_plan(self.plan_path).capacity_cohorts[0]
-
-        selected = cohort.select_sequence(random.Random(cohort.selection_seed))
-
-        self.assertEqual({item[0].cell.sku for item in selected[:2]}, {"cell-a", "cell-b"})
-        self.assertEqual({item[0].cell.sku for item in selected[2:]}, {"cell-a", "cell-b"})
-        self.assertTrue(all(item[1] == 0.5 for item in selected))
-
-    def test_completion_window_balanced_cycle_covers_every_cell_and_arm(self):
-        document = plan_document()
-        document.update(
-            {
-                "protocol_version": "3.0-completion-window",
-                "capacity_trials": [],
-                "canary_trials": [],
-                "completion_window_cohorts": [
-                    {
-                        "name": "window-randomization",
-                        "max_opportunities": 8,
-                        "selection_seed": 31,
-                        "selection_strategy": "balanced_cycle",
-                        "initial_delay_seconds": 0,
-                        "opportunity_interval_seconds": 100,
-                        "jitter_seconds": 0,
-                        "completion_window_seconds": 60,
-                        "required_runtime_seconds": 20,
-                        "startup_safety_seconds": 10,
-                        "min_remaining_seconds": 10,
-                        "arms": [
-                            {"name": "immediate", "launch_fraction": 0, "weight": 1},
-                            {"name": "lazy", "launch_fraction": 1, "weight": 1},
-                        ],
-                        "cells": [
-                            {
-                                "provider": "lambda",
-                                "sku": "gpu_1x_a10",
-                                "gpu_type": "A10",
-                                "region": "us-east-1",
-                                "resource_class": "on-demand",
-                                "market": "on-demand",
-                                "target_depth": 1,
-                                "ready_timeout_seconds": 5,
-                                "max_lease_seconds": 10,
-                                "estimated_price_usd_hr": 0.6,
-                                "require_application_ready": False,
-                            },
-                            {
-                                "provider": "lambda",
-                                "sku": "gpu_1x_a10-west",
-                                "gpu_type": "A10",
-                                "region": "us-west-1",
-                                "resource_class": "on-demand",
-                                "market": "on-demand",
-                                "target_depth": 1,
-                                "ready_timeout_seconds": 5,
-                                "max_lease_seconds": 10,
-                                "estimated_price_usd_hr": 0.6,
-                                "require_application_ready": False,
-                            },
-                        ],
-                    }
-                ],
-            }
-        )
-        self.plan_path.write_text(json.dumps(document), encoding="utf-8")
-
-        cohort = load_plan(self.plan_path).completion_window_cohorts[0]
-        sequence = cohort.select_sequence(random.Random(cohort.selection_seed))
-
-        self.assertEqual(len(sequence), 8)
-        first_cycle = {(cell.cell.sku, arm.name) for cell, arm, _ in sequence[:4]}
-        second_cycle = {(cell.cell.sku, arm.name) for cell, arm, _ in sequence[4:]}
-        expected = {
-            ("gpu_1x_a10", "immediate"),
-            ("gpu_1x_a10", "lazy"),
-            ("gpu_1x_a10-west", "immediate"),
-            ("gpu_1x_a10-west", "lazy"),
-        }
-        self.assertEqual(first_cycle, expected)
-        self.assertEqual(second_cycle, expected)
-        self.assertTrue(
-            all(probability == 0.25 for _cell, _arm, probability in sequence)
-        )
-
-    def test_completion_window_cohort_persists_randomized_outcomes(self):
-        document = plan_document()
-        document.update(
-            {
-                "protocol_version": "3.0-completion-window",
-                "duration_seconds": 0.25,
-                "max_active_gpus_per_provider": 1,
-                "provider_budgets_usd": {"runpod": 1.0},
-                "total_budget_usd": 1.0,
-                "capacity_trials": [],
-                "canary_trials": [],
-                "canary_cohorts": [],
-                "completion_window_cohorts": [
-                    {
-                        "name": "window-execution",
-                        "max_opportunities": 2,
-                        "selection_seed": 37,
-                        "selection_strategy": "balanced_cycle",
-                        "initial_delay_seconds": 0,
-                        "opportunity_interval_seconds": 0.08,
-                        "jitter_seconds": 0,
-                        "completion_window_seconds": 0.1,
-                        "required_runtime_seconds": 0.01,
-                        "startup_safety_seconds": 0.05,
-                        "min_remaining_seconds": 0.01,
-                        "arms": [
-                            {"name": "immediate", "launch_fraction": 0},
-                            {"name": "lazy", "launch_fraction": 1},
-                        ],
-                        "cells": [
-                            {
-                                "provider": "runpod",
-                                "sku": "NVIDIA A40",
-                                "gpu_type": "A40",
-                                "resource_class": "secure",
-                                "market": "on-demand",
-                                "target_depth": 1,
-                                "ready_timeout_seconds": 0.005,
-                                "max_lease_seconds": 0.01,
-                                "estimated_price_usd_hr": 0.3,
-                                "require_application_ready": True,
-                            }
-                        ],
-                    }
-                ],
-            }
-        )
-        self.plan_path.write_text(json.dumps(document), encoding="utf-8")
-        plan = load_plan(self.plan_path)
-        store = TraceStore(self.root / "trace.db")
-        self.addCleanup(store.close)
-        provider = ReadyCapacityProvider()
-
-        run_id = PilotSupervisor(store, {"runpod": provider}).run(
-            plan,
-            enable_active=True,
-        )
-
-        windows = store.completion_window_epoch_rows(run_id)
-        self.assertEqual(len(windows), 2)
-        self.assertEqual({row["arm_name"] for row in windows}, {"immediate", "lazy"})
-        self.assertTrue(all(row["status"] == "complete" for row in windows))
-        self.assertTrue(all(row["provider_sla_met"] == 1 for row in windows))
-        self.assertTrue(all(row["application_sla_met"] == 1 for row in windows))
-        self.assertTrue(all(row["capacity_epoch_id"] for row in windows))
-        self.assertEqual(len(store.capacity_epoch_rows(run_id)), 2)
-        self.assertEqual(len(provider.created), 2)
-        self.assertEqual(store.owned_resources(run_id), [])
-
-    def test_control_cohort_runs_single_on_demand_lifecycle_per_epoch(self):
-        document = plan_document()
-        document.update(
-            {
-                "protocol_version": "3.0-cross-provider-control",
-                "duration_seconds": 0.16,
-                "max_active_gpus_per_provider": 1,
-                "provider_budgets_usd": {"runpod": 1.0},
-                "total_budget_usd": 1.0,
-                "capacity_trials": [],
-                "canary_trials": [],
-                "canary_cohorts": [],
-                "control_cohorts": [
-                    {
-                        "name": "runpod-control",
-                        "max_leases": 2,
-                        "selection_seed": 43,
-                        "replacement_delay_seconds": 0,
-                        "min_remaining_seconds": 0.01,
-                        "cells": [
-                            {
-                                "provider": "runpod",
-                                "sku": "NVIDIA A40",
-                                "gpu_type": "A40",
-                                "resource_class": "secure",
-                                "market": "on-demand",
-                                "duration_seconds": 0.03,
-                                "interval_seconds": 0.005,
-                                "estimated_price_usd_hr": 0.3,
-                                "weight": 1,
-                            }
-                        ],
-                    }
-                ],
-            }
-        )
-        self.plan_path.write_text(json.dumps(document), encoding="utf-8")
-        plan = load_plan(self.plan_path)
-        store = TraceStore(self.root / "trace.db")
-        self.addCleanup(store.close)
-        provider = FastFailingCanaryProvider()
-
-        run_id = PilotSupervisor(store, {"runpod": provider}).run(
-            plan,
-            enable_active=True,
-        )
-
-        epochs = store.canary_epoch_rows(run_id)
-        leases = store.canary_rows(run_id)
-        self.assertEqual(len(epochs), 2)
-        self.assertEqual(len(leases), 2)
-        self.assertTrue(all(row["interruptible"] == 0 for row in leases))
-        self.assertTrue(all(row["status"] == "complete" for row in epochs))
-        self.assertEqual(
-            {json.loads(row["details_json"])["design"] for row in epochs},
-            {"unmatched_on_demand_control"},
-        )
-        self.assertEqual(store.owned_resources(run_id), [])
-
-    def test_control_balanced_cycle_covers_each_provider_cell(self):
-        document = plan_document()
-        cell = {
-            "gpu_type": "A10",
-            "resource_class": "on-demand",
-            "market": "on-demand",
-            "duration_seconds": 60,
-            "interval_seconds": 5,
-            "estimated_price_usd_hr": 0.6,
-        }
-        document.update(
-            {
-                "capacity_trials": [],
-                "canary_trials": [],
-                "provider_budgets_usd": {"lambda": 1, "runpod": 1},
-                "total_budget_usd": 2,
-                "control_cohorts": [
-                    {
-                        "name": "balanced-controls",
-                        "max_leases": 4,
-                        "selection_seed": 53,
-                        "selection_strategy": "balanced_cycle",
-                        "min_remaining_seconds": 1,
-                        "cells": [
-                            {
-                                **cell,
-                                "provider": "lambda",
-                                "sku": "gpu_1x_a10",
-                                "region": "us-east-1",
-                            },
-                            {
-                                **cell,
-                                "provider": "runpod",
-                                "sku": "NVIDIA A40",
-                                "gpu_type": "A40",
-                                "resource_class": "secure",
-                            },
-                        ],
-                    }
-                ],
-            }
-        )
-        self.plan_path.write_text(json.dumps(document), encoding="utf-8")
-        cohort = load_plan(self.plan_path).control_cohorts[0]
-
-        sequence = cohort.select_sequence(random.Random(cohort.selection_seed))
-
-        self.assertEqual(
-            {trial.cell.provider for trial, _probability in sequence[:2]},
-            {"lambda", "runpod"},
-        )
-        self.assertEqual(
-            {trial.cell.provider for trial, _probability in sequence[2:]},
-            {"lambda", "runpod"},
-        )
-        self.assertTrue(all(probability == 0.5 for _trial, probability in sequence))
-
-    def test_passive_sampling_continues_while_capacity_trial_is_blocked(self):
-        plan = load_plan(self.plan_path)
-        store = TraceStore(self.root / "trace.db")
-        self.addCleanup(store.close)
-        provider = CountingCatalogProvider()
-        supervisor = PilotSupervisor(
-            store,
-            providers={"lambda": provider},
-            capacity_runner_factory=BlockingCapacityRunner,
-        )
-        result = {}
-
-        thread = threading.Thread(
-            target=lambda: result.setdefault("run_id", supervisor.run(plan, enable_active=True)),
-            daemon=True,
-        )
-        thread.start()
-        self.assertTrue(BlockingCapacityRunner.entered.wait(timeout=1))
-        time.sleep(0.06)
-        observed_while_blocked = provider.calls
-        BlockingCapacityRunner.release.set()
-        thread.join(timeout=2)
-
-        self.assertFalse(thread.is_alive())
-        self.assertGreaterEqual(observed_while_blocked, 2)
-        self.assertIn("run_id", result)
-        quote_count = store.connection.execute("SELECT COUNT(*) FROM catalog_quotes_v2").fetchone()[0]
-        host_count = store.connection.execute("SELECT COUNT(*) FROM host_observations").fetchone()[0]
-        self.assertGreaterEqual(quote_count, 2)
-        self.assertGreaterEqual(host_count, 2)
 
 
 if __name__ == "__main__":

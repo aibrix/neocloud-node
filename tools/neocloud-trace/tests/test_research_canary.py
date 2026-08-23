@@ -69,7 +69,10 @@ class CanaryClassifierTest(unittest.TestCase):
         result = self.classifier.classify(
             planned_end=self.end,
             now=self.start + dt.timedelta(minutes=10),
-            samples=[self.sample(60), self.sample(120, exists=False, provider_state=None, heartbeat_ok=False)],
+            samples=[
+                self.sample(60),
+                self.sample(120, exists=False, provider_state=None, heartbeat_ok=False),
+            ],
             operator_cleanup=False,
         )
         self.assertEqual(result, TerminalReason.PROVIDER_INTERRUPTION_CANDIDATE)
@@ -140,7 +143,10 @@ class CanaryClassifierTest(unittest.TestCase):
         result = self.classifier.classify(
             planned_end=self.end,
             now=self.start + dt.timedelta(minutes=5),
-            samples=[self.sample(60), self.sample(120, machine_id="machine-2", runtime_uptime_seconds=5)],
+            samples=[
+                self.sample(60),
+                self.sample(120, machine_id="machine-2", runtime_uptime_seconds=5),
+            ],
             operator_cleanup=False,
         )
         self.assertEqual(result, TerminalReason.MACHINE_REPLACEMENT)
@@ -149,7 +155,10 @@ class CanaryClassifierTest(unittest.TestCase):
         result = self.classifier.classify(
             planned_end=self.end,
             now=self.start + dt.timedelta(minutes=5),
-            samples=[self.sample(60), self.sample(240, exists=False, heartbeat_ok=False, host_healthy=False)],
+            samples=[
+                self.sample(60),
+                self.sample(240, exists=False, heartbeat_ok=False, host_healthy=False),
+            ],
             operator_cleanup=False,
         )
         self.assertEqual(result, TerminalReason.RIGHT_CENSORED_COLLECTOR_LOSS)
@@ -233,41 +242,11 @@ class CanaryRunnerTest(unittest.TestCase):
         recovered = runner.start_pair(self.run_id, cell, planned_end)
 
         self.assertEqual(provider.created_markets, ["interruptible", "on-demand"])
-        self.assertEqual([lease.id for lease in first], [lease.id for lease in recovered])
+        self.assertEqual(
+            [lease.id for lease in first], [lease.id for lease in recovered]
+        )
         self.assertEqual({lease.interruptible for lease in first}, {True, False})
         self.assertEqual(len(self.store.owned_resources(self.run_id)), 2)
-
-    def test_starts_single_control_without_interruptible_request(self):
-        provider = FakeCanaryProvider()
-        runner = CanaryRunner(self.store, provider)
-        cell = TrialCell(
-            provider="runpod",
-            sku="NVIDIA A40",
-            gpu_type="A40",
-            region=None,
-            resource_class="secure",
-            market="on-demand",
-            image="python:3.12-slim",
-        )
-        planned_end = dt.datetime.now(UTC) + dt.timedelta(hours=1)
-
-        first = runner.start_single(
-            self.run_id,
-            cell,
-            planned_end,
-            group_id="control-epoch-1",
-        )
-        recovered = runner.start_single(
-            self.run_id,
-            cell,
-            planned_end,
-            group_id="control-epoch-1",
-        )
-
-        self.assertEqual(provider.created_markets, ["on-demand"])
-        self.assertEqual(first.id, recovered.id)
-        self.assertFalse(first.interruptible)
-        self.assertEqual(len(self.store.owned_resources(self.run_id)), 1)
 
     def test_stop_requires_remote_disappearance_before_releasing_ownership(self):
         provider = FakeCanaryProvider()

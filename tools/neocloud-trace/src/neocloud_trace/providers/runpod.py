@@ -16,7 +16,6 @@ from .common import (
     DeleteResult,
     HeartbeatProbe,
     HTTPResponse,
-    ProviderAPICall,
     ProviderBillingRecord,
     ResourceObservation,
     Transport,

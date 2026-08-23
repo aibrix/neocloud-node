@@ -184,42 +184,6 @@ CREATE TABLE IF NOT EXISTS stability_windows (
     UNIQUE(run_id, cohort_name, sequence)
 );
 
-CREATE TABLE IF NOT EXISTS completion_window_epochs (
-    id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL REFERENCES experiment_runs(id),
-    cohort_name TEXT NOT NULL,
-    sequence INTEGER NOT NULL,
-    provider TEXT NOT NULL,
-    sku TEXT NOT NULL,
-    gpu_type TEXT NOT NULL,
-    region TEXT,
-    datacenter TEXT,
-    resource_class TEXT NOT NULL,
-    market TEXT NOT NULL,
-    target_depth INTEGER NOT NULL,
-    arm_name TEXT NOT NULL,
-    launch_fraction REAL NOT NULL,
-    assignment_probability REAL NOT NULL,
-    assignment_seed INTEGER NOT NULL,
-    release_offset_seconds REAL NOT NULL,
-    release_at TEXT NOT NULL,
-    allocation_deadline_at TEXT NOT NULL,
-    planned_launch_at TEXT NOT NULL,
-    released_at TEXT,
-    actual_decision_at TEXT,
-    decision_lag_seconds REAL,
-    release_quote_id TEXT REFERENCES catalog_quotes_v2(id),
-    decision_quote_id TEXT REFERENCES catalog_quotes_v2(id),
-    capacity_epoch_id TEXT,
-    provider_sla_met INTEGER,
-    application_sla_met INTEGER,
-    finished_at TEXT,
-    status TEXT NOT NULL,
-    stop_reason TEXT,
-    details_json TEXT NOT NULL,
-    UNIQUE(run_id, cohort_name, sequence)
-);
-
 CREATE TABLE IF NOT EXISTS canary_leases (
     id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES experiment_runs(id),
@@ -363,8 +327,6 @@ CREATE INDEX IF NOT EXISTS idx_replicas_provider_resource
     ON capacity_replicas(provider_resource_id, cleaned_at);
 CREATE INDEX IF NOT EXISTS idx_capacity_epochs_run_cohort
     ON capacity_epochs(run_id, cohort_name, sequence);
-CREATE INDEX IF NOT EXISTS idx_completion_window_epochs_run_cohort
-    ON completion_window_epochs(run_id, cohort_name, sequence);
 CREATE INDEX IF NOT EXISTS idx_canaries_provider_resource
     ON canary_leases(provider_resource_id, cleaned_at);
 CREATE INDEX IF NOT EXISTS idx_canaries_pair

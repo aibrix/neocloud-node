@@ -1,7 +1,6 @@
 import json
 import datetime as dt
 import pathlib
-import sqlite3
 import sys
 import tempfile
 import unittest
@@ -239,69 +238,6 @@ class TraceStoreTest(unittest.TestCase):
         self.assertEqual(first_status, "claimed")
         self.assertEqual(second_status, "busy")
         self.assertEqual(first_window["id"], second_window["id"])
-
-    def test_persists_completion_window_assignment_and_decision(self):
-        run_id = self.store.start_run(self.config(), config_document={"mode": "test"})
-        cell = TrialCell(
-            provider="lambda",
-            sku="gpu_1x_a10",
-            gpu_type="A10",
-            region="us-east-1",
-            resource_class="on-demand",
-            market="on-demand",
-        )
-        quote = CatalogQuote(
-            provider="lambda",
-            sku="gpu_1x_a10",
-            gpu_type="A10",
-            gpu_count=1,
-            region="us-east-1",
-            resource_class="on-demand",
-            market="on-demand",
-            quoted_price_usd_hr=0.6,
-            available=True,
-        )
-        release_quote_id = self.store.record_quote(run_id, quote)
-        decision_quote_id = self.store.record_quote(run_id, quote)
-
-        epoch_id = self.store.schedule_completion_window_epoch(
-            run_id,
-            cohort_name="window-test",
-            sequence=0,
-            cell=cell,
-            target_depth=1,
-            arm_name="lazy",
-            launch_fraction=1,
-            assignment_probability=0.5,
-            assignment_seed=17,
-            release_offset_seconds=10,
-            release_at="2026-08-10T00:00:10+00:00",
-            allocation_deadline_at="2026-08-10T00:01:00+00:00",
-            planned_launch_at="2026-08-10T00:00:50+00:00",
-        )
-        self.store.mark_completion_window_released(epoch_id, release_quote_id)
-        self.store.mark_completion_window_decided(
-            epoch_id,
-            decision_quote_id=decision_quote_id,
-            decision_lag_seconds=0.25,
-            capacity_epoch_id="capacity-epoch-1",
-        )
-        self.store.finish_completion_window_epoch(
-            epoch_id,
-            status="complete",
-            stop_reason="trial_terminal",
-            provider_sla_met=True,
-            application_sla_met=None,
-        )
-
-        row = self.store.completion_window_epoch_rows(run_id)[0]
-        self.assertEqual(row["arm_name"], "lazy")
-        self.assertEqual(row["release_quote_id"], release_quote_id)
-        self.assertEqual(row["decision_quote_id"], decision_quote_id)
-        self.assertEqual(row["capacity_epoch_id"], "capacity-epoch-1")
-        self.assertEqual(row["provider_sla_met"], 1)
-        self.assertIsNone(row["application_sla_met"])
-        self.assertEqual(row["status"], "complete")
 
     def test_provider_billing_import_is_idempotent_and_resource_attributable(self):
         run_id = self.store.start_run(self.config(), config_document={"mode": "test"})

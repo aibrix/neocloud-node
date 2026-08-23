@@ -13,7 +13,6 @@ from typing import Any
 from .analysis import (
     capacity_trial_payload,
     export_capacity_depth_csv,
-    export_completion_window_csv,
     export_stability_window_csv,
     export_survival_csv,
 )
@@ -33,14 +32,7 @@ ACTIVE_COMMANDS = {
 }
 SUPPORTED_PROVIDERS = ("lambda", "runpod")
 PASSIVE_PROTOCOL_VERSION = "1.0-passive-catalog"
-ACTIVE_PLAN_SECTIONS = (
-    "capacity_trials",
-    "capacity_cohorts",
-    "completion_window_cohorts",
-    "canary_trials",
-    "canary_cohorts",
-    "control_cohorts",
-)
+ACTIVE_PLAN_SECTIONS = ("capacity_cohorts", "canary_cohorts")
 
 
 def _add_database_argument(parser: argparse.ArgumentParser) -> None:
@@ -71,7 +63,7 @@ def _add_active_argument(parser: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="neocloud-trace",
-        description="Budget-bounded NeoCloud availability and capacity trace runner"
+        description="Budget-bounded NeoCloud availability and capacity trace runner",
     )
     subparsers = parser.add_subparsers(
         dest="command",
@@ -186,7 +178,6 @@ def build_parser() -> argparse.ArgumentParser:
     for export_type, help_text in (
         ("survival", "export one row per canary lease"),
         ("depth", "export one row per scheduled capacity epoch"),
-        ("window", "export one row per completion-window opportunity"),
         ("stability", "export one row per scheduled stability window"),
     ):
         export_command = export_types.add_parser(export_type, help=help_text)
@@ -309,16 +300,13 @@ def _stability_campaign_id(store: TraceStore) -> str:
 
 
 def _capacity_cohort_summary(cohort) -> dict[str, Any]:
-    sequence = cohort.select_sequence(random.Random(cohort.selection_seed))
-    provider_bounds: dict[str, float] = {}
-    for trial, _selection_probability in sequence:
-        provider_bounds[trial.cell.provider] = (
-            provider_bounds.get(trial.cell.provider, 0.0)
-            + trial.budget_upper_bound_usd
-        )
+    trial, selection_probability = cohort.select(random.Random(cohort.selection_seed))
     return {
         "name": cohort.name,
         "max_trials": cohort.max_trials,
+        "selected_provider": trial.cell.provider,
+        "selected_sku": trial.cell.sku,
+        "selection_probability": selection_probability,
         "min_trial_upper_bound_usd": round(
             min(cell.budget_upper_bound_usd for cell in cohort.cells),
             6,
@@ -328,12 +316,11 @@ def _capacity_cohort_summary(cohort) -> dict[str, Any]:
             6,
         ),
         "planned_cohort_upper_bound_usd": round(
-            sum(provider_bounds.values()),
+            trial.budget_upper_bound_usd,
             6,
         ),
         "planned_provider_upper_bounds_usd": {
-            provider: round(amount, 6)
-            for provider, amount in sorted(provider_bounds.items())
+            trial.cell.provider: round(trial.budget_upper_bound_usd, 6)
         },
     }
 
@@ -372,9 +359,10 @@ def _active_section_counts(plan) -> dict[str, int]:
 def _validate_tick_plan(plan) -> None:
     sections = _active_section_counts(plan)
     if sections != {"capacity_cohorts": 1}:
-        found = ", ".join(
-            f"{section}={count}" for section, count in sections.items()
-        ) or "no active sections"
+        found = (
+            ", ".join(f"{section}={count}" for section, count in sections.items())
+            or "no active sections"
+        )
         raise ValueError(
             "tick requires exactly one capacity_cohorts entry and no other "
             f"active sections; found {found}"
@@ -387,13 +375,16 @@ def _validate_tick_plan(plan) -> None:
 def _validate_run_plan(plan) -> None:
     sections = _active_section_counts(plan)
     if sections != {"canary_cohorts": 1}:
-        found = ", ".join(
-            f"{section}={count}" for section, count in sections.items()
-        ) or "no active sections"
+        found = (
+            ", ".join(f"{section}={count}" for section, count in sections.items())
+            or "no active sections"
+        )
         raise ValueError(
             "run requires exactly one canary_cohorts entry and no other "
             f"active sections; found {found}"
         )
+
+
 def _run_capacity_tick(
     store: TraceStore,
     plan,
@@ -483,7 +474,6 @@ def _status(store: TraceStore, run_id: str | None) -> dict[str, Any]:
         "capacity_trials",
         "capacity_epochs",
         "stability_windows",
-        "completion_window_epochs",
         "capacity_replicas",
         "canary_leases",
         "canary_epochs",
@@ -539,7 +529,6 @@ def _export_data(store: TraceStore, args: argparse.Namespace) -> dict[str, Any]:
     exporters = {
         "survival": export_survival_csv,
         "depth": export_capacity_depth_csv,
-        "window": export_completion_window_csv,
         "stability": export_stability_window_csv,
     }
     count = exporters[args.export_type](store, run_id, args.output)
@@ -653,62 +642,20 @@ def _billing(store: TraceStore, args: argparse.Namespace) -> dict[str, Any]:
         "estimated_amount_usd": sum(
             float(row["estimated_amount_usd"] or 0) for row in rows
         ),
-        "billed_amount_usd": sum(
-            float(row["billed_amount_usd"] or 0) for row in rows
-        ),
+        "billed_amount_usd": sum(float(row["billed_amount_usd"] or 0) for row in rows),
     }
 
 
 def _plan_summary(plan, db_path: str) -> dict[str, Any]:
-    static_upper_bound = sum(
-        trial.budget_upper_bound_usd
-        for trial in (*plan.capacity_trials, *plan.canary_trials)
-    )
     return {
         "database": str(pathlib.Path(db_path).resolve()),
         "protocol_version": plan.experiment.protocol_version,
         "host_id": plan.experiment.host_id,
         "vantage_id": plan.experiment.vantage_id,
-        "capacity_trials": len(plan.capacity_trials),
         "capacity_cohort_count": len(plan.capacity_cohorts),
         "capacity_cohorts": [
             _capacity_cohort_summary(cohort) for cohort in plan.capacity_cohorts
         ],
-        "completion_window_cohort_count": len(plan.completion_window_cohorts),
-        "completion_window_cohorts": [
-            {
-                "name": cohort.name,
-                "max_opportunities": cohort.max_opportunities,
-                "arms": [arm.name for arm in cohort.arms],
-                "max_wait_seconds": cohort.maximum_wait_seconds,
-                "min_trial_upper_bound_usd": round(
-                    min(cell.budget_upper_bound_usd for cell in cohort.cells),
-                    6,
-                ),
-                "max_trial_upper_bound_usd": round(
-                    max(cell.budget_upper_bound_usd for cell in cohort.cells),
-                    6,
-                ),
-            }
-            for cohort in plan.completion_window_cohorts
-        ],
-        "control_cohort_count": len(plan.control_cohorts),
-        "control_cohorts": [
-            {
-                "name": cohort.name,
-                "max_leases": cohort.max_leases,
-                "min_lease_upper_bound_usd": round(
-                    min(cell.budget_upper_bound_usd for cell in cohort.cells),
-                    6,
-                ),
-                "max_lease_upper_bound_usd": round(
-                    max(cell.budget_upper_bound_usd for cell in cohort.cells),
-                    6,
-                ),
-            }
-            for cohort in plan.control_cohorts
-        ],
-        "canary_trials": len(plan.canary_trials),
         "canary_cohort_count": len(plan.canary_cohorts),
         "stability_schedule": {
             "window_count": plan.stability_schedule.window_count,
@@ -733,7 +680,6 @@ def _plan_summary(plan, db_path: str) -> dict[str, Any]:
             }
             for cohort in plan.canary_cohorts
         ],
-        "static_planned_upper_bound_usd": static_upper_bound,
         "provider_budgets_usd": plan.experiment.provider_budgets,
         "total_budget_usd": plan.experiment.total_budget_usd,
     }
@@ -822,7 +768,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = execute(args)
     except (ActiveRunDisabled, ValueError, RuntimeError) as error:
-        print(json.dumps({"error": f"{type(error).__name__}: {error}"}), file=sys.stderr)
+        print(
+            json.dumps({"error": f"{type(error).__name__}: {error}"}), file=sys.stderr
+        )
         return 2
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
