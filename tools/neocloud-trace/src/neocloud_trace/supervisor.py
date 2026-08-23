@@ -970,16 +970,15 @@ class PilotSupervisor:
         plan: PilotPlan,
         *,
         campaign_id: str,
-        cohort_index: int = 0,
         enable_active: bool = False,
         now: dt.datetime | None = None,
     ) -> dict[str, Any]:
         if not enable_active:
             raise ActiveRunDisabled("capacity-tick requires --enable-active")
         try:
-            cohort = plan.capacity_cohorts[cohort_index]
+            cohort = plan.capacity_cohorts[0]
         except IndexError as error:
-            raise ValueError("capacity cohort index is out of range") from error
+            raise ValueError("capacity tick requires one capacity cohort") from error
         required_providers = {trial.cell.provider for trial in cohort.cells}
         missing = sorted(required_providers - self.providers.keys())
         if missing:

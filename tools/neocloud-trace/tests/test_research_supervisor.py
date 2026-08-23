@@ -412,11 +412,11 @@ class ResearchSupervisorTest(unittest.TestCase):
             "--host-id",
             "--vantage-id",
             "--enable-active",
-            "--target",
-            "--index",
             "--campaign-id",
         ):
             self.assertIn(option, run_help)
+        self.assertNotIn("--target", run_help)
+        self.assertNotIn("--index", run_help)
 
         output = io.StringIO()
         with contextlib.redirect_stdout(output), self.assertRaises(SystemExit):
@@ -473,7 +473,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         self.assertEqual(args.plan, str(self.plan_path))
         self.assertEqual(args.db, str(self.root / "capacity.db"))
         self.assertIsNone(args.campaign_id)
-        self.assertEqual(args.index, 0)
+        self.assertFalse(hasattr(args, "index"))
         with self.assertRaises(ActiveRunDisabled):
             module.require_active(args)
 
@@ -682,29 +682,27 @@ class ResearchSupervisorTest(unittest.TestCase):
         clients.assert_not_called()
         self.assertFalse(db_path.exists())
 
-    def test_run_contract_keeps_only_the_stability_target_alias(self):
+    def test_active_commands_have_no_plan_section_selectors(self):
         self.plan_path.write_text(
             json.dumps(stability_plan_document()),
             encoding="utf-8",
         )
-        db_path = self.root / "wrong-target.db"
-        args = trace_cli.build_parser().parse_args(
-            [
-                "run",
-                "--db",
-                str(db_path),
-                "--plan",
-                str(self.plan_path),
-                "--target",
-                "capacity",
-                "--enable-active",
-            ]
-        )
-
-        with self.assertRaisesRegex(ValueError, "all or canary-cohort"):
-            trace_cli.execute(args)
-
-        self.assertFalse(db_path.exists())
+        parser = trace_cli.build_parser()
+        for command, selector in (("run", "--target"), ("tick", "--index")):
+            with contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    parser.parse_args(
+                        [
+                            command,
+                            "--db",
+                            str(self.root / f"{command}.db"),
+                            "--plan",
+                            str(self.plan_path),
+                            selector,
+                            "0",
+                            "--enable-active",
+                        ]
+                    )
 
     def test_run_cli_reuses_durable_stability_campaign(self):
         document = stability_plan_document()

@@ -31,15 +31,6 @@ ACTIVE_COMMANDS = {
     "cleanup",
     "recover",
 }
-RUN_TARGETS = (
-    "all",
-    "capacity",
-    "canary",
-    "canary-cohort",
-    "capacity-cohort",
-    "window-cohort",
-    "control-cohort",
-)
 SUPPORTED_PROVIDERS = ("lambda", "runpod")
 PASSIVE_PROTOCOL_VERSION = "1.0-passive-catalog"
 ACTIVE_PLAN_SECTIONS = (
@@ -139,22 +130,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = subparsers.add_parser(
         "run",
-        help="run an experiment defined by a plan",
+        help="run one due stability sampling window",
     )
     _add_plan_arguments(run)
     _add_active_argument(run)
-    run.add_argument(
-        "--target",
-        choices=RUN_TARGETS,
-        default="all",
-        help="plan section to run (default: all)",
-    )
-    run.add_argument(
-        "--index",
-        type=int,
-        default=0,
-        help="zero-based item index when --target is not all",
-    )
     run.add_argument(
         "--campaign-id",
         help="stable campaign identity (default: reuse the database campaign)",
@@ -169,12 +148,6 @@ def build_parser() -> argparse.ArgumentParser:
     tick.add_argument(
         "--campaign-id",
         help="stable campaign identity (default: reuse the database campaign)",
-    )
-    tick.add_argument(
-        "--index",
-        type=int,
-        default=0,
-        help="zero-based capacity cohort index",
     )
 
     status = subparsers.add_parser("status", help="show persisted run status")
@@ -277,10 +250,6 @@ def _provider_clients(names: set[str]) -> dict[str, object]:
     if unsupported:
         raise ValueError(f"unsupported providers: {', '.join(sorted(unsupported))}")
     return clients
-
-
-def _plan_providers(plan) -> set[str]:
-    return set(plan.experiment.provider_budgets)
 
 
 def _is_placeholder(value: str) -> bool:
@@ -392,16 +361,6 @@ def _restore_signal_handlers(previous) -> None:
         signal.signal(signum, handler)
 
 
-def _run_supervisor(store: TraceStore, plan, *, enable_active: bool) -> str:
-    providers = _provider_clients(_plan_providers(plan))
-    supervisor = PilotSupervisor(store, providers)
-    previous = _install_signal_handlers(supervisor)
-    try:
-        return supervisor.run(plan, enable_active=enable_active)
-    finally:
-        _restore_signal_handlers(previous)
-
-
 def _active_section_counts(plan) -> dict[str, int]:
     return {
         section: len(getattr(plan, section))
@@ -410,7 +369,7 @@ def _active_section_counts(plan) -> dict[str, int]:
     }
 
 
-def _validate_tick_plan(plan, *, cohort_index: int) -> None:
+def _validate_tick_plan(plan) -> None:
     sections = _active_section_counts(plan)
     if sections != {"capacity_cohorts": 1}:
         found = ", ".join(
@@ -420,14 +379,12 @@ def _validate_tick_plan(plan, *, cohort_index: int) -> None:
             "tick requires exactly one capacity_cohorts entry and no other "
             f"active sections; found {found}"
         )
-    if cohort_index != 0:
-        raise ValueError("tick accepts only --index 0 for its single capacity cohort")
     cohort = plan.capacity_cohorts[0]
     if cohort.max_trials != 1:
         raise ValueError("tick requires capacity_cohorts[0].max_trials=1")
 
 
-def _validate_run_plan(plan, *, target: str, index: int) -> None:
+def _validate_run_plan(plan) -> None:
     sections = _active_section_counts(plan)
     if sections != {"canary_cohorts": 1}:
         found = ", ".join(
@@ -437,28 +394,14 @@ def _validate_run_plan(plan, *, target: str, index: int) -> None:
             "run requires exactly one canary_cohorts entry and no other "
             f"active sections; found {found}"
         )
-    if target not in {"all", "canary-cohort"}:
-        raise ValueError(
-            "run --target must be all or canary-cohort for a stability plan"
-        )
-    if index != 0:
-        raise ValueError("run accepts only --index 0 for its single canary cohort")
-
-
 def _run_capacity_tick(
     store: TraceStore,
     plan,
     *,
     campaign_id: str,
-    cohort_index: int,
     enable_active: bool,
 ) -> dict[str, Any]:
-    if cohort_index < 0:
-        raise ValueError("--index must be zero or greater")
-    try:
-        cohort = plan.capacity_cohorts[cohort_index]
-    except IndexError as error:
-        raise ValueError("capacity cohort index is out of range") from error
+    cohort = plan.capacity_cohorts[0]
     providers = _provider_clients({trial.cell.provider for trial in cohort.cells})
     supervisor = PilotSupervisor(store, providers)
     previous = _install_signal_handlers(supervisor)
@@ -466,7 +409,6 @@ def _run_capacity_tick(
         return supervisor.capacity_tick(
             plan,
             campaign_id=campaign_id,
-            cohort_index=cohort_index,
             enable_active=enable_active,
         )
     finally:
@@ -797,43 +739,6 @@ def _plan_summary(plan, db_path: str) -> dict[str, Any]:
     }
 
 
-def _select_run_target(plan, target: str, index: int):
-    if target == "all":
-        return plan
-    if index < 0:
-        raise ValueError("--index must be zero or greater")
-    target_fields = {
-        "capacity": ("capacity_trials", "capacity trial"),
-        "canary": ("canary_trials", "canary trial"),
-        "canary-cohort": ("canary_cohorts", "canary cohort"),
-        "capacity-cohort": ("capacity_cohorts", "capacity cohort"),
-        "window-cohort": (
-            "completion_window_cohorts",
-            "completion-window cohort",
-        ),
-        "control-cohort": ("control_cohorts", "control cohort"),
-    }
-    field, label = target_fields[target]
-    try:
-        selected_item = getattr(plan, field)[index]
-    except IndexError as error:
-        raise ValueError(f"{label} index is out of range") from error
-    updates: dict[str, Any] = {
-        "capacity_trials": (),
-        "capacity_cohorts": (),
-        "completion_window_cohorts": (),
-        "canary_trials": (),
-        "canary_cohorts": (),
-        "control_cohorts": (),
-        field: (selected_item,),
-    }
-    if target == "capacity":
-        updates["duration_seconds"] = 1.0
-    elif target == "canary":
-        updates["duration_seconds"] = selected_item.duration_seconds
-    return dataclasses.replace(plan, **updates)
-
-
 def _cleanup_or_recover(
     store: TraceStore,
     args: argparse.Namespace,
@@ -867,9 +772,9 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
             vantage_id=args.vantage_id,
         )
         if args.command == "tick":
-            _validate_tick_plan(plan, cohort_index=args.index)
+            _validate_tick_plan(plan)
         elif args.command == "run":
-            _validate_run_plan(plan, target=args.target, index=args.index)
+            _validate_run_plan(plan)
     elif args.command == "collect":
         collection_config = _collection_config(args)
 
@@ -897,14 +802,12 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
                 store,
                 plan,
                 campaign_id=args.campaign_id or _capacity_campaign_id(store),
-                cohort_index=args.index,
                 enable_active=args.enable_active,
             )
         if args.command == "run":
-            selected = _select_run_target(plan, args.target, args.index)
             return _run_stability_window(
                 store,
-                selected,
+                plan,
                 campaign_id=args.campaign_id or _stability_campaign_id(store),
                 enable_active=args.enable_active,
             )
