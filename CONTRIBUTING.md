@@ -6,7 +6,7 @@ provider compatibility, tests, and documentation.
 
 ## Development Setup
 
-Install Go 1.25 and Kustomize 5.4 or newer, then run the same verification suite
+Install Go 1.25.13 or newer and Kustomize 5.4 or newer, then run the same verification suite
 used by CI before sending changes:
 
 ```bash

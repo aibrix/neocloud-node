@@ -11,7 +11,7 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
 BUILD_DATE ?= $(shell git show -s --format=%cI HEAD 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
 IMAGE ?= ghcr.io/aibrix/neocloud-node:$(VERSION)
-BUILDER_IMAGE ?= golang:1.25.12-bookworm
+BUILDER_IMAGE ?= golang:1.25.13-bookworm
 RUNTIME_IMAGE ?= gcr.io/distroless/static-debian12:nonroot
 GO_TEST_FLAGS ?= -count=1
 INSTALL_MANIFEST ?= deploy/neocloud-node.yaml

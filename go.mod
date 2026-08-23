@@ -1,6 +1,6 @@
 module github.com/aibrix/neocloud-node
 
-go 1.25.0
+go 1.25.13
 
 require (
 	github.com/prometheus/client_model v0.6.2
