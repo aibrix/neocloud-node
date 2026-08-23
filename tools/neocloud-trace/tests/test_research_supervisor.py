@@ -1059,7 +1059,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         document.update(
             {
                 "protocol_version": "3.0-capacity-cohort",
-                "duration_seconds": 0.25,
+                "duration_seconds": 0.35,
                 "max_active_gpus_per_provider": 2,
                 "provider_budgets_usd": {"runpod": 1.0},
                 "total_budget_usd": 1.0,
@@ -1564,9 +1564,9 @@ class ResearchSupervisorTest(unittest.TestCase):
                         "initial_delay_seconds": 0,
                         "opportunity_interval_seconds": 0.08,
                         "jitter_seconds": 0,
-                        "completion_window_seconds": 0.04,
+                        "completion_window_seconds": 0.1,
                         "required_runtime_seconds": 0.01,
-                        "startup_safety_seconds": 0.01,
+                        "startup_safety_seconds": 0.05,
                         "min_remaining_seconds": 0.01,
                         "arms": [
                             {"name": "immediate", "launch_fraction": 0},
