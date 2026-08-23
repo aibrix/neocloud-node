@@ -28,7 +28,6 @@ UTC = dt.timezone.utc
 PLAN_FIELDS = {
     "protocol_version",
     "host_id",
-    "vantage_id",
     "duration_seconds",
     "passive_interval_seconds",
     "host_interval_seconds",
@@ -380,7 +379,6 @@ def load_plan(
     path: str | pathlib.Path,
     *,
     default_host_id: str | None = None,
-    default_vantage_id: str | None = None,
 ) -> PilotPlan:
     raw = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
@@ -395,7 +393,6 @@ def load_plan(
     experiment = ExperimentConfig(
         protocol_version=str(raw.get("protocol_version") or ""),
         host_id=str(raw.get("host_id") or default_host_id or ""),
-        vantage_id=str(raw.get("vantage_id") or default_vantage_id or ""),
         provider_budgets=provider_budgets,
         total_budget_usd=float(raw.get("total_budget_usd") or 0),
         max_active_gpus_per_provider=int(raw.get("max_active_gpus_per_provider") or 0),

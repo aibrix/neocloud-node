@@ -54,8 +54,7 @@ Run a real command in the same way:
 ```bash
 python3 -m neocloud_trace init \
   --plan ../plans/capacity-epoch.json \
-  --db /tmp/neocloud-trace-dev.db \
-  --vantage-id local-development
+  --db /tmp/neocloud-trace-dev.db
 ```
 
 The normal installed form remains preferred for user documentation:
@@ -63,8 +62,7 @@ The normal installed form remains preferred for user documentation:
 ```bash
 neocloud-trace init \
   --plan tools/neocloud-trace/plans/capacity-epoch.json \
-  --db /tmp/neocloud-trace-dev.db \
-  --vantage-id local-development
+  --db /tmp/neocloud-trace-dev.db
 ```
 
 All command-specific options come after the command name.
@@ -126,8 +124,8 @@ When adding or changing a command:
 1. place operational options on the command parser, not on the top-level parser;
 2. default every path that can create, delete, or advance provider resources to
    a useful dry-run, and require `--execute` for mutations;
-3. load plan metadata through the shared host/vantage resolution path for
-   plan-based commands;
+3. load plan metadata through the shared host resolution path for plan-based
+   commands;
 4. keep stdout JSON stable and machine-readable;
 5. add parser/help and execution tests;
 6. update `README.md` when user-visible behavior changes.
@@ -182,8 +180,7 @@ Start with commands that cannot create resources:
 ```bash
 neocloud-trace init \
   --plan /path/to/plan.json \
-  --db /tmp/neocloud-trace-dev.db \
-  --vantage-id local-development
+  --db /tmp/neocloud-trace-dev.db
 
 neocloud-trace catalog \
   --db /tmp/neocloud-trace-dev.db \

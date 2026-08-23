@@ -76,11 +76,7 @@ promptly to censor observations and clean up remote resources.
 
 ## Collector Identity
 
-Every run stores `host_id` and `vantage_id`.
-
-For `catalog`, `host_id` is the local hostname. `vantage_id` defaults to that
-hostname and can be overridden with `--vantage-id` to identify a stable network
-or physical location.
+Every run stores `host_id`. For `catalog`, it is the local hostname.
 
 For plan-based commands, `host_id` is resolved in this order:
 
@@ -88,15 +84,11 @@ For plan-based commands, `host_id` is resolved in this order:
 2. a non-placeholder plan value;
 3. the local hostname.
 
-`vantage_id` is resolved from `--vantage-id` and then the plan. Plan-based
-commands reject unresolved values such as `replace-with-network-vantage`.
-
 ```bash
 neocloud-trace init \
   --plan /path/to/plan.json \
   --db data/neocloud-trace/trace.db \
-  --host-id trace-host-01 \
-  --vantage-id us-west-office
+  --host-id trace-host-01
 ```
 
 ## Validate a Plan
@@ -108,8 +100,7 @@ provider or create resources.
 ```bash
 neocloud-trace init \
   --plan /path/to/plan.json \
-  --db data/neocloud-trace/trace.db \
-  --vantage-id us-west-office
+  --db data/neocloud-trace/trace.db
 ```
 
 `plans/capacity-epoch.json` and `plans/stability-windows.json` are the two
@@ -133,7 +124,6 @@ neocloud-trace catalog \
   --db data/neocloud-trace/trace.db \
   --provider lambda \
   --provider runpod \
-  --vantage-id us-west-office \
   --duration-seconds 3600
 ```
 
@@ -151,7 +141,6 @@ sets `max_trials` to `1`, and leaves all other active sections empty.
 neocloud-trace tick \
   --plan /path/to/capacity-plan.json \
   --db data/neocloud-trace/trace.db \
-  --vantage-id us-west-office \
   --execute
 ```
 
@@ -178,7 +167,6 @@ cleanup logic runs inside the claimed outer window.
 neocloud-trace run \
   --plan /path/to/stability-plan.json \
   --db data/neocloud-trace/trace.db \
-  --vantage-id us-west-office \
   --execute
 ```
 

@@ -56,7 +56,6 @@ class SurvivalExportTest(unittest.TestCase):
             ExperimentConfig(
                 protocol_version="3.0-survival-cohort",
                 host_id="host",
-                vantage_id="vantage",
                 provider_budgets={"runpod": 5.0},
                 total_budget_usd=5.0,
                 max_active_gpus_per_provider=2,
@@ -310,7 +309,6 @@ class SurvivalExportTest(unittest.TestCase):
             ExperimentConfig(
                 protocol_version="4.0-stability",
                 host_id="host",
-                vantage_id="vantage",
                 provider_budgets={"runpod": 5.0},
                 total_budget_usd=5.0,
                 max_active_gpus_per_provider=2,

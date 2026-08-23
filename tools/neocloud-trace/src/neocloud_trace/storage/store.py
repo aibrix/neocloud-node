@@ -64,6 +64,27 @@ def merge_json_text(existing: str, updates: dict[str, Any] | None) -> str:
     return json_text(merged)
 
 
+def same_config_ignoring_legacy_vantage(
+    existing_config_json: str,
+    current_config_json: str,
+) -> bool:
+    try:
+        existing = json.loads(existing_config_json)
+        current = json.loads(current_config_json)
+    except json.JSONDecodeError:
+        return False
+    for document in (existing, current):
+        if not isinstance(document, dict):
+            return False
+        experiment = document.get("experiment")
+        if isinstance(experiment, dict):
+            experiment.pop("vantage_id", None)
+        raw = document.get("document")
+        if isinstance(raw, dict):
+            raw.pop("vantage_id", None)
+    return json_text(existing) == json_text(current)
+
+
 SCHEMA = (
     importlib.resources.files(__package__)
     .joinpath("schema.sql")
@@ -84,10 +105,77 @@ class TraceStore:
                 self.connection.execute("PRAGMA journal_mode=WAL")
             self.connection.executescript(SCHEMA)
             self.connection.commit()
+            self._legacy_vantage_column = any(
+                row["name"] == "vantage_id"
+                for row in self.connection.execute(
+                    "PRAGMA table_info(experiment_runs)"
+                ).fetchall()
+            )
 
     def close(self) -> None:
         with self._lock:
             self.connection.close()
+
+    def _insert_experiment_run(
+        self,
+        *,
+        run_id: str,
+        workflow: str,
+        experiment_id: str | None,
+        cohort_name: str | None,
+        protocol_version: str,
+        config_hash: str,
+        config_json: str,
+        host_id: str,
+        collector_revision: str | None,
+        python_version: str | None,
+        started_at: str,
+        total_budget_usd: float,
+        max_active_gpus_per_provider: int,
+    ) -> None:
+        columns = [
+            "id",
+            "workflow",
+            "experiment_id",
+            "cohort_name",
+            "protocol_version",
+            "config_hash",
+            "config_json",
+            "host_id",
+            "collector_revision",
+            "python_version",
+            "started_at",
+            "status",
+            "total_budget_usd",
+            "max_active_gpus_per_provider",
+        ]
+        values: list[Any] = [
+            run_id,
+            workflow,
+            experiment_id,
+            cohort_name,
+            protocol_version,
+            config_hash,
+            config_json,
+            host_id,
+            collector_revision,
+            python_version,
+            started_at,
+            "running",
+            total_budget_usd,
+            max_active_gpus_per_provider,
+        ]
+        if self._legacy_vantage_column:
+            # Older trace databases required this column. Keep them writable
+            # without carrying a separate location identity in the public model.
+            columns.append("vantage_id")
+            values.append(host_id)
+        placeholders = ", ".join("?" for _ in columns)
+        self.connection.execute(
+            f"INSERT INTO experiment_runs ({', '.join(columns)}) "
+            f"VALUES ({placeholders})",
+            values,
+        )
 
     def start_run(
         self,
@@ -105,7 +193,6 @@ class TraceStore:
             protocol_version=config.protocol_version,
             config_json=config_json,
             host_id=config.host_id,
-            vantage_id=config.vantage_id,
             total_budget_usd=config.total_budget_usd,
             max_active_gpus_per_provider=config.max_active_gpus_per_provider,
             collector_revision=collector_revision,
@@ -124,7 +211,6 @@ class TraceStore:
             protocol_version=config.protocol_version,
             config_json=json_text({"catalog": dataclasses.asdict(config)}),
             host_id=config.host_id,
-            vantage_id=config.vantage_id,
             total_budget_usd=0.0,
             max_active_gpus_per_provider=0,
             collector_revision=collector_revision,
@@ -138,7 +224,6 @@ class TraceStore:
         protocol_version: str,
         config_json: str,
         host_id: str,
-        vantage_id: str,
         total_budget_usd: float,
         max_active_gpus_per_provider: int,
         collector_revision: str | None,
@@ -147,29 +232,20 @@ class TraceStore:
         run_id = str(uuid.uuid4())
         config_hash = hashlib.sha256(config_json.encode()).hexdigest()
         with self._lock, self.connection:
-            self.connection.execute(
-                """
-                INSERT INTO experiment_runs
-                  (id, workflow, protocol_version, config_hash, config_json,
-                   host_id, vantage_id, collector_revision, python_version,
-                   started_at, status, total_budget_usd,
-                   max_active_gpus_per_provider)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)
-                """,
-                (
-                    run_id,
-                    workflow,
-                    protocol_version,
-                    config_hash,
-                    config_json,
-                    host_id,
-                    vantage_id,
-                    collector_revision,
-                    python_version,
-                    utc_now(),
-                    total_budget_usd,
-                    max_active_gpus_per_provider,
-                ),
+            self._insert_experiment_run(
+                run_id=run_id,
+                workflow=workflow,
+                experiment_id=None,
+                cohort_name=None,
+                protocol_version=protocol_version,
+                config_hash=config_hash,
+                config_json=config_json,
+                host_id=host_id,
+                collector_revision=collector_revision,
+                python_version=python_version,
+                started_at=utc_now(),
+                total_budget_usd=total_budget_usd,
+                max_active_gpus_per_provider=max_active_gpus_per_provider,
             )
         return run_id
 
@@ -204,10 +280,13 @@ class TraceStore:
                     (experiment_id,),
                 ).fetchone()
                 if existing is not None:
-                    if (
+                    config_changed = (
                         existing["config_hash"] != config_hash
-                        or existing["cohort_name"] != cohort_name
-                    ):
+                        and not same_config_ignoring_legacy_vantage(
+                            existing["config_json"], config_json
+                        )
+                    )
+                    if config_changed or existing["cohort_name"] != cohort_name:
                         raise ValueError(
                             "capacity database already uses a different "
                             "experiment definition"
@@ -216,30 +295,21 @@ class TraceStore:
                     return str(existing["id"]), False
 
                 run_id = str(uuid.uuid4())
-                self.connection.execute(
-                    """
-                    INSERT INTO experiment_runs
-                      (id, workflow, experiment_id, cohort_name, protocol_version,
-                       config_hash, config_json, host_id, vantage_id,
-                       collector_revision, python_version, started_at, status,
-                       total_budget_usd, max_active_gpus_per_provider)
-                    VALUES (?, 'capacity', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                            'running', ?, ?)
-                    """,
-                    (
-                        run_id,
-                        experiment_id,
-                        cohort_name,
-                        config.protocol_version,
-                        config_hash,
-                        config_json,
-                        config.host_id,
-                        config.vantage_id,
-                        collector_revision,
-                        python_version,
-                        started_at,
-                        config.total_budget_usd,
-                        config.max_active_gpus_per_provider,
+                self._insert_experiment_run(
+                    run_id=run_id,
+                    workflow="capacity",
+                    experiment_id=experiment_id,
+                    cohort_name=cohort_name,
+                    protocol_version=config.protocol_version,
+                    config_hash=config_hash,
+                    config_json=config_json,
+                    host_id=config.host_id,
+                    collector_revision=collector_revision,
+                    python_version=python_version,
+                    started_at=started_at,
+                    total_budget_usd=config.total_budget_usd,
+                    max_active_gpus_per_provider=(
+                        config.max_active_gpus_per_provider
                     ),
                 )
                 for epoch in epochs:
@@ -485,10 +555,13 @@ class TraceStore:
                     (experiment_id,),
                 ).fetchone()
                 if existing is not None:
-                    if (
+                    config_changed = (
                         existing["config_hash"] != config_hash
-                        or existing["cohort_name"] != cohort_name
-                    ):
+                        and not same_config_ignoring_legacy_vantage(
+                            existing["config_json"], config_json
+                        )
+                    )
+                    if config_changed or existing["cohort_name"] != cohort_name:
                         raise ValueError(
                             "stability database already uses a different "
                             "experiment definition"
@@ -497,30 +570,21 @@ class TraceStore:
                     return str(existing["id"]), False
 
                 run_id = str(uuid.uuid4())
-                self.connection.execute(
-                    """
-                    INSERT INTO experiment_runs
-                      (id, workflow, experiment_id, cohort_name, protocol_version,
-                       config_hash, config_json, host_id, vantage_id,
-                       collector_revision, python_version, started_at, status,
-                       total_budget_usd, max_active_gpus_per_provider)
-                    VALUES (?, 'stability', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                            'running', ?, ?)
-                    """,
-                    (
-                        run_id,
-                        experiment_id,
-                        cohort_name,
-                        config.protocol_version,
-                        config_hash,
-                        config_json,
-                        config.host_id,
-                        config.vantage_id,
-                        collector_revision,
-                        python_version,
-                        started_at,
-                        config.total_budget_usd,
-                        config.max_active_gpus_per_provider,
+                self._insert_experiment_run(
+                    run_id=run_id,
+                    workflow="stability",
+                    experiment_id=experiment_id,
+                    cohort_name=cohort_name,
+                    protocol_version=config.protocol_version,
+                    config_hash=config_hash,
+                    config_json=config_json,
+                    host_id=config.host_id,
+                    collector_revision=collector_revision,
+                    python_version=python_version,
+                    started_at=started_at,
+                    total_budget_usd=config.total_budget_usd,
+                    max_active_gpus_per_provider=(
+                        config.max_active_gpus_per_provider
                     ),
                 )
                 for window in windows:

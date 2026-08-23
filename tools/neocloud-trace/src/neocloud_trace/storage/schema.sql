@@ -9,7 +9,6 @@ CREATE TABLE IF NOT EXISTS experiment_runs (
     config_hash TEXT NOT NULL,
     config_json TEXT NOT NULL,
     host_id TEXT NOT NULL,
-    vantage_id TEXT NOT NULL,
     collector_revision TEXT,
     python_version TEXT,
     started_at TEXT NOT NULL,

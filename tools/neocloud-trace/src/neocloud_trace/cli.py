@@ -44,10 +44,6 @@ def _add_plan_arguments(parser: argparse.ArgumentParser) -> None:
         "--host-id",
         help="collector identity (default: plan value or local hostname)",
     )
-    parser.add_argument(
-        "--vantage-id",
-        help="network/location identity (default: plan value)",
-    )
 
 
 def _add_execute_argument(parser: argparse.ArgumentParser) -> None:
@@ -87,10 +83,6 @@ def build_parser() -> argparse.ArgumentParser:
         choices=SUPPORTED_PROVIDERS,
         required=True,
         help="provider to query; repeat to sample more than one",
-    )
-    catalog.add_argument(
-        "--vantage-id",
-        help="network/location group (default: local hostname)",
     )
     catalog.add_argument(
         "--gpu-count",
@@ -244,26 +236,21 @@ def _load_cli_plan(
     path: str,
     *,
     host_id: str | None,
-    vantage_id: str | None,
 ):
     detected_host = socket.gethostname()
     plan = load_plan(
         path,
         default_host_id=host_id or detected_host,
-        default_vantage_id=vantage_id,
     )
     resolved_host_id = host_id or plan.experiment.host_id
     if _is_placeholder(resolved_host_id):
         resolved_host_id = detected_host
-    resolved_vantage_id = vantage_id or plan.experiment.vantage_id
     experiment = dataclasses.replace(
         plan.experiment,
         host_id=resolved_host_id,
-        vantage_id=resolved_vantage_id,
     )
     raw = dict(plan.raw_document)
     raw["host_id"] = experiment.host_id
-    raw["vantage_id"] = experiment.vantage_id
     plan = dataclasses.replace(plan, experiment=experiment, raw_document=raw)
     _require_real_metadata(plan)
     return plan
@@ -329,8 +316,6 @@ def _capacity_cohort_summary(cohort) -> dict[str, Any]:
 def _require_real_metadata(plan) -> None:
     if _is_placeholder(plan.experiment.host_id):
         raise ValueError("host_id must identify the collector host")
-    if _is_placeholder(plan.experiment.vantage_id):
-        raise ValueError("vantage_id must identify the collector network/location")
 
 
 def _install_signal_handlers(supervisor: Stoppable):
@@ -435,7 +420,6 @@ def _catalog_config(args: argparse.Namespace) -> CatalogConfig:
     return CatalogConfig(
         protocol_version=CATALOG_PROTOCOL_VERSION,
         host_id=host_id,
-        vantage_id=args.vantage_id or host_id,
         providers=providers,
         gpu_counts=gpu_counts,
         catalog_interval_seconds=args.catalog_interval_seconds,
@@ -656,7 +640,6 @@ def _plan_summary(plan, db_path: str) -> dict[str, Any]:
         "database": str(pathlib.Path(db_path).resolve()),
         "protocol_version": plan.experiment.protocol_version,
         "host_id": plan.experiment.host_id,
-        "vantage_id": plan.experiment.vantage_id,
         "capacity_cohort_count": len(plan.capacity_cohorts),
         "capacity_cohorts": [
             _capacity_cohort_summary(cohort) for cohort in plan.capacity_cohorts
@@ -755,7 +738,6 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         plan = _load_cli_plan(
             args.plan,
             host_id=args.host_id,
-            vantage_id=args.vantage_id,
         )
         if args.command == "tick":
             _validate_tick_plan(plan)

@@ -1,7 +1,6 @@
 {
   "protocol_version": "capacity-v1",
   "host_id": "replace-with-stable-host-id",
-  "vantage_id": "replace-with-network-vantage",
   "duration_seconds": 3600,
   "passive_interval_seconds": 300,
   "host_interval_seconds": 30,

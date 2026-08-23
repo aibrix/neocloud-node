@@ -6,7 +6,6 @@ SELECT
   r.id,
   r.protocol_version,
   r.host_id,
-  r.vantage_id,
   r.status,
   r.started_at,
   r.finished_at,

@@ -36,7 +36,6 @@ def plan_document():
     return {
         "protocol_version": "3.0-capacity",
         "host_id": "test-host",
-        "vantage_id": "test-vantage",
         "duration_seconds": 0.15,
         "passive_interval_seconds": 0.01,
         "host_interval_seconds": 0.01,
@@ -355,13 +354,11 @@ class ResearchSupervisorTest(unittest.TestCase):
                 plan,
                 "--host-id",
                 "stable-host-1",
-                "--vantage-id",
-                "us-west-office",
                 "--execute",
             ]
         )
         self.assertEqual(identified.host_id, "stable-host-1")
-        self.assertEqual(identified.vantage_id, "us-west-office")
+        self.assertFalse(hasattr(identified, "vantage_id"))
         self.assertTrue(identified.execute)
 
     def test_cli_help_keeps_operational_options_with_their_command(self):
@@ -380,7 +377,6 @@ class ResearchSupervisorTest(unittest.TestCase):
             "--db",
             "--plan",
             "--host-id",
-            "--vantage-id",
             "--execute",
             "--experiment-id",
         ):
@@ -390,7 +386,7 @@ class ResearchSupervisorTest(unittest.TestCase):
             parser.parse_args(["catalog", "--help"])
         catalog_help = output.getvalue()
         self.assertIn("--provider", catalog_help)
-        self.assertIn("--vantage-id", catalog_help)
+        self.assertNotIn("--vantage-id", catalog_help)
         self.assertNotIn("--plan", catalog_help)
         self.assertNotIn("--host-id", catalog_help)
 
@@ -458,7 +454,6 @@ class ResearchSupervisorTest(unittest.TestCase):
     def test_cli_metadata_has_one_resolution_rule_for_every_plan_command(self):
         document = plan_document()
         document["host_id"] = "replace-with-stable-host-id"
-        document["vantage_id"] = "replace-with-network-vantage"
         self.plan_path.write_text(json.dumps(document), encoding="utf-8")
         parser = trace_cli.build_parser()
         database = str(self.root / "trace.db")
@@ -470,19 +465,28 @@ class ResearchSupervisorTest(unittest.TestCase):
                 database,
                 "--plan",
                 str(self.plan_path),
-                "--vantage-id",
-                "us-west-office",
             ]
         )
         result = trace_cli.execute(args)
         self.assertEqual(result["host_id"], socket.gethostname())
-        self.assertEqual(result["vantage_id"], "us-west-office")
+        self.assertNotIn("vantage_id", result)
 
-        unresolved = parser.parse_args(
-            ["init", "--db", database, "--plan", str(self.plan_path)]
+    def test_plan_rejects_removed_vantage_id(self):
+        document = plan_document()
+        document["vantage_id"] = "obsolete-vantage"
+        self.plan_path.write_text(json.dumps(document), encoding="utf-8")
+        args = trace_cli.build_parser().parse_args(
+            [
+                "init",
+                "--db",
+                str(self.root / "trace.db"),
+                "--plan",
+                str(self.plan_path),
+            ]
         )
-        with self.assertRaisesRegex(ValueError, "vantage_id must identify"):
-            trace_cli.execute(unresolved)
+
+        with self.assertRaisesRegex(ValueError, "unsupported plan fields: vantage_id"):
+            trace_cli.execute(args)
 
     def test_tick_cli_defaults_to_a_non_mutating_plan_preview(self):
         module = trace_cli
@@ -651,7 +655,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         self.assertEqual(run["experiment_id"], "capacity-experiment")
         self.assertEqual(run["cohort_name"], "atomic-depth")
         self.assertEqual(run["host_id"], socket.gethostname())
-        self.assertEqual(run["vantage_id"], "test-vantage")
+        self.assertNotIn("vantage_id", run.keys())
 
         changed = json.loads(renamed.read_text(encoding="utf-8"))
         changed["capacity_cohorts"][0]["selection_seed"] = 99

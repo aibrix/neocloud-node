@@ -147,7 +147,6 @@ class PassiveWorkerTest(unittest.TestCase):
             ExperimentConfig(
                 protocol_version="2.0",
                 host_id="host",
-                vantage_id="vantage",
                 provider_budgets={"runpod": 1.0},
                 total_budget_usd=1.0,
             ),
@@ -242,7 +241,6 @@ class PassiveWorkerTest(unittest.TestCase):
         config = CatalogConfig(
             protocol_version="1.0-passive-catalog",
             host_id="collector-host",
-            vantage_id="collector-host",
             providers=("runpod",),
             gpu_counts=(1, 2),
         )
@@ -252,7 +250,6 @@ class PassiveWorkerTest(unittest.TestCase):
         run = self.store.run_row(run_id)
         self.assertEqual(run["status"], "complete")
         self.assertEqual(run["host_id"], "collector-host")
-        self.assertEqual(run["vantage_id"], "collector-host")
         self.assertEqual(
             json.loads(run["config_json"])["catalog"]["providers"],
             ["runpod"],

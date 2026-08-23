@@ -21,7 +21,6 @@ class BillingReconciliationTest(unittest.TestCase):
             ExperimentConfig(
                 protocol_version="3.0-billing",
                 host_id="host",
-                vantage_id="vantage",
                 provider_budgets={"runpod": 5},
                 total_budget_usd=5,
                 max_active_gpus_per_provider=1,

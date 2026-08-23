@@ -1,6 +1,7 @@
 import json
 import datetime as dt
 import pathlib
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -28,7 +29,6 @@ class TraceStoreTest(unittest.TestCase):
         return ExperimentConfig(
             protocol_version="2.0",
             host_id="test-host",
-            vantage_id="test-vantage",
             provider_budgets={"lambda": 2.5, "runpod": 3.0},
             total_budget_usd=5.5,
             max_active_gpus_per_provider=8,
@@ -61,15 +61,60 @@ class TraceStoreTest(unittest.TestCase):
         self.assertNotIn("stability_experiments", tables)
         row = self.store.connection.execute(
             """
-            SELECT workflow, protocol_version, host_id, vantage_id, status
+            SELECT workflow, protocol_version, host_id, status
             FROM experiment_runs WHERE id=?
             """,
             (run_id,),
         ).fetchone()
         self.assertEqual(
             tuple(row),
-            ("standalone", "2.0", "test-host", "test-vantage", "running"),
+            ("standalone", "2.0", "test-host", "running"),
         )
+        columns = {
+            row["name"]
+            for row in self.store.connection.execute(
+                "PRAGMA table_info(experiment_runs)"
+            )
+        }
+        self.assertNotIn("vantage_id", columns)
+
+    def test_legacy_vantage_column_remains_writable(self):
+        legacy_path = pathlib.Path(self.tempdir.name) / "legacy.db"
+        connection = sqlite3.connect(legacy_path)
+        connection.execute(
+            """
+            CREATE TABLE experiment_runs (
+                id TEXT PRIMARY KEY,
+                workflow TEXT NOT NULL,
+                experiment_id TEXT,
+                cohort_name TEXT,
+                protocol_version TEXT NOT NULL,
+                config_hash TEXT NOT NULL,
+                config_json TEXT NOT NULL,
+                host_id TEXT NOT NULL,
+                vantage_id TEXT NOT NULL,
+                collector_revision TEXT,
+                python_version TEXT,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                status TEXT NOT NULL,
+                termination_reason TEXT,
+                total_budget_usd REAL NOT NULL,
+                max_active_gpus_per_provider INTEGER NOT NULL
+            )
+            """
+        )
+        connection.close()
+
+        legacy_store = TraceStore(legacy_path)
+        self.addCleanup(legacy_store.close)
+        run_id = legacy_store.start_run(
+            self.config(), config_document={"mode": "legacy-compatibility"}
+        )
+
+        row = legacy_store.run_row(run_id)
+        self.assertEqual(row["host_id"], "test-host")
+        self.assertEqual(row["vantage_id"], "test-host")
 
     def test_redacts_nested_secrets_before_persisting_raw_provider_data(self):
         run_id = self.store.start_run(self.config(), config_document={"mode": "test"})
@@ -277,7 +322,6 @@ class TraceStoreTest(unittest.TestCase):
             ExperimentConfig(
                 protocol_version="2.0",
                 host_id="test-host",
-                vantage_id="test-vantage",
                 provider_budgets={"runpod": 3.0},
                 total_budget_usd=3.0,
                 max_active_gpus_per_provider=0,
