@@ -24,7 +24,7 @@ from neocloud_trace.providers import (
 )
 from neocloud_trace.storage import TraceStore
 from neocloud_trace.supervisor import (
-    ActiveRunDisabled,
+    ExecutionDisabled,
     BudgetExceeded,
     BudgetGuard,
     PilotSupervisor,
@@ -36,7 +36,6 @@ def plan_document():
     return {
         "protocol_version": "3.0-capacity",
         "host_id": "test-host",
-        "vantage_id": "test-vantage",
         "duration_seconds": 0.15,
         "passive_interval_seconds": 0.01,
         "host_interval_seconds": 0.01,
@@ -268,7 +267,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         plan = load_plan(self.plan_path)
         trial = plan.capacity_cohorts[0].cells[0]
 
-        self.assertEqual(trial.target_depth, 32)
+        self.assertEqual(trial.target_gpu_depth, 32)
         self.assertEqual(trial.cell.gpu_count, 4)
         self.assertEqual(trial.target_instance_count, 8)
         self.assertAlmostEqual(trial.budget_upper_bound_usd, 6.9)
@@ -296,26 +295,31 @@ class ResearchSupervisorTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             load_plan(self.plan_path)
 
-    def test_cli_marks_every_billable_command_as_active(self):
-        module = trace_cli
-        parser = module.build_parser()
+    def test_billable_cli_commands_default_to_dry_run_and_accept_execute(self):
+        parser = trace_cli.build_parser()
         database = str(self.root / "trace.db")
         plan = str(self.plan_path)
 
         for command in ("run", "tick"):
             args = parser.parse_args([command, "--db", database, "--plan", plan])
-            with self.assertRaises(ActiveRunDisabled):
-                module.require_active(args)
+            self.assertFalse(args.execute)
+            execute_args = parser.parse_args(
+                [command, "--db", database, "--plan", plan, "--execute"]
+            )
+            self.assertTrue(execute_args.execute)
 
         for command in ("cleanup", "recover"):
             args = parser.parse_args([command, "--db", database])
-            with self.assertRaises(ActiveRunDisabled):
-                module.require_active(args)
+            self.assertFalse(args.execute)
+            execute_args = parser.parse_args(
+                [command, "--db", database, "--execute"]
+            )
+            self.assertTrue(execute_args.execute)
 
-        collect = parser.parse_args(
-            ["collect", "--db", database, "--provider", "runpod"]
+        catalog = parser.parse_args(
+            ["catalog", "--db", database, "--provider", "runpod"]
         )
-        module.require_active(collect)
+        self.assertFalse(hasattr(catalog, "execute"))
         export = parser.parse_args(
             [
                 "export",
@@ -326,7 +330,7 @@ class ResearchSupervisorTest(unittest.TestCase):
                 str(self.root / "survival.csv"),
             ]
         )
-        module.require_active(export)
+        self.assertFalse(hasattr(export, "execute"))
         sync_billing = parser.parse_args(
             [
                 "billing",
@@ -337,9 +341,9 @@ class ResearchSupervisorTest(unittest.TestCase):
                 "runpod",
             ]
         )
-        module.require_active(sync_billing)
+        self.assertFalse(hasattr(sync_billing, "execute"))
         reconcile = parser.parse_args(["billing", "reconcile", "--db", database])
-        module.require_active(reconcile)
+        self.assertFalse(hasattr(reconcile, "execute"))
 
         identified = parser.parse_args(
             [
@@ -350,13 +354,12 @@ class ResearchSupervisorTest(unittest.TestCase):
                 plan,
                 "--host-id",
                 "stable-host-1",
-                "--vantage-id",
-                "us-west-office",
-                "--enable-active",
+                "--execute",
             ]
         )
         self.assertEqual(identified.host_id, "stable-host-1")
-        self.assertEqual(identified.vantage_id, "us-west-office")
+        self.assertFalse(hasattr(identified, "vantage_id"))
+        self.assertTrue(identified.execute)
 
     def test_cli_help_keeps_operational_options_with_their_command(self):
         parser = trace_cli.build_parser()
@@ -364,8 +367,7 @@ class ResearchSupervisorTest(unittest.TestCase):
 
         self.assertIn("run", top_level_help)
         self.assertIn("tick", top_level_help)
-        self.assertNotIn("capacity-once", top_level_help)
-        self.assertNotIn("capacity-tick", top_level_help)
+        self.assertIn("catalog", top_level_help)
 
         output = io.StringIO()
         with contextlib.redirect_stdout(output), self.assertRaises(SystemExit):
@@ -375,27 +377,83 @@ class ResearchSupervisorTest(unittest.TestCase):
             "--db",
             "--plan",
             "--host-id",
-            "--vantage-id",
-            "--enable-active",
-            "--campaign-id",
+            "--execute",
+            "--experiment-id",
         ):
             self.assertIn(option, run_help)
-        self.assertNotIn("--target", run_help)
-        self.assertNotIn("--index", run_help)
-
         output = io.StringIO()
         with contextlib.redirect_stdout(output), self.assertRaises(SystemExit):
-            parser.parse_args(["collect", "--help"])
-        collect_help = output.getvalue()
-        self.assertIn("--provider", collect_help)
-        self.assertIn("--vantage-id", collect_help)
-        self.assertNotIn("--plan", collect_help)
-        self.assertNotIn("--host-id", collect_help)
+            parser.parse_args(["catalog", "--help"])
+        catalog_help = output.getvalue()
+        self.assertIn("--provider", catalog_help)
+        self.assertNotIn("--vantage-id", catalog_help)
+        self.assertNotIn("--plan", catalog_help)
+        self.assertNotIn("--host-id", catalog_help)
+
+    def test_catalog_cli_deduplicates_repeated_query_dimensions(self):
+        args = trace_cli.build_parser().parse_args(
+            [
+                "catalog",
+                "--db",
+                str(self.root / "catalog.db"),
+                "--provider",
+                "runpod",
+                "--provider",
+                "runpod",
+                "--gpu-count",
+                "1",
+                "--gpu-count",
+                "4",
+                "--gpu-count",
+                "1",
+            ]
+        )
+
+        config = trace_cli._catalog_config(args)
+
+        self.assertEqual(config.providers, ("runpod",))
+        self.assertEqual(config.gpu_counts, (1, 4))
+
+    def test_catalog_cli_executes_one_passive_snapshot(self):
+        class Provider:
+            def catalog_fetches(self, gpu_counts):
+                return [
+                    CatalogFetch(
+                        provider="runpod",
+                        operation=f"catalog.g{gpu_counts[0]}",
+                        response=HTTPResponse(200, 5, payload={}),
+                        quotes=(),
+                    )
+                ]
+
+        args = trace_cli.build_parser().parse_args(
+            [
+                "catalog",
+                "--db",
+                str(self.root / "catalog.db"),
+                "--provider",
+                "runpod",
+                "--gpu-count",
+                "1",
+                "--once",
+            ]
+        )
+        with mock.patch.object(
+            trace_cli,
+            "_provider_clients",
+            return_value={"runpod": Provider()},
+        ):
+            result = trace_cli.execute(args)
+
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["workflow"], "catalog")
+        self.assertIsNone(result["experiment_id"])
+        self.assertEqual(result["counts"]["host_observations"], 1)
+        self.assertEqual(result["counts"]["provider_api_observations"], 1)
 
     def test_cli_metadata_has_one_resolution_rule_for_every_plan_command(self):
         document = plan_document()
         document["host_id"] = "replace-with-stable-host-id"
-        document["vantage_id"] = "replace-with-network-vantage"
         self.plan_path.write_text(json.dumps(document), encoding="utf-8")
         parser = trace_cli.build_parser()
         database = str(self.root / "trace.db")
@@ -407,21 +465,30 @@ class ResearchSupervisorTest(unittest.TestCase):
                 database,
                 "--plan",
                 str(self.plan_path),
-                "--vantage-id",
-                "us-west-office",
             ]
         )
         result = trace_cli.execute(args)
         self.assertEqual(result["host_id"], socket.gethostname())
-        self.assertEqual(result["vantage_id"], "us-west-office")
+        self.assertNotIn("vantage_id", result)
 
-        unresolved = parser.parse_args(
-            ["init", "--db", database, "--plan", str(self.plan_path)]
+    def test_plan_rejects_removed_vantage_id(self):
+        document = plan_document()
+        document["vantage_id"] = "obsolete-vantage"
+        self.plan_path.write_text(json.dumps(document), encoding="utf-8")
+        args = trace_cli.build_parser().parse_args(
+            [
+                "init",
+                "--db",
+                str(self.root / "trace.db"),
+                "--plan",
+                str(self.plan_path),
+            ]
         )
-        with self.assertRaisesRegex(ValueError, "vantage_id must identify"):
-            trace_cli.execute(unresolved)
 
-    def test_tick_cli_uses_plan_interface_and_requires_active_opt_in(self):
+        with self.assertRaisesRegex(ValueError, "unsupported plan fields: vantage_id"):
+            trace_cli.execute(args)
+
+    def test_tick_cli_defaults_to_a_non_mutating_plan_preview(self):
         module = trace_cli
 
         args = module.build_parser().parse_args(
@@ -437,10 +504,75 @@ class ResearchSupervisorTest(unittest.TestCase):
         self.assertEqual(args.command, "tick")
         self.assertEqual(args.plan, str(self.plan_path))
         self.assertEqual(args.db, str(self.root / "capacity.db"))
-        self.assertIsNone(args.campaign_id)
+        self.assertIsNone(args.experiment_id)
         self.assertFalse(hasattr(args, "index"))
-        with self.assertRaises(ActiveRunDisabled):
-            module.require_active(args)
+        self.assertFalse(args.execute)
+
+        with mock.patch.object(module, "_provider_clients") as clients:
+            result = module.execute(args)
+
+        clients.assert_not_called()
+        self.assertEqual(result["mode"], "dry-run")
+        self.assertEqual(result["status"], "dry-run")
+        self.assertEqual(result["workflow"], "capacity")
+        self.assertEqual(result["experiment_id"], "capacity-experiment")
+        self.assertEqual(result["cohort_name"], "lambda-capacity")
+        self.assertFalse(result["provider_mutations"])
+        store = TraceStore(args.db)
+        self.addCleanup(store.close)
+        self.assertEqual(
+            store.connection.execute("SELECT COUNT(*) FROM experiment_runs").fetchone()[
+                0
+            ],
+            0,
+        )
+
+    def test_supervisor_rejects_execution_without_explicit_opt_in(self):
+        plan = load_plan(self.plan_path)
+        store = TraceStore(self.root / "supervisor-guard.db")
+        self.addCleanup(store.close)
+
+        with self.assertRaises(ExecutionDisabled):
+            PilotSupervisor(store, {"lambda": ReadyCapacityProvider()}).capacity_tick(
+                plan,
+                experiment_id="guarded-experiment",
+            )
+
+        self.assertEqual(
+            store.connection.execute("SELECT COUNT(*) FROM experiment_runs").fetchone()[
+                0
+            ],
+            0,
+        )
+
+    def test_cleanup_cli_dry_run_lists_resources_without_deleting(self):
+        db_path = self.root / "cleanup-preview.db"
+        plan = load_plan(self.plan_path)
+        store = TraceStore(db_path)
+        run_id = store.start_run(plan.experiment, plan.raw_document)
+        cell = plan.capacity_cohorts[0].cells[0].cell
+        trial_id = store.start_capacity_trial(run_id, cell, target_gpu_depth=1)
+        replica_id = store.start_replica(trial_id, stage_target=1, ordinal=0)
+        store.mark_replica_created(replica_id, "preview-instance", 0.6)
+        store.close()
+        args = trace_cli.build_parser().parse_args(
+            ["cleanup", "--db", str(db_path), "--run-id", run_id]
+        )
+
+        with mock.patch.object(trace_cli, "_provider_clients") as clients:
+            result = trace_cli.execute(args)
+
+        clients.assert_not_called()
+        self.assertEqual(result["mode"], "dry-run")
+        self.assertEqual(result["status"], "dry-run")
+        self.assertEqual(result["command"], "cleanup")
+        self.assertEqual(
+            result["would_process_resources"][0]["provider_resource_id"],
+            "preview-instance",
+        )
+        reopened = TraceStore(db_path)
+        self.addCleanup(reopened.close)
+        self.assertEqual(len(reopened.owned_resources(run_id)), 1)
 
     def test_capacity_cli_auto_identifies_host_and_reuses_database_experiment(self):
         document = plan_document()
@@ -464,7 +596,7 @@ class ResearchSupervisorTest(unittest.TestCase):
                                 "region": "us-east-1",
                                 "resource_class": "on-demand",
                                 "market": "on-demand",
-                                "target_depth": 1,
+                                "target_gpu_depth": 1,
                                 "ready_timeout_seconds": 1,
                                 "max_lease_seconds": 60,
                                 "estimated_price_usd_hr": 0.6,
@@ -490,7 +622,7 @@ class ResearchSupervisorTest(unittest.TestCase):
                     str(db_path),
                     "--plan",
                     str(plan_path),
-                    "--enable-active",
+                    "--execute",
                 ]
             )
             with mock.patch.object(
@@ -506,20 +638,24 @@ class ResearchSupervisorTest(unittest.TestCase):
         renamed.write_text(self.plan_path.read_text(encoding="utf-8"), encoding="utf-8")
         second = invoke(renamed)
 
+        self.assertEqual(first["mode"], "execute")
         self.assertEqual(first["status"], "executed")
-        self.assertTrue(first["campaign_created"])
-        self.assertTrue(first["campaign_complete"])
+        self.assertTrue(first["experiment_created"])
+        self.assertTrue(first["experiment_complete"])
         self.assertEqual(first["cohort_name"], "atomic-depth")
-        self.assertEqual(first["campaign_id"], "capacity-experiment")
+        self.assertEqual(first["experiment_id"], "capacity-experiment")
         self.assertEqual(second["status"], "complete")
-        self.assertFalse(second["campaign_created"])
+        self.assertFalse(second["experiment_created"])
         self.assertEqual(first["run_id"], second["run_id"])
         self.assertEqual(len(provider.created), 1)
         store = TraceStore(db_path)
         self.addCleanup(store.close)
         run = store.run_row(first["run_id"])
+        self.assertEqual(run["workflow"], "capacity")
+        self.assertEqual(run["experiment_id"], "capacity-experiment")
+        self.assertEqual(run["cohort_name"], "atomic-depth")
         self.assertEqual(run["host_id"], socket.gethostname())
-        self.assertEqual(run["vantage_id"], "test-vantage")
+        self.assertNotIn("vantage_id", run.keys())
 
         changed = json.loads(renamed.read_text(encoding="utf-8"))
         changed["capacity_cohorts"][0]["selection_seed"] = 99
@@ -539,16 +675,16 @@ class ResearchSupervisorTest(unittest.TestCase):
                 str(self.root / "capacity.db"),
                 "--plan",
                 str(self.plan_path),
-                "--enable-active",
+                "--execute",
             ]
         )
 
         with self.assertRaisesRegex(ValueError, "exactly one capacity_cohorts"):
             module.execute(args)
 
-    def test_tick_contract_rejects_legacy_trials_before_db_or_provider(self):
+    def test_tick_contract_rejects_unknown_plan_fields_before_db_or_provider(self):
         document = plan_document()
-        document["capacity_trials"] = [document["capacity_cohorts"][0]["cells"][0]]
+        document["unexpected_section"] = {"enabled": True}
         self.plan_path.write_text(json.dumps(document), encoding="utf-8")
         db_path = self.root / "invalid-capacity.db"
         args = trace_cli.build_parser().parse_args(
@@ -558,14 +694,14 @@ class ResearchSupervisorTest(unittest.TestCase):
                 str(db_path),
                 "--plan",
                 str(self.plan_path),
-                "--enable-active",
+                "--execute",
             ]
         )
 
         with mock.patch.object(trace_cli, "_provider_clients") as clients:
             with self.assertRaisesRegex(
                 ValueError,
-                "unsupported active plan sections: capacity_trials",
+                "unsupported plan fields: unexpected_section",
             ):
                 trace_cli.execute(args)
 
@@ -591,7 +727,7 @@ class ResearchSupervisorTest(unittest.TestCase):
                                 "region": "us-east-1",
                                 "resource_class": "on-demand",
                                 "market": "on-demand",
-                                "target_depth": 1,
+                                "target_gpu_depth": 1,
                                 "ready_timeout_seconds": 1,
                                 "max_lease_seconds": 60,
                                 "estimated_price_usd_hr": 0.6,
@@ -610,7 +746,7 @@ class ResearchSupervisorTest(unittest.TestCase):
                 str(db_path),
                 "--plan",
                 str(self.plan_path),
-                "--enable-active",
+                "--execute",
             ]
         )
 
@@ -619,11 +755,9 @@ class ResearchSupervisorTest(unittest.TestCase):
 
         self.assertFalse(db_path.exists())
 
-    def test_run_contract_rejects_mixed_plan_before_db_or_provider(self):
+    def test_run_contract_rejects_unknown_plan_fields_before_db_or_provider(self):
         document = stability_plan_document()
-        document["capacity_trials"] = [
-            plan_document()["capacity_cohorts"][0]["cells"][0]
-        ]
+        document["unexpected_section"] = {"enabled": True}
         self.plan_path.write_text(json.dumps(document), encoding="utf-8")
         db_path = self.root / "invalid-stability.db"
         args = trace_cli.build_parser().parse_args(
@@ -633,43 +767,21 @@ class ResearchSupervisorTest(unittest.TestCase):
                 str(db_path),
                 "--plan",
                 str(self.plan_path),
-                "--enable-active",
+                "--execute",
             ]
         )
 
         with mock.patch.object(trace_cli, "_provider_clients") as clients:
             with self.assertRaisesRegex(
                 ValueError,
-                "unsupported active plan sections: capacity_trials",
+                "unsupported plan fields: unexpected_section",
             ):
                 trace_cli.execute(args)
 
         clients.assert_not_called()
         self.assertFalse(db_path.exists())
 
-    def test_active_commands_have_no_plan_section_selectors(self):
-        self.plan_path.write_text(
-            json.dumps(stability_plan_document()),
-            encoding="utf-8",
-        )
-        parser = trace_cli.build_parser()
-        for command, selector in (("run", "--target"), ("tick", "--index")):
-            with contextlib.redirect_stderr(io.StringIO()):
-                with self.assertRaises(SystemExit):
-                    parser.parse_args(
-                        [
-                            command,
-                            "--db",
-                            str(self.root / f"{command}.db"),
-                            "--plan",
-                            str(self.plan_path),
-                            selector,
-                            "0",
-                            "--enable-active",
-                        ]
-                    )
-
-    def test_run_cli_reuses_durable_stability_campaign(self):
+    def test_run_cli_reuses_durable_stability_experiment(self):
         document = stability_plan_document()
         document["duration_seconds"] = 0.08
         self.plan_path.write_text(json.dumps(document), encoding="utf-8")
@@ -684,7 +796,7 @@ class ResearchSupervisorTest(unittest.TestCase):
                     str(db_path),
                     "--plan",
                     str(self.plan_path),
-                    "--enable-active",
+                    "--execute",
                 ]
             )
             with mock.patch.object(
@@ -697,10 +809,11 @@ class ResearchSupervisorTest(unittest.TestCase):
         first = invoke()
         duplicate = invoke()
 
-        self.assertEqual(first["campaign_id"], "stability-experiment")
+        self.assertEqual(first["mode"], "execute")
+        self.assertEqual(first["experiment_id"], "stability-experiment")
         self.assertEqual(first["status"], "executed")
         self.assertEqual(first["window_status"], "complete")
-        self.assertTrue(first["campaign_complete"])
+        self.assertTrue(first["experiment_complete"])
         self.assertEqual(duplicate["status"], "complete")
         self.assertEqual(first["run_id"], duplicate["run_id"])
         self.assertEqual(len(provider.created), 2)
@@ -777,7 +890,7 @@ class ResearchSupervisorTest(unittest.TestCase):
             market="on-demand",
             gpu_count=4,
         )
-        trial_id = store.start_capacity_trial(run_id, cell, target_depth=32)
+        trial_id = store.start_capacity_trial(run_id, cell, target_gpu_depth=32)
         replica_id = store.start_replica(trial_id, stage_target=4, ordinal=0)
         store.mark_replica_created(
             replica_id,
@@ -833,7 +946,7 @@ class ResearchSupervisorTest(unittest.TestCase):
 
         self.assertAlmostEqual(store.provider_spend(run_id, "lambda"), 1.0)
         settlements = store.connection.execute(
-            "SELECT COUNT(*) FROM budget_ledger_v2 "
+            "SELECT COUNT(*) FROM budget_ledger "
             "WHERE run_id=? AND reference='pair-1' AND kind='settled_runtime_estimate'",
             (run_id,),
         ).fetchone()[0]
@@ -882,8 +995,8 @@ class ResearchSupervisorTest(unittest.TestCase):
 
         result = supervisor.stability_run(
             plan,
-            campaign_id="replacement-test",
-            enable_active=True,
+            experiment_id="replacement-test",
+            execute=True,
             now=dt.datetime(2026, 8, 11, tzinfo=dt.timezone.utc),
         )
         run_id = result["run_id"]
@@ -943,16 +1056,16 @@ class ResearchSupervisorTest(unittest.TestCase):
 
         result = PilotSupervisor(store, {"runpod": provider}).stability_run(
             plan,
-            campaign_id="pair-setup-test",
-            enable_active=True,
+            experiment_id="pair-setup-test",
+            execute=True,
             now=dt.datetime(2026, 8, 11, tzinfo=dt.timezone.utc),
         )
         run_id = result["run_id"]
 
         reasons = {
-            row["interruptible"]: row["censor_reason"]
+            row["interruptible"]: row["terminal_reason"]
             for row in store.connection.execute(
-                "SELECT interruptible, censor_reason FROM canary_leases WHERE run_id=?",
+                "SELECT interruptible, terminal_reason FROM canary_leases WHERE run_id=?",
                 (run_id,),
             ).fetchall()
         }
@@ -1003,8 +1116,8 @@ class ResearchSupervisorTest(unittest.TestCase):
             {"runpod": CleanupFailProvider()},
         ).stability_run(
             plan,
-            campaign_id="cleanup-guard-test",
-            enable_active=True,
+            experiment_id="cleanup-guard-test",
+            execute=True,
             now=dt.datetime(2026, 8, 11, tzinfo=dt.timezone.utc),
         )
         run_id = result["run_id"]
@@ -1048,23 +1161,23 @@ class ResearchSupervisorTest(unittest.TestCase):
             planned_end_at="2026-08-10T01:00:00+00:00",
         )
         store.mark_canary_created(lease_id, provider_resource_id="instance-1")
-        legacy_lease_id = store.start_canary(
+        unlinked_lease_id = store.start_canary(
             run_id,
             cell,
-            pair_id="legacy-pair-without-epoch",
+            pair_id="unlinked-pair-without-epoch",
             interruptible=False,
             planned_end_at="2026-08-10T01:00:00+00:00",
         )
         store.mark_canary_created(
-            legacy_lease_id,
-            provider_resource_id="instance-legacy",
+            unlinked_lease_id,
+            provider_resource_id="instance-unlinked",
         )
         capacity_epoch_id = store.schedule_capacity_epoch(
             run_id,
             cohort_name="recovery-depth",
             sequence=0,
             cell=cell,
-            target_depth=1,
+            target_gpu_depth=1,
             scheduled_offset_seconds=0,
             scheduled_at="2026-08-10T00:00:00+00:00",
             selection_probability=1,
@@ -1078,7 +1191,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         store.start_capacity_trial(
             run_id,
             cell,
-            target_depth=1,
+            target_gpu_depth=1,
             trial_id=capacity_epoch_id,
         )
         replica_id = store.start_replica(
@@ -1094,11 +1207,11 @@ class ResearchSupervisorTest(unittest.TestCase):
 
         self.assertEqual(remaining, [])
         self.assertEqual(
-            store.canary_row(lease_id)["censor_reason"],
+            store.canary_row(lease_id)["terminal_reason"],
             "right_censored_collector_loss",
         )
         self.assertEqual(
-            store.canary_row(legacy_lease_id)["censor_reason"],
+            store.canary_row(unlinked_lease_id)["terminal_reason"],
             "right_censored_collector_loss",
         )
         self.assertEqual(
@@ -1138,7 +1251,7 @@ class ResearchSupervisorTest(unittest.TestCase):
             cohort_name="operator-depth",
             sequence=0,
             cell=cell,
-            target_depth=1,
+            target_gpu_depth=1,
             scheduled_offset_seconds=0,
             scheduled_at="2026-08-10T00:00:00+00:00",
             selection_probability=1,
@@ -1152,7 +1265,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         store.start_capacity_trial(
             run_id,
             cell,
-            target_depth=1,
+            target_gpu_depth=1,
             trial_id=capacity_epoch_id,
         )
         replica_id = store.start_replica(
@@ -1201,7 +1314,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         )
         self.assertEqual(capacity_epoch["status"], "operator_stop")
         self.assertEqual(
-            store.canary_row(lease_id)["censor_reason"],
+            store.canary_row(lease_id)["terminal_reason"],
             "operator_cleanup",
         )
         self.assertEqual(
@@ -1209,11 +1322,11 @@ class ResearchSupervisorTest(unittest.TestCase):
             "operator_stop",
         )
 
-    def test_capacity_tick_reuses_campaign_and_executes_at_most_one_due_epoch(self):
+    def test_capacity_tick_reuses_experiment_and_executes_at_most_one_due_epoch(self):
         document = plan_document()
         document.update(
             {
-                "protocol_version": "5.0-capacity-tick",
+                "protocol_version": "5.0-capacity",
                 "duration_seconds": 180,
                 "max_active_gpus_per_provider": 1,
                 "provider_budgets_usd": {"runpod": 1.0},
@@ -1235,7 +1348,7 @@ class ResearchSupervisorTest(unittest.TestCase):
                                 "gpu_type": "A40",
                                 "resource_class": "secure",
                                 "market": "on-demand",
-                                "target_depth": 1,
+                                "target_gpu_depth": 1,
                                 "ready_timeout_seconds": 1,
                                 "max_lease_seconds": 60,
                                 "estimated_price_usd_hr": 0.3,
@@ -1249,7 +1362,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         )
         self.plan_path.write_text(json.dumps(document), encoding="utf-8")
         plan = load_plan(self.plan_path)
-        store = TraceStore(self.root / "capacity-tick.db")
+        store = TraceStore(self.root / "capacity.db")
         self.addCleanup(store.close)
         provider = ReadyCapacityProvider()
         supervisor = PilotSupervisor(store, {"runpod": provider})
@@ -1257,21 +1370,21 @@ class ResearchSupervisorTest(unittest.TestCase):
 
         first = supervisor.capacity_tick(
             plan,
-            campaign_id="capacity-60d",
-            enable_active=True,
+            experiment_id="capacity-60d",
+            execute=True,
             now=started_at,
         )
         duplicate = supervisor.capacity_tick(
             plan,
-            campaign_id="capacity-60d",
-            enable_active=True,
+            experiment_id="capacity-60d",
+            execute=True,
             now=started_at,
         )
 
         self.assertEqual(first["status"], "executed")
-        self.assertTrue(first["campaign_created"])
+        self.assertTrue(first["experiment_created"])
         self.assertEqual(duplicate["status"], "complete")
-        self.assertFalse(duplicate["campaign_created"])
+        self.assertFalse(duplicate["experiment_created"])
         self.assertEqual(first["run_id"], duplicate["run_id"])
         self.assertEqual(len(provider.created), 1)
         epochs = store.capacity_epoch_rows(first["run_id"])
@@ -1287,11 +1400,11 @@ class ResearchSupervisorTest(unittest.TestCase):
             1,
         )
 
-    def test_capacity_tick_rejects_campaign_plan_changes(self):
+    def test_capacity_tick_rejects_experiment_plan_changes(self):
         document = plan_document()
         document.update(
             {
-                "protocol_version": "5.0-capacity-tick",
+                "protocol_version": "5.0-capacity",
                 "duration_seconds": 180,
                 "capacity_cohorts": [
                     {
@@ -1310,7 +1423,7 @@ class ResearchSupervisorTest(unittest.TestCase):
                                 "region": "us-east-1",
                                 "resource_class": "on-demand",
                                 "market": "on-demand",
-                                "target_depth": 1,
+                                "target_gpu_depth": 1,
                                 "ready_timeout_seconds": 1,
                                 "max_lease_seconds": 60,
                                 "estimated_price_usd_hr": 0.6,
@@ -1322,14 +1435,14 @@ class ResearchSupervisorTest(unittest.TestCase):
             }
         )
         self.plan_path.write_text(json.dumps(document), encoding="utf-8")
-        store = TraceStore(self.root / "campaign-change.db")
+        store = TraceStore(self.root / "experiment-change.db")
         self.addCleanup(store.close)
         supervisor = PilotSupervisor(store, {"lambda": CountingCatalogProvider()})
         now = dt.datetime(2026, 8, 11, 0, 0, tzinfo=dt.timezone.utc)
         supervisor.capacity_tick(
             load_plan(self.plan_path),
-            campaign_id="fixed-campaign",
-            enable_active=True,
+            experiment_id="fixed-experiment",
+            execute=True,
             now=now,
         )
 
@@ -1338,8 +1451,8 @@ class ResearchSupervisorTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "different experiment"):
             supervisor.capacity_tick(
                 load_plan(self.plan_path),
-                campaign_id="fixed-campaign",
-                enable_active=True,
+                experiment_id="fixed-experiment",
+                execute=True,
                 now=now,
             )
 
@@ -1347,7 +1460,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         document = plan_document()
         document.update(
             {
-                "protocol_version": "5.0-capacity-tick",
+                "protocol_version": "5.0-capacity",
                 "duration_seconds": 300,
                 "max_active_gpus_per_provider": 1,
                 "provider_budgets_usd": {"runpod": 1.0},
@@ -1369,7 +1482,7 @@ class ResearchSupervisorTest(unittest.TestCase):
                                 "gpu_type": "A40",
                                 "resource_class": "secure",
                                 "market": "on-demand",
-                                "target_depth": 1,
+                                "target_gpu_depth": 1,
                                 "ready_timeout_seconds": 1,
                                 "max_lease_seconds": 60,
                                 "estimated_price_usd_hr": 0.3,
@@ -1390,14 +1503,14 @@ class ResearchSupervisorTest(unittest.TestCase):
 
         first = supervisor.capacity_tick(
             plan,
-            campaign_id="capacity-missed-slots",
-            enable_active=True,
+            experiment_id="capacity-missed-slots",
+            execute=True,
             now=started_at,
         )
         after_outage = supervisor.capacity_tick(
             plan,
-            campaign_id="capacity-missed-slots",
-            enable_active=True,
+            experiment_id="capacity-missed-slots",
+            execute=True,
             now=started_at + dt.timedelta(seconds=181),
         )
 
@@ -1435,8 +1548,8 @@ class ResearchSupervisorTest(unittest.TestCase):
 
         initialized = supervisor.stability_run(
             plan,
-            campaign_id="stability-missed",
-            enable_active=True,
+            experiment_id="stability-missed",
+            execute=True,
             now=started_at,
         )
         after_outage = PilotSupervisor(
@@ -1444,8 +1557,8 @@ class ResearchSupervisorTest(unittest.TestCase):
             {"lambda": FastFailingCanaryProvider()},
         ).stability_run(
             plan,
-            campaign_id="stability-missed",
-            enable_active=True,
+            experiment_id="stability-missed",
+            execute=True,
             now=started_at + dt.timedelta(seconds=0.26),
         )
 
@@ -1478,14 +1591,14 @@ class ResearchSupervisorTest(unittest.TestCase):
 
         initialized = PilotSupervisor(store, {"lambda": provider}).stability_run(
             plan,
-            campaign_id="stability-too-late",
-            enable_active=True,
+            experiment_id="stability-too-late",
+            execute=True,
             now=now,
         )
         late = PilotSupervisor(store, {"lambda": provider}).stability_run(
             plan,
-            campaign_id="stability-too-late",
-            enable_active=True,
+            experiment_id="stability-too-late",
+            execute=True,
             now=now + dt.timedelta(seconds=0.28),
         )
 
@@ -1493,7 +1606,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         self.assertEqual(initialized["status"], "idle")
         self.assertEqual(late["status"], "missed")
         self.assertEqual(late["window_status"], "missed")
-        self.assertTrue(late["campaign_complete"])
+        self.assertTrue(late["experiment_complete"])
         self.assertEqual(windows[0]["stop_reason"], "external_scheduler_late")
         self.assertEqual(store.canary_epoch_rows(initialized["run_id"]), [])
         self.assertEqual(provider.created, [])
@@ -1509,14 +1622,14 @@ class ResearchSupervisorTest(unittest.TestCase):
 
         result = PilotSupervisor(store, {"lambda": provider}).stability_run(
             plan,
-            campaign_id="stability-execution",
-            enable_active=True,
+            experiment_id="stability-execution",
+            execute=True,
             now=now,
         )
         duplicate = PilotSupervisor(store, {"lambda": provider}).stability_run(
             plan,
-            campaign_id="stability-execution",
-            enable_active=True,
+            experiment_id="stability-execution",
+            execute=True,
             now=now,
         )
 
@@ -1524,7 +1637,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         linked = store.stability_window_epoch_rows(windows[0]["id"])
         self.assertEqual(result["status"], "executed")
         self.assertEqual(result["window_status"], "complete")
-        self.assertTrue(result["campaign_complete"])
+        self.assertTrue(result["experiment_complete"])
         self.assertEqual(duplicate["status"], "complete")
         self.assertEqual([row["status"] for row in windows], ["complete"])
         self.assertEqual(len(linked), 1)
@@ -1544,15 +1657,15 @@ class ResearchSupervisorTest(unittest.TestCase):
             {"lambda": CleanupFailProvider()},
         ).stability_run(
             plan,
-            campaign_id="stability-cleanup-failure",
-            enable_active=True,
+            experiment_id="stability-cleanup-failure",
+            execute=True,
             now=dt.datetime(2026, 8, 11, tzinfo=dt.timezone.utc),
         )
 
         self.assertEqual(result["window_status"], "cleanup_incomplete")
-        self.assertTrue(result["campaign_complete"])
+        self.assertTrue(result["experiment_complete"])
         self.assertEqual(
-            store.stability_campaign_row("stability-cleanup-failure")["status"],
+            store.stability_experiment_row("stability-cleanup-failure")["status"],
             "cleanup_incomplete",
         )
         self.assertEqual(
@@ -1580,8 +1693,8 @@ class ResearchSupervisorTest(unittest.TestCase):
         )
         initialized = supervisor.stability_run(
             plan,
-            campaign_id="recoverable-stability",
-            enable_active=True,
+            experiment_id="recoverable-stability",
+            execute=True,
             now=now,
         )
         claim_status, claimed = store.claim_due_stability_window(
@@ -1604,7 +1717,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         )
         self.assertEqual(store.run_row(initialized["run_id"])["status"], "running")
         self.assertEqual(
-            store.stability_campaign_row("recoverable-stability")["status"],
+            store.stability_experiment_row("recoverable-stability")["status"],
             "running",
         )
 

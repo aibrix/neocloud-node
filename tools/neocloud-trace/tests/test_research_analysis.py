@@ -56,7 +56,6 @@ class SurvivalExportTest(unittest.TestCase):
             ExperimentConfig(
                 protocol_version="3.0-survival-cohort",
                 host_id="host",
-                vantage_id="vantage",
                 provider_budgets={"runpod": 5.0},
                 total_budget_usd=5.0,
                 max_active_gpus_per_provider=2,
@@ -190,7 +189,7 @@ class SurvivalExportTest(unittest.TestCase):
             cohort_name="runpod-depth",
             sequence=0,
             cell=cell,
-            target_depth=1,
+            target_gpu_depth=1,
             scheduled_offset_seconds=300,
             scheduled_at="2026-08-10T00:05:00+00:00",
             selection_probability=1,
@@ -204,7 +203,7 @@ class SurvivalExportTest(unittest.TestCase):
         self.store.start_capacity_trial(
             self.run_id,
             cell,
-            target_depth=1,
+            target_gpu_depth=1,
             trial_id=epoch_id,
         )
         replica_id = self.store.start_replica(epoch_id, stage_target=1, ordinal=0)
@@ -233,7 +232,7 @@ class SurvivalExportTest(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["cohort_name"], "runpod-depth")
         self.assertEqual(rows[0]["stock_status"], "High")
-        self.assertEqual(rows[0]["application_ready_depth"], 1)
+        self.assertEqual(rows[0]["application_ready_instance_count"], 1)
         self.assertEqual(rows[0]["depth_success"], 1)
         self.assertEqual(rows[0]["started_lag_seconds"], 2.5)
 
@@ -258,7 +257,7 @@ class SurvivalExportTest(unittest.TestCase):
         trial_id = self.store.start_capacity_trial(
             self.run_id,
             cell,
-            target_depth=32,
+            target_gpu_depth=32,
         )
         replica_id = self.store.start_replica(
             trial_id,
@@ -306,17 +305,16 @@ class SurvivalExportTest(unittest.TestCase):
 
     def test_export_includes_missed_windows_without_canary_leases(self):
         start = dt.datetime(2026, 8, 10, tzinfo=UTC)
-        run_id, _created = self.store.ensure_stability_campaign(
+        run_id, _created = self.store.ensure_stability_experiment(
             ExperimentConfig(
                 protocol_version="4.0-stability",
                 host_id="host",
-                vantage_id="vantage",
                 provider_budgets={"runpod": 5.0},
                 total_budget_usd=5.0,
                 max_active_gpus_per_provider=2,
             ),
             {"mode": "stability"},
-            campaign_id="stability-analysis",
+            experiment_id="stability-analysis",
             cohort_name="runpod-survival",
             started_at=start.isoformat(),
             windows=[
@@ -347,11 +345,13 @@ class SurvivalExportTest(unittest.TestCase):
 
         self.assertEqual(claim_status, "idle")
         self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["experiment_id"], "stability-analysis")
         self.assertEqual(rows[0]["window_status"], "missed")
         self.assertEqual(rows[0]["canary_epoch_count"], 0)
         self.assertEqual(rows[0]["lease_count"], 0)
         self.assertEqual(rows[1]["window_status"], "scheduled")
         self.assertEqual(count, 2)
+        self.assertEqual(exported[0]["experiment_id"], "stability-analysis")
         self.assertEqual(exported[0]["window_stop_reason"], "external_scheduler_late")
 
 

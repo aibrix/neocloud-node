@@ -54,8 +54,7 @@ Run a real command in the same way:
 ```bash
 python3 -m neocloud_trace init \
   --plan ../plans/capacity-epoch.json \
-  --db /tmp/neocloud-trace-dev.db \
-  --vantage-id local-development
+  --db /tmp/neocloud-trace-dev.db
 ```
 
 The normal installed form remains preferred for user documentation:
@@ -63,8 +62,7 @@ The normal installed form remains preferred for user documentation:
 ```bash
 neocloud-trace init \
   --plan tools/neocloud-trace/plans/capacity-epoch.json \
-  --db /tmp/neocloud-trace-dev.db \
-  --vantage-id local-development
+  --db /tmp/neocloud-trace-dev.db
 ```
 
 All command-specific options come after the command name.
@@ -124,10 +122,10 @@ The public parser is built in `src/neocloud_trace/cli.py`.
 When adding or changing a command:
 
 1. place operational options on the command parser, not on the top-level parser;
-2. require `--enable-active` for every path that can create or delete a provider
-   resource;
-3. load plan metadata through the shared host/vantage resolution path for
-   plan-based commands;
+2. default every path that can create, delete, or advance provider resources to
+   a useful dry-run, and require `--execute` for mutations;
+3. load plan metadata through the shared host resolution path for plan-based
+   commands;
 4. keep stdout JSON stable and machine-readable;
 5. add parser/help and execution tests;
 6. update `README.md` when user-visible behavior changes.
@@ -149,6 +147,10 @@ The schema is defined in `src/neocloud_trace/storage/schema.sql`; persistence
 operations are implemented in `storage/store.py`. Opening a database runs the
 idempotent schema statements and enables WAL mode.
 
+Active experiment identity, workflow, cohort, configuration, and lifecycle are
+stored together in `experiment_runs`. Database schemas are not migrated; use a
+fresh database after an incompatible schema change.
+
 For schema or exporter changes:
 
 1. state the row grain and primary linkage before adding columns;
@@ -156,16 +158,16 @@ For schema or exporter changes:
 3. keep provider-ready and application-ready fields separate;
 4. keep instance counts, GPU depth, estimates, and provider bills explicit;
 5. update fixture tests and user-facing documentation;
-6. verify old databases or provide a deliberate migration path.
+6. document incompatible schema changes and update fresh-database fixtures.
 
 Stability has two distinct row grains. `stability_windows` is the scheduled
 outer sampling unit and must include missed windows. `canary_epochs` is an
 actually selected pair inside a window; `stability_window_epochs` provides the
 explicit link. Do not derive the outer denominator from canary rows.
 
-Campaign tests should cover schedule materialization, idempotent claims from two
-SQLite connections, missed slots, recovery with future work preserved, cleanup
-failure, and exports containing zero-observation scheduled rows.
+Experiment tests should cover schedule materialization, idempotent claims from
+two SQLite connections, missed slots, recovery with future work preserved,
+cleanup failure, and exports containing zero-observation scheduled rows.
 
 Local databases, `-wal`/`-shm` files, exports, logs, and temporary results are
 ignored by Git. Use a temporary or `data/neocloud-trace/` path for development
@@ -178,18 +180,18 @@ Start with commands that cannot create resources:
 ```bash
 neocloud-trace init \
   --plan /path/to/plan.json \
-  --db /tmp/neocloud-trace-dev.db \
-  --vantage-id local-development
+  --db /tmp/neocloud-trace-dev.db
 
-neocloud-trace collect \
+neocloud-trace catalog \
   --db /tmp/neocloud-trace-dev.db \
   --provider runpod \
   --once
 ```
 
 Do not put real credentials in plans, fixtures, shell history examples, or test
-output. Active manual tests require an explicit reviewed plan, budget, cleanup
-procedure, and `--enable-active`.
+output. Exercise the default dry-run before an active manual test. Active manual
+tests require an explicit reviewed plan, budget, cleanup procedure, and
+`--execute`; missing credentials are not a substitute for this guard.
 
 After an active test, always inspect ownership:
 

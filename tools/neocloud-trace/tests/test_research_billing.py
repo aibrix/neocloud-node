@@ -21,7 +21,6 @@ class BillingReconciliationTest(unittest.TestCase):
             ExperimentConfig(
                 protocol_version="3.0-billing",
                 host_id="host",
-                vantage_id="vantage",
                 provider_budgets={"runpod": 5},
                 total_budget_usd=5,
                 max_active_gpus_per_provider=1,
@@ -42,7 +41,7 @@ class BillingReconciliationTest(unittest.TestCase):
             resource_class="secure",
             market="on-demand",
         )
-        trial_id = self.store.start_capacity_trial(self.run_id, cell, target_depth=1)
+        trial_id = self.store.start_capacity_trial(self.run_id, cell, target_gpu_depth=1)
         replica_id = self.store.start_replica(trial_id, stage_target=1, ordinal=0)
         self.store.mark_replica_created(replica_id, "pod-1", 0.3)
         self.store.connection.execute(

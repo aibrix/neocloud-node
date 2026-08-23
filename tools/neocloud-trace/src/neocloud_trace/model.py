@@ -17,8 +17,6 @@ class FailureClass(str, enum.Enum):
     UNKNOWN = "unknown"
 
 
-# Values are persisted in canary_leases.censor_reason. Renaming the Python type
-# does not change this serialization contract.
 class TerminalReason(str, enum.Enum):
     PROVIDER_INTERRUPTION_CANDIDATE = "provider_interruption_candidate"
     PROVIDER_PRE_READY_FAILURE = "provider_pre_ready_failure"
@@ -87,7 +85,6 @@ def capacity_stages(
 class ExperimentConfig:
     protocol_version: str
     host_id: str
-    vantage_id: str
     provider_budgets: dict[str, float]
     total_budget_usd: float
     max_active_gpus_per_provider: int = 8
@@ -97,8 +94,6 @@ class ExperimentConfig:
             raise ValueError("protocol_version is required")
         if not self.host_id.strip():
             raise ValueError("host_id is required")
-        if not self.vantage_id.strip():
-            raise ValueError("vantage_id is required")
         if self.total_budget_usd <= 0:
             raise ValueError("total_budget_usd must be positive")
         if self.max_active_gpus_per_provider <= 0:
@@ -116,10 +111,9 @@ class ExperimentConfig:
 
 
 @dataclasses.dataclass(frozen=True)
-class CollectionConfig:
+class CatalogConfig:
     protocol_version: str
     host_id: str
-    vantage_id: str
     providers: tuple[str, ...]
     gpu_counts: tuple[int, ...] = (1, 2, 4, 8)
     catalog_interval_seconds: float = 300.0
@@ -132,14 +126,14 @@ class CollectionConfig:
             raise ValueError("protocol_version is required")
         if not self.host_id.strip():
             raise ValueError("host_id is required")
-        if not self.vantage_id.strip():
-            raise ValueError("vantage_id is required")
         if not self.providers or any(not provider.strip() for provider in self.providers):
             raise ValueError("providers must contain at least one provider")
         if len(self.providers) != len(set(self.providers)):
             raise ValueError("providers must be unique")
         if not self.gpu_counts or any(count <= 0 for count in self.gpu_counts):
             raise ValueError("gpu_counts must contain positive values")
+        if len(self.gpu_counts) != len(set(self.gpu_counts)):
+            raise ValueError("gpu_counts must be unique")
         if self.catalog_interval_seconds <= 0:
             raise ValueError("catalog_interval_seconds must be positive")
         if self.host_interval_seconds <= 0:

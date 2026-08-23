@@ -1,4 +1,4 @@
--- NeoCloud research trace V3 analysis queries.
+-- NeoCloud research trace analysis queries.
 -- Replace :run_id with the experiment_runs.id under analysis.
 
 -- 1. Run metadata and conservative cost envelope.
@@ -6,7 +6,6 @@ SELECT
   r.id,
   r.protocol_version,
   r.host_id,
-  r.vantage_id,
   r.status,
   r.started_at,
   r.finished_at,
@@ -19,7 +18,7 @@ SELECT
   COALESCE(SUM(b.amount_usd), 0) AS current_budget_exposure_usd,
   SUM(b.kind = 'settled_runtime_estimate') AS settled_references
 FROM experiment_runs r
-LEFT JOIN budget_ledger_v2 b ON b.run_id = r.id
+LEFT JOIN budget_ledger b ON b.run_id = r.id
 WHERE r.id = :run_id
 GROUP BY r.id;
 
@@ -52,7 +51,7 @@ SELECT
   COUNT(*) AS calls,
   ROUND(AVG(latency_ms), 1) AS mean_latency_ms,
   MAX(latency_ms) AS maximum_latency_ms
-FROM provider_api_observations_v2
+FROM provider_api_observations
 WHERE run_id = :run_id
 GROUP BY provider, operation, status, COALESCE(failure_class, 'none')
 ORDER BY provider, operation, calls DESC;
@@ -72,7 +71,7 @@ SELECT
   MAX(quoted_price_usd_hr) AS maximum_on_demand_price,
   MIN(spot_price_usd_hr) AS minimum_spot_price,
   MAX(spot_price_usd_hr) AS maximum_spot_price
-FROM catalog_quotes_v2
+FROM catalog_quotes
 WHERE run_id = :run_id
 GROUP BY provider, sku, gpu_count, location, resource_class, market
 ORDER BY provider, sku, gpu_count, location, resource_class;
@@ -91,8 +90,8 @@ SELECT
     CAST(json_extract(e.details_json, '$.gpu_count_per_instance') AS INTEGER),
     1
   ) AS gpu_count_per_instance,
-  e.target_depth AS target_gpu_depth,
-  e.target_depth / COALESCE(
+  e.target_gpu_depth AS target_gpu_depth,
+  e.target_gpu_depth / COALESCE(
     t.gpu_count,
     CAST(json_extract(e.details_json, '$.gpu_count_per_instance') AS INTEGER),
     1
@@ -105,16 +104,16 @@ SELECT
   e.selection_seed,
   e.status AS epoch_status,
   e.stop_reason,
-  t.requested_depth AS requested_instance_count,
-  t.accepted_depth AS accepted_instance_count,
-  t.provider_ready_depth AS provider_ready_instance_count,
-  t.application_ready_depth AS application_ready_instance_count,
-  t.cleaned_depth AS cleaned_instance_count,
-  t.requested_depth * t.gpu_count AS requested_gpu_depth,
-  t.accepted_depth * t.gpu_count AS accepted_gpu_depth,
-  t.provider_ready_depth * t.gpu_count AS provider_ready_gpu_depth,
-  t.application_ready_depth * t.gpu_count AS application_ready_gpu_depth,
-  t.cleaned_depth * t.gpu_count AS cleaned_gpu_depth,
+  t.requested_instance_count AS requested_instance_count,
+  t.accepted_instance_count AS accepted_instance_count,
+  t.provider_ready_instance_count AS provider_ready_instance_count,
+  t.application_ready_instance_count AS application_ready_instance_count,
+  t.cleaned_instance_count AS cleaned_instance_count,
+  t.requested_instance_count * t.gpu_count AS requested_gpu_depth,
+  t.accepted_instance_count * t.gpu_count AS accepted_gpu_depth,
+  t.provider_ready_instance_count * t.gpu_count AS provider_ready_gpu_depth,
+  t.application_ready_instance_count * t.gpu_count AS application_ready_gpu_depth,
+  t.cleaned_instance_count * t.gpu_count AS cleaned_gpu_depth,
   t.first_failed_stage AS first_failed_gpu_stage,
   t.failure_class,
   q.observed_at AS quote_observed_at,
@@ -123,7 +122,7 @@ SELECT
   q.quoted_price_usd_hr
 FROM capacity_epochs e
 LEFT JOIN capacity_trials t ON t.id = e.trial_id
-LEFT JOIN catalog_quotes_v2 q ON q.id = t.catalog_quote_id
+LEFT JOIN catalog_quotes q ON q.id = t.catalog_quote_id
 WHERE e.run_id = :run_id
 ORDER BY e.cohort_name, e.sequence;
 
@@ -140,25 +139,25 @@ SELECT
   q.available AS advertised_available,
   q.quoted_price_usd_hr,
   t.gpu_count AS gpu_count_per_instance,
-  t.target_depth AS target_gpu_depth,
-  t.target_depth / t.gpu_count AS target_instance_count,
-  t.requested_depth AS requested_instance_count,
-  t.accepted_depth AS accepted_instance_count,
-  t.provider_ready_depth AS provider_ready_instance_count,
-  t.application_ready_depth AS application_ready_instance_count,
-  t.cleaned_depth AS cleaned_instance_count,
-  t.requested_depth * t.gpu_count AS requested_gpu_depth,
-  t.accepted_depth * t.gpu_count AS accepted_gpu_depth,
-  t.provider_ready_depth * t.gpu_count AS provider_ready_gpu_depth,
-  t.application_ready_depth * t.gpu_count AS application_ready_gpu_depth,
-  t.cleaned_depth * t.gpu_count AS cleaned_gpu_depth,
+  t.target_gpu_depth AS target_gpu_depth,
+  t.target_gpu_depth / t.gpu_count AS target_instance_count,
+  t.requested_instance_count AS requested_instance_count,
+  t.accepted_instance_count AS accepted_instance_count,
+  t.provider_ready_instance_count AS provider_ready_instance_count,
+  t.application_ready_instance_count AS application_ready_instance_count,
+  t.cleaned_instance_count AS cleaned_instance_count,
+  t.requested_instance_count * t.gpu_count AS requested_gpu_depth,
+  t.accepted_instance_count * t.gpu_count AS accepted_gpu_depth,
+  t.provider_ready_instance_count * t.gpu_count AS provider_ready_gpu_depth,
+  t.application_ready_instance_count * t.gpu_count AS application_ready_gpu_depth,
+  t.cleaned_instance_count * t.gpu_count AS cleaned_gpu_depth,
   t.first_failed_stage AS first_failed_gpu_stage,
   t.failure_class,
   t.status,
   (SELECT COUNT(*) FROM capacity_replicas r
     WHERE r.trial_id = t.id AND r.retry_of IS NOT NULL) AS retry_attempts
 FROM capacity_trials t
-LEFT JOIN catalog_quotes_v2 q ON q.id = t.catalog_quote_id
+LEFT JOIN catalog_quotes q ON q.id = t.catalog_quote_id
 WHERE t.run_id = :run_id
 ORDER BY t.started_at;
 
@@ -236,8 +235,8 @@ SELECT
   l.interruptible,
   l.machine_id,
   l.datacenter,
-  l.censor_reason,
-  l.censor_reason AS analysis_outcome,
+  l.terminal_reason,
+  l.terminal_reason AS analysis_outcome,
   (SELECT COUNT(*) FROM canary_leases p WHERE p.pair_id=l.pair_id) AS group_size,
   ROUND((julianday(COALESCE(l.event_at, l.cleaned_at)) - julianday(l.created_at)) * 86400, 1)
     AS observed_lifetime_s,
@@ -310,7 +309,7 @@ WHERE l.run_id = :run_id
 -- 13. Durable Stability-window coverage. Keep missed windows with zero linked
 -- epochs or leases in the denominator.
 SELECT
-  c.campaign_id,
+  e.experiment_id,
   w.cohort_name,
   w.sequence AS window_sequence,
   w.scheduled_at,
@@ -328,7 +327,7 @@ SELECT
   SUM(l.interruptible = 0) AS matched_control_leases,
   SUM(l.application_ready_at IS NOT NULL) AS application_ready_leases
 FROM stability_windows w
-JOIN stability_campaigns c ON c.run_id = w.run_id
+JOIN experiment_runs e ON e.id = w.run_id
 LEFT JOIN stability_window_epochs link ON link.window_id = w.id
 LEFT JOIN canary_leases l ON l.pair_id = link.epoch_id
 WHERE w.run_id = :run_id

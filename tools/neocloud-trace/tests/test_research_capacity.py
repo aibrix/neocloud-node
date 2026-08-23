@@ -68,7 +68,6 @@ class CapacityRunnerTest(unittest.TestCase):
             ExperimentConfig(
                 protocol_version="2.0",
                 host_id="host",
-                vantage_id="vantage",
                 provider_budgets={"runpod": 5.0},
                 total_budget_usd=5.0,
             ),
@@ -138,7 +137,7 @@ class CapacityRunnerTest(unittest.TestCase):
             sleep=lambda _: None,
         )
 
-        result = runner.run_trial(self.run_id, cell, target_depth=32)
+        result = runner.run_trial(self.run_id, cell, target_gpu_depth=32)
 
         self.assertEqual([len(call[1]) for call in provider.create_calls], [1, 1, 2, 4])
         self.assertEqual(result.gpu_count_per_instance, 4)
@@ -191,12 +190,12 @@ class CapacityRunnerTest(unittest.TestCase):
             sleep=lambda _: None,
         )
 
-        result = runner.run_trial(self.run_id, self.cell, target_depth=1)
+        result = runner.run_trial(self.run_id, self.cell, target_gpu_depth=1)
 
         self.assertEqual(len(provider.create_calls), 1)
         self.assertEqual(len(provider.lookups), 1)
-        self.assertEqual(result.accepted_depth, 1)
-        self.assertEqual(result.cleaned_depth, 1)
+        self.assertEqual(result.accepted_instance_count, 1)
+        self.assertEqual(result.cleaned_instance_count, 1)
         self.assertEqual(result.status, "complete")
 
     def test_unrecovered_timeout_is_transport_censored(self):
@@ -213,7 +212,7 @@ class CapacityRunnerTest(unittest.TestCase):
             sleep=lambda _: None,
         )
 
-        result = runner.run_trial(self.run_id, self.cell, target_depth=1)
+        result = runner.run_trial(self.run_id, self.cell, target_gpu_depth=1)
 
         self.assertEqual(result.first_failed_stage, 1)
         self.assertEqual(result.failure_class, FailureClass.TIMEOUT)
@@ -265,14 +264,14 @@ class CapacityRunnerTest(unittest.TestCase):
             sleep=lambda _: None,
         )
 
-        result = runner.run_trial(self.run_id, self.cell, target_depth=8)
+        result = runner.run_trial(self.run_id, self.cell, target_gpu_depth=8)
 
         self.assertEqual([len(call[1]) for call in provider.create_calls], [1, 1, 2, 4])
-        self.assertEqual(result.requested_depth, 8)
-        self.assertEqual(result.accepted_depth, 6)
-        self.assertEqual(result.provider_ready_depth, 6)
-        self.assertEqual(result.application_ready_depth, 6)
-        self.assertEqual(result.cleaned_depth, 6)
+        self.assertEqual(result.requested_instance_count, 8)
+        self.assertEqual(result.accepted_instance_count, 6)
+        self.assertEqual(result.provider_ready_instance_count, 6)
+        self.assertEqual(result.application_ready_instance_count, 6)
+        self.assertEqual(result.cleaned_instance_count, 6)
         self.assertEqual(result.first_failed_stage, 8)
         self.assertEqual(result.failure_class, FailureClass.CAPACITY)
         trial = self.store.capacity_trial_row(result.trial_id)
@@ -301,10 +300,10 @@ class CapacityRunnerTest(unittest.TestCase):
             sleep=lambda _: None,
         )
 
-        result = runner.run_trial(self.run_id, self.cell, target_depth=1)
+        result = runner.run_trial(self.run_id, self.cell, target_gpu_depth=1)
 
         self.assertEqual(result.status, "cleanup_incomplete")
-        self.assertEqual(result.cleaned_depth, 0)
+        self.assertEqual(result.cleaned_instance_count, 0)
         self.assertEqual(len(self.store.owned_resources(self.run_id)), 1)
         cleanup = self.store.connection.execute(
             "SELECT action, status, failure_class FROM cleanup_events ORDER BY rowid"
@@ -329,11 +328,11 @@ class CapacityRunnerTest(unittest.TestCase):
             sleep=lambda _: None,
         )
 
-        result = runner.run_trial(self.run_id, self.cell, target_depth=8)
+        result = runner.run_trial(self.run_id, self.cell, target_gpu_depth=8)
 
         self.assertEqual([len(call[1]) for call in provider.create_calls], [1, 1])
-        self.assertEqual(result.requested_depth, 2)
-        self.assertEqual(result.accepted_depth, 1)
+        self.assertEqual(result.requested_instance_count, 2)
+        self.assertEqual(result.accepted_instance_count, 1)
         self.assertEqual(result.first_failed_stage, 2)
         self.assertEqual(result.failure_class, FailureClass.QUOTA)
 
@@ -353,10 +352,10 @@ class CapacityRunnerTest(unittest.TestCase):
             max_transient_retries=1,
         )
 
-        result = runner.run_trial(self.run_id, self.cell, target_depth=1)
+        result = runner.run_trial(self.run_id, self.cell, target_gpu_depth=1)
 
         self.assertEqual(len(provider.create_calls), 2)
-        self.assertEqual(result.accepted_depth, 1)
+        self.assertEqual(result.accepted_instance_count, 1)
         replica_rows = self.store.connection.execute(
             "SELECT status, retry_of FROM capacity_replicas ORDER BY requested_at, rowid"
         ).fetchall()
@@ -379,13 +378,13 @@ class CapacityRunnerTest(unittest.TestCase):
             sleep=lambda _: None,
         )
 
-        result = runner.run_trial(self.run_id, self.cell, target_depth=1)
+        result = runner.run_trial(self.run_id, self.cell, target_gpu_depth=1)
 
         self.assertEqual(result.status, "readiness_failure")
         self.assertEqual(result.first_failed_stage, 1)
         self.assertEqual(result.failure_class, FailureClass.REMOTE_NOT_FOUND)
-        self.assertEqual(result.provider_ready_depth, 0)
-        self.assertEqual(result.application_ready_depth, 0)
+        self.assertEqual(result.provider_ready_instance_count, 0)
+        self.assertEqual(result.application_ready_instance_count, 0)
 
     def test_records_one_api_observation_per_real_provider_call(self):
         shared_call = ProviderAPICall(
@@ -414,10 +413,10 @@ class CapacityRunnerTest(unittest.TestCase):
             sleep=lambda _: None,
         )
 
-        runner.run_trial(self.run_id, self.cell, target_depth=4)
+        runner.run_trial(self.run_id, self.cell, target_gpu_depth=4)
 
         rows = self.store.connection.execute(
-            "SELECT operation, status, latency_ms FROM provider_api_observations_v2 "
+            "SELECT operation, status, latency_ms FROM provider_api_observations "
             "WHERE operation='launch_instances'"
         ).fetchall()
         self.assertEqual(len(rows), 1)

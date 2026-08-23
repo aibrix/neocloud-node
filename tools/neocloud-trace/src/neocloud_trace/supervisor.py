@@ -25,9 +25,25 @@ from .storage import TraceStore
 
 
 UTC = dt.timezone.utc
+PLAN_FIELDS = {
+    "protocol_version",
+    "host_id",
+    "duration_seconds",
+    "passive_interval_seconds",
+    "host_interval_seconds",
+    "canary_interval_seconds",
+    "max_active_gpus_per_provider",
+    "provider_budgets_usd",
+    "total_budget_usd",
+    "capacity_cohorts",
+    "canary_cohorts",
+    "stability_schedule",
+    "network_control_url",
+    "gpu_counts",
+}
 
 
-class ActiveRunDisabled(RuntimeError):
+class ExecutionDisabled(RuntimeError):
     pass
 
 
@@ -38,7 +54,7 @@ class BudgetExceeded(RuntimeError):
 @dataclasses.dataclass(frozen=True)
 class CapacityTrialPlan:
     cell: TrialCell
-    target_depth: int
+    target_gpu_depth: int
     ready_timeout_seconds: float
     max_lease_seconds: float
     estimated_price_usd_hr: float
@@ -48,7 +64,7 @@ class CapacityTrialPlan:
     settlement_safety_multiplier: float = 1.0
 
     def __post_init__(self) -> None:
-        validate_capacity_target(self.target_depth, self.cell.gpu_count)
+        validate_capacity_target(self.target_gpu_depth, self.cell.gpu_count)
         if self.ready_timeout_seconds <= 0 or self.max_lease_seconds <= 0:
             raise ValueError("capacity timeouts must be positive")
         if self.max_lease_seconds < self.ready_timeout_seconds:
@@ -68,7 +84,7 @@ class CapacityTrialPlan:
     def budget_upper_bound_usd(self) -> float:
         billable_seconds = max(self.max_lease_seconds, self.billing_minimum_seconds)
         return (
-            self.target_depth
+            self.target_gpu_depth
             // self.cell.gpu_count
             * self.estimated_price_usd_hr
             * billable_seconds
@@ -78,7 +94,7 @@ class CapacityTrialPlan:
 
     @property
     def target_instance_count(self) -> int:
-        return self.target_depth // self.cell.gpu_count
+        return self.target_gpu_depth // self.cell.gpu_count
 
 
 @dataclasses.dataclass(frozen=True)
@@ -213,7 +229,7 @@ class CanaryTrialResult:
     pair_id: str
     cleanup_verified: bool
     estimated_cost_usd: float | None
-    censor_reasons: tuple[str, ...]
+    terminal_reasons: tuple[str, ...]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -256,7 +272,7 @@ class PilotPlan:
         for cohort in self.capacity_cohorts:
             for trial in cohort.cells:
                 provider = trial.cell.provider
-                if trial.target_depth > self.experiment.max_active_gpus_per_provider:
+                if trial.target_gpu_depth > self.experiment.max_active_gpus_per_provider:
                     raise ValueError("capacity cohort target exceeds provider GPU cap")
                 if provider not in self.experiment.provider_budgets:
                     raise ValueError(f"missing provider budget for {provider}")
@@ -342,22 +358,11 @@ def _canary_trial_plan(
 
 def _capacity_trial_plan(document: Mapping[str, Any]) -> CapacityTrialPlan:
     target_gpu_depth = document.get("target_gpu_depth")
-    legacy_target_depth = document.get("target_depth")
     if target_gpu_depth is None:
-        if legacy_target_depth is None:
-            raise ValueError("capacity cell requires target_gpu_depth")
-        if int(document.get("gpu_count", 1)) != 1:
-            raise ValueError(
-                "multi-GPU capacity cells must use target_gpu_depth, not target_depth"
-            )
-        target_gpu_depth = legacy_target_depth
-    elif legacy_target_depth is not None and int(legacy_target_depth) != int(
-        target_gpu_depth
-    ):
-        raise ValueError("target_gpu_depth and target_depth disagree")
+        raise ValueError("capacity cell requires target_gpu_depth")
     return CapacityTrialPlan(
         cell=_trial_cell(document),
-        target_depth=int(target_gpu_depth),
+        target_gpu_depth=int(target_gpu_depth),
         ready_timeout_seconds=float(document["ready_timeout_seconds"]),
         max_lease_seconds=float(document["max_lease_seconds"]),
         estimated_price_usd_hr=float(document["estimated_price_usd_hr"]),
@@ -374,20 +379,13 @@ def load_plan(
     path: str | pathlib.Path,
     *,
     default_host_id: str | None = None,
-    default_vantage_id: str | None = None,
 ) -> PilotPlan:
     raw = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         raise ValueError("pilot plan must be a JSON object")
-    removed_sections = (
-        "capacity_trials",
-        "canary_trials",
-        "completion_window_cohorts",
-        "control_cohorts",
-    )
-    present = [section for section in removed_sections if raw.get(section)]
-    if present:
-        raise ValueError("unsupported active plan sections: " + ", ".join(present))
+    unsupported_fields = sorted(raw.keys() - PLAN_FIELDS)
+    if unsupported_fields:
+        raise ValueError("unsupported plan fields: " + ", ".join(unsupported_fields))
     provider_budgets = {
         str(provider): float(amount)
         for provider, amount in (raw.get("provider_budgets_usd") or {}).items()
@@ -395,7 +393,6 @@ def load_plan(
     experiment = ExperimentConfig(
         protocol_version=str(raw.get("protocol_version") or ""),
         host_id=str(raw.get("host_id") or default_host_id or ""),
-        vantage_id=str(raw.get("vantage_id") or default_vantage_id or ""),
         provider_budgets=provider_budgets,
         total_budget_usd=float(raw.get("total_budget_usd") or 0),
         max_active_gpus_per_provider=int(raw.get("max_active_gpus_per_provider") or 0),
@@ -598,12 +595,12 @@ class PilotSupervisor:
         self,
         plan: PilotPlan,
         *,
-        campaign_id: str,
-        enable_active: bool = False,
+        experiment_id: str,
+        execute: bool = False,
         now: dt.datetime | None = None,
     ) -> dict[str, Any]:
-        if not enable_active:
-            raise ActiveRunDisabled("capacity-tick requires --enable-active")
+        if not execute:
+            raise ExecutionDisabled("capacity tick requires execute=True")
         try:
             cohort = plan.capacity_cohorts[0]
         except IndexError as error:
@@ -614,7 +611,7 @@ class PilotSupervisor:
             raise ValueError(f"missing provider clients: {', '.join(missing)}")
         current = now or dt.datetime.now(UTC)
         if current.tzinfo is None:
-            raise ValueError("capacity-tick now must be timezone-aware")
+            raise ValueError("capacity tick now must be timezone-aware")
         current = current.astimezone(UTC)
 
         rng = random.Random(cohort.selection_seed)
@@ -636,7 +633,7 @@ class PilotSupervisor:
                 {
                     "sequence": sequence,
                     "cell": trial.cell,
-                    "target_depth": trial.target_depth,
+                    "target_gpu_depth": trial.target_gpu_depth,
                     "scheduled_offset_seconds": offset,
                     "scheduled_at": (
                         current + dt.timedelta(seconds=offset)
@@ -645,7 +642,7 @@ class PilotSupervisor:
                     "selection_seed": cohort.selection_seed,
                     "details": {
                         "gpu_count_per_instance": trial.cell.gpu_count,
-                        "target_gpu_depth": trial.target_depth,
+                        "target_gpu_depth": trial.target_gpu_depth,
                         "target_instance_count": trial.target_instance_count,
                         "estimated_price_usd_hr": trial.estimated_price_usd_hr,
                         "max_lease_seconds": trial.max_lease_seconds,
@@ -657,21 +654,21 @@ class PilotSupervisor:
                     },
                 }
             )
-        run_id, campaign_created = self.store.ensure_capacity_campaign(
+        run_id, experiment_created = self.store.ensure_capacity_experiment(
             plan.experiment,
             plan.raw_document,
-            campaign_id=campaign_id,
+            experiment_id=experiment_id,
             cohort_name=cohort.name,
             started_at=current.isoformat(),
             epochs=epochs,
             python_version=platform.python_version(),
         )
 
-        campaign = self.store.capacity_campaign_row(campaign_id)
-        if campaign["status"] == "complete":
+        experiment = self.store.capacity_experiment_row(experiment_id)
+        if experiment["status"] == "complete":
             return {
-                "campaign_id": campaign_id,
-                "campaign_created": campaign_created,
+                "experiment_id": experiment_id,
+                "experiment_created": experiment_created,
                 "run_id": run_id,
                 "cohort_name": cohort.name,
                 "status": "complete",
@@ -690,18 +687,18 @@ class PilotSupervisor:
             host_observation_id=host.id,
         )
         claim_status, epoch = self.store.claim_due_capacity_epoch(
-            campaign_id,
+            experiment_id,
             due_at=current.isoformat(),
             expired_before=(
                 current - dt.timedelta(seconds=cohort.interval_seconds)
             ).isoformat(),
         )
         if claim_status == "complete":
-            self.store.finish_capacity_campaign_if_complete(campaign_id)
+            self.store.finish_capacity_experiment_if_complete(experiment_id)
         if claim_status != "claimed" or epoch is None:
             return {
-                "campaign_id": campaign_id,
-                "campaign_created": campaign_created,
+                "experiment_id": experiment_id,
+                "experiment_created": experiment_created,
                 "run_id": run_id,
                 "cohort_name": cohort.name,
                 "status": claim_status,
@@ -718,7 +715,7 @@ class PilotSupervisor:
         if (
             epoch["provider"] != trial.cell.provider
             or epoch["sku"] != trial.cell.sku
-            or int(epoch["target_depth"]) != trial.target_depth
+            or int(epoch["target_gpu_depth"]) != trial.target_gpu_depth
         ):
             raise RuntimeError("persisted capacity epoch does not match the plan")
 
@@ -739,10 +736,12 @@ class PilotSupervisor:
         except Exception:
             self._cleanup_owned(run_id)
             raise
-        campaign_complete = self.store.finish_capacity_campaign_if_complete(campaign_id)
+        experiment_complete = self.store.finish_capacity_experiment_if_complete(
+            experiment_id
+        )
         return {
-            "campaign_id": campaign_id,
-            "campaign_created": campaign_created,
+            "experiment_id": experiment_id,
+            "experiment_created": experiment_created,
             "run_id": run_id,
             "cohort_name": cohort.name,
             "status": "executed",
@@ -754,19 +753,19 @@ class PilotSupervisor:
                 else execution.stop_reason
             ),
             "cleanup_verified": execution.cleanup_verified,
-            "campaign_complete": campaign_complete,
+            "experiment_complete": experiment_complete,
         }
 
     def stability_run(
         self,
         plan: PilotPlan,
         *,
-        campaign_id: str,
-        enable_active: bool = False,
+        experiment_id: str,
+        execute: bool = False,
         now: dt.datetime | None = None,
     ) -> dict[str, Any]:
-        if not enable_active:
-            raise ActiveRunDisabled("stability run requires --enable-active")
+        if not execute:
+            raise ExecutionDisabled("stability run requires execute=True")
         if len(plan.canary_cohorts) != 1:
             raise ValueError("stability run requires exactly one canary cohort")
         cohort = plan.canary_cohorts[0]
@@ -797,23 +796,23 @@ class PilotSupervisor:
                     },
                 }
             )
-        run_id, campaign_created = self.store.ensure_stability_campaign(
+        run_id, experiment_created = self.store.ensure_stability_experiment(
             plan.experiment,
             plan.raw_document,
-            campaign_id=campaign_id,
+            experiment_id=experiment_id,
             cohort_name=cohort.name,
             started_at=current.isoformat(),
             windows=windows,
             python_version=platform.python_version(),
         )
-        campaign = self.store.stability_campaign_row(campaign_id)
-        if campaign["status"] != "running":
+        experiment = self.store.stability_experiment_row(experiment_id)
+        if experiment["status"] != "running":
             return {
-                "campaign_id": campaign_id,
-                "campaign_created": campaign_created,
+                "experiment_id": experiment_id,
+                "experiment_created": experiment_created,
                 "run_id": run_id,
                 "cohort_name": cohort.name,
-                "status": str(campaign["status"]),
+                "status": str(experiment["status"]),
                 "window_id": None,
             }
 
@@ -835,15 +834,15 @@ class PilotSupervisor:
         )
 
         claim_status, window = self.store.claim_due_stability_window(
-            campaign_id,
+            experiment_id,
             due_at=current.isoformat(),
         )
         if claim_status == "complete":
-            self.store.finish_stability_campaign_if_complete(campaign_id)
+            self.store.finish_stability_experiment_if_complete(experiment_id)
         if claim_status != "claimed" or window is None:
             return {
-                "campaign_id": campaign_id,
-                "campaign_created": campaign_created,
+                "experiment_id": experiment_id,
+                "experiment_created": experiment_created,
                 "run_id": run_id,
                 "cohort_name": cohort.name,
                 "status": claim_status,
@@ -872,19 +871,19 @@ class PilotSupervisor:
                     "minimum_remaining_seconds": cohort.min_remaining_seconds,
                 },
             )
-            campaign_complete = self.store.finish_stability_campaign_if_complete(
-                campaign_id
+            experiment_complete = self.store.finish_stability_experiment_if_complete(
+                experiment_id
             )
             return {
-                "campaign_id": campaign_id,
-                "campaign_created": campaign_created,
+                "experiment_id": experiment_id,
+                "experiment_created": experiment_created,
                 "run_id": run_id,
                 "cohort_name": cohort.name,
                 "status": "missed",
                 "window_id": window["id"],
                 "window_sequence": sequence,
                 "window_status": "missed",
-                "campaign_complete": campaign_complete,
+                "experiment_complete": experiment_complete,
             }
         hard_deadline = self.monotonic() + remaining_seconds
         self.store.mark_stability_window_started(
@@ -967,12 +966,12 @@ class PilotSupervisor:
             )
             for thread in started_threads:
                 thread.join(timeout=join_timeout)
-            censor_reason = (
+            terminal_reason = (
                 TerminalReason.RIGHT_CENSORED_COLLECTOR_LOSS
                 if window_status == "failed"
                 else TerminalReason.OPERATOR_CLEANUP
             )
-            self._censor_unfinished_canaries(run_id, censor_reason)
+            self._censor_unfinished_canaries(run_id, terminal_reason)
             self._cleanup_owned(run_id)
             unfinished_status = (
                 "collector_loss"
@@ -986,7 +985,7 @@ class PilotSupervisor:
             self._finish_unfinished_canary_epochs(
                 run_id,
                 status=unfinished_status,
-                reason=censor_reason.value,
+                reason=terminal_reason.value,
                 cleanup_verified=not self.store.owned_resources(run_id),
             )
             self._settle_cleaned_canary_epochs(run_id, guard)
@@ -1006,53 +1005,48 @@ class PilotSupervisor:
                 },
             )
 
-        campaign_finish: dict[str, str | None] = {}
+        finish_options: dict[str, str | None] = {}
         if window_status == "budget_exhausted":
-            campaign_finish = {
-                "campaign_status": "budget_exhausted",
-                "run_status": "budget_exhausted",
+            finish_options = {
+                "status": "budget_exhausted",
                 "termination_reason": "budget_exhausted",
             }
         elif window_status == "stopped":
-            campaign_finish = {
-                "campaign_status": "stopped",
-                "run_status": "stopped",
+            finish_options = {
+                "status": "stopped",
                 "termination_reason": "operator_stop",
             }
         elif window_status == "cleanup_incomplete":
-            campaign_finish = {
-                "campaign_status": "cleanup_incomplete",
-                "run_status": "cleanup_incomplete",
+            finish_options = {
+                "status": "cleanup_incomplete",
                 "termination_reason": "provider resources remain unresolved",
             }
         elif window_status == "complete_with_sampling_errors":
-            campaign_finish = {
-                "campaign_status": "complete_with_sampling_errors",
-                "run_status": "complete_with_sampling_errors",
+            finish_options = {
+                "status": "complete_with_sampling_errors",
                 "termination_reason": stop_reason,
             }
         elif window_status == "failed":
-            campaign_finish = {
-                "campaign_status": "failed",
-                "run_status": "failed",
+            finish_options = {
+                "status": "failed",
                 "termination_reason": stop_reason,
             }
-        campaign_complete = self.store.finish_stability_campaign_if_complete(
-            campaign_id,
-            **campaign_finish,
+        experiment_complete = self.store.finish_stability_experiment_if_complete(
+            experiment_id,
+            **finish_options,
         )
         if caught_error is not None:
             raise caught_error
         return {
-            "campaign_id": campaign_id,
-            "campaign_created": campaign_created,
+            "experiment_id": experiment_id,
+            "experiment_created": experiment_created,
             "run_id": run_id,
             "cohort_name": cohort.name,
             "status": "executed",
             "window_id": window["id"],
             "window_sequence": sequence,
             "window_status": window_status,
-            "campaign_complete": campaign_complete,
+            "experiment_complete": experiment_complete,
         }
 
     def _host_loop(self, run_id: str, monitor: HostMonitor, interval: float) -> None:
@@ -1131,7 +1125,7 @@ class PilotSupervisor:
             result = runner.run_trial(
                 run_id,
                 trial.cell,
-                target_depth=trial.target_depth,
+                target_gpu_depth=trial.target_gpu_depth,
                 trial_id=epoch_id,
             )
         except Exception as error:
@@ -1280,7 +1274,7 @@ class PilotSupervisor:
             status=status,
             stop_reason="pair_terminal",
             details={
-                "censor_reasons": list(result.censor_reasons),
+                "terminal_reasons": list(result.terminal_reasons),
                 "estimated_cost_usd": result.estimated_cost_usd,
                 "cleanup_verified": result.cleanup_verified,
             },
@@ -1424,15 +1418,15 @@ class PilotSupervisor:
             trial=trial,
         )
         reasons = tuple(
-            str(row["censor_reason"])
+            str(row["terminal_reason"])
             for row in self.store.canary_rows_for_pair(pair_id)
-            if row["censor_reason"]
+            if row["terminal_reason"]
         )
         return CanaryTrialResult(
             pair_id=pair_id,
             cleanup_verified=cleanup_verified,
             estimated_cost_usd=estimated_cost,
-            censor_reasons=reasons,
+            terminal_reasons=reasons,
         )
 
     def _canary_pair_cost(
@@ -1583,7 +1577,7 @@ class PilotSupervisor:
         reason: TerminalReason,
     ) -> None:
         for lease in self.store.canary_rows(run_id):
-            if lease["censor_reason"] is not None:
+            if lease["terminal_reason"] is not None:
                 continue
             self.store.finish_canary(
                 lease["id"],
@@ -1662,7 +1656,7 @@ class PilotSupervisor:
 
     def cleanup_run(self, run_id: str) -> list[object]:
         run = self.store.run_row(run_id)
-        stability_campaign = self.store.stability_campaign_for_run(run_id)
+        stability_experiment = self.store.stability_experiment_for_run(run_id)
         self._censor_unfinished_canaries(run_id, TerminalReason.OPERATOR_CLEANUP)
         self._cleanup_owned(run_id)
         remaining = list(self.store.owned_resources(run_id))
@@ -1678,7 +1672,10 @@ class PilotSupervisor:
             reason=TerminalReason.OPERATOR_CLEANUP.value,
             cleanup_verified=not remaining,
         )
-        if stability_campaign is not None and stability_campaign["status"] == "running":
+        if (
+            stability_experiment is not None
+            and stability_experiment["status"] == "running"
+        ):
             self.store.finish_active_stability_windows(
                 run_id,
                 status=capacity_status,
@@ -1690,10 +1687,9 @@ class PilotSupervisor:
                 status="not_run_operator_stop",
                 stop_reason=TerminalReason.OPERATOR_CLEANUP.value,
             )
-            self.store.finish_stability_campaign_if_complete(
-                stability_campaign["campaign_id"],
-                campaign_status=("cleanup_incomplete" if remaining else "stopped"),
-                run_status=("cleanup_incomplete" if remaining else "stopped"),
+            self.store.finish_stability_experiment_if_complete(
+                stability_experiment["experiment_id"],
+                status=("cleanup_incomplete" if remaining else "stopped"),
                 termination_reason=(
                     "provider resources remain unresolved"
                     if remaining
@@ -1718,8 +1714,8 @@ class PilotSupervisor:
 
     def recover_run(self, run_id: str) -> list[object]:
         self.store.run_row(run_id)
-        capacity_campaign = self.store.capacity_campaign_for_run(run_id)
-        stability_campaign = self.store.stability_campaign_for_run(run_id)
+        capacity_experiment = self.store.capacity_experiment_for_run(run_id)
+        stability_experiment = self.store.stability_experiment_for_run(run_id)
         self._censor_unfinished_canaries(
             run_id,
             TerminalReason.RIGHT_CENSORED_COLLECTOR_LOSS,
@@ -1730,7 +1726,7 @@ class PilotSupervisor:
             run_id,
             status=("recovery_cleanup_incomplete" if remaining else "collector_loss"),
             reason=TerminalReason.RIGHT_CENSORED_COLLECTOR_LOSS.value,
-            preserve_scheduled=capacity_campaign is not None,
+            preserve_scheduled=capacity_experiment is not None,
         )
         self._finish_unfinished_canary_epochs(
             run_id,
@@ -1738,7 +1734,10 @@ class PilotSupervisor:
             reason=TerminalReason.RIGHT_CENSORED_COLLECTOR_LOSS.value,
             cleanup_verified=not remaining,
         )
-        if stability_campaign is not None and stability_campaign["status"] == "running":
+        if (
+            stability_experiment is not None
+            and stability_experiment["status"] == "running"
+        ):
             recovery_status = (
                 "recovery_cleanup_incomplete" if remaining else "collector_loss"
             )
@@ -1756,16 +1755,11 @@ class PilotSupervisor:
                 for row in self.store.stability_window_rows(run_id)
             )
             if not remaining and has_future:
-                self.store.resume_stability_campaign(run_id)
+                self.store.resume_stability_experiment(run_id)
             elif not has_future:
-                self.store.finish_stability_campaign_if_complete(
-                    stability_campaign["campaign_id"],
-                    campaign_status=(
-                        "recovery_cleanup_incomplete"
-                        if remaining
-                        else "recovered_after_collector_loss"
-                    ),
-                    run_status=(
+                self.store.finish_stability_experiment_if_complete(
+                    stability_experiment["experiment_id"],
+                    status=(
                         "recovery_cleanup_incomplete"
                         if remaining
                         else "recovered_after_collector_loss"
@@ -1776,15 +1770,15 @@ class PilotSupervisor:
                         else "collector process loss"
                     ),
                 )
-        if stability_campaign is not None:
+        if stability_experiment is not None:
             if remaining:
                 self.store.finish_run(
                     run_id,
                     "recovery_cleanup_incomplete",
                     "provider resources remain unresolved",
                 )
-        elif capacity_campaign is not None and not remaining:
-            self.store.resume_capacity_campaign(run_id)
+        elif capacity_experiment is not None and not remaining:
+            self.store.resume_capacity_experiment(run_id)
         else:
             self.store.finish_run(
                 run_id,

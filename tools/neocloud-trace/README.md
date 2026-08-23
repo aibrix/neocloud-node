@@ -22,11 +22,11 @@ Editable setup, direct module execution, and tests are documented in
 
 ## Workflows
 
-The three collection commands have separate contracts:
+The three workflows have separate contracts:
 
 | Command | Function | Active plan input | Scheduled unit |
 | --- | --- | --- | --- |
-| `collect` | Passive catalog, price, API, host, and network observations | None | None |
+| `catalog` | Passive catalog, price, API, host, and network observations | None | None |
 | `tick` | One due capacity epoch | One `capacity_cohorts` entry with `max_trials=1` | `capacity_epochs` |
 | `run` | One due Stability sampling window | One `canary_cohorts` entry | `stability_windows` |
 
@@ -35,9 +35,10 @@ mixed plans fail before a provider client is constructed or a database is
 opened.
 
 A database can contain multiple runs and workflow types; three database files
-are not required. A campaign must keep using the same plan, database, and
-campaign ID. Use `--run-id` when querying or exporting a database containing
-several runs.
+are not required. An active experiment must keep using the same plan, database,
+and experiment ID. Use `--run-id` when querying or exporting a database
+containing several runs. Database files must match the current schema; create a
+fresh database after an incompatible schema change.
 
 ## Credentials and Safety
 
@@ -58,22 +59,24 @@ export RUNPOD_BASE_URL=https://rest.runpod.io/v1
 export RUNPOD_GRAPHQL_URL=https://api.runpod.io/graphql
 ```
 
-Commands that can create or delete resources require `--enable-active`: `run`,
-`tick`, `cleanup`, and `recover`. Active execution enforces provider and total
-budgets, GPU concurrency limits, verified cleanup, and a block on new work while
-unresolved provider resources remain.
+Commands that can create, delete, or advance resources run in dry-run mode by
+default: `run`, `tick`, `cleanup`, and `recover`. Dry-run validates the request
+and reports the intended experiment or owned resources without constructing
+provider clients. Pass `--execute` to perform the mutations. JSON output always
+identifies these paths with `"mode": "dry-run"` or `"mode": "execute"`.
+
+Execution still enforces provider and total budgets, GPU concurrency limits,
+verified cleanup, and a block on new work while unresolved provider resources
+remain. Missing API credentials are treated as configuration errors, not as the
+safety boundary.
 
 Review provider, SKU, GPU type, region, duration, price assumptions, and budget
-before starting a campaign. If a collector process is lost, run `recover`
+before starting an experiment. If a collector process is lost, run `recover`
 promptly to censor observations and clean up remote resources.
 
 ## Collector Identity
 
-Every run stores `host_id` and `vantage_id`.
-
-For `collect`, `host_id` is the local hostname. `vantage_id` defaults to that
-hostname and can be overridden with `--vantage-id` to identify a stable network
-or physical location.
+Every run stores `host_id`. For `catalog`, it is the local hostname.
 
 For plan-based commands, `host_id` is resolved in this order:
 
@@ -81,15 +84,11 @@ For plan-based commands, `host_id` is resolved in this order:
 2. a non-placeholder plan value;
 3. the local hostname.
 
-`vantage_id` is resolved from `--vantage-id` and then the plan. Plan-based
-commands reject unresolved values such as `replace-with-network-vantage`.
-
 ```bash
 neocloud-trace init \
   --plan /path/to/plan.json \
   --db data/neocloud-trace/trace.db \
-  --host-id trace-host-01 \
-  --vantage-id us-west-office
+  --host-id trace-host-01
 ```
 
 ## Validate a Plan
@@ -101,32 +100,30 @@ provider or create resources.
 ```bash
 neocloud-trace init \
   --plan /path/to/plan.json \
-  --db data/neocloud-trace/trace.db \
-  --vantage-id us-west-office
+  --db data/neocloud-trace/trace.db
 ```
 
 `plans/capacity-epoch.json` and `plans/stability-windows.json` are the two
 supported active-plan shapes. `run` and `tick` apply their command-specific
 contracts even when a plan passes general `init` validation.
 
-## Passive Collection
+## Catalog Sampling
 
-`collect` takes provider and sampling settings directly. It does not accept a
+`catalog` takes provider and sampling settings directly. It does not accept a
 plan and never creates cloud resources.
 
 ```bash
 # One snapshot
-neocloud-trace collect \
+neocloud-trace catalog \
   --db data/neocloud-trace/trace.db \
   --provider runpod \
   --once
 
-# Timed collection
-neocloud-trace collect \
+# Timed sampling
+neocloud-trace catalog \
   --db data/neocloud-trace/trace.db \
   --provider lambda \
   --provider runpod \
-  --vantage-id us-west-office \
   --duration-seconds 3600
 ```
 
@@ -144,17 +141,20 @@ sets `max_trials` to `1`, and leaves all other active sections empty.
 neocloud-trace tick \
   --plan /path/to/capacity-plan.json \
   --db data/neocloud-trace/trace.db \
-  --vantage-id us-west-office \
-  --enable-active
+  --execute
 ```
 
-The first invocation creates the campaign and its scheduled epoch. Each
+Omit `--execute` first to validate the plan and inspect the selected workflow,
+experiment ID, cohort, schedule, providers, and budget bounds without provider
+mutations.
+
+The first invocation creates the experiment and its scheduled epoch. Each
 invocation atomically claims at most one due epoch, records missed slots instead
 of replaying a backlog, verifies cleanup, and exits. Result statuses include
 `idle`, `busy`, `cleanup_blocked`, `executed`, and `complete`.
 
-The default campaign ID is reused from the database. Use `--campaign-id` for an
-explicit stable identity.
+The default experiment ID is reused from the database. Use `--experiment-id`
+for an explicit stable identity.
 
 ## Stability Sampling Windows
 
@@ -167,9 +167,10 @@ cleanup logic runs inside the claimed outer window.
 neocloud-trace run \
   --plan /path/to/stability-plan.json \
   --db data/neocloud-trace/trace.db \
-  --vantage-id us-west-office \
-  --enable-active
+  --execute
 ```
+
+Omitting `--execute` produces the same non-mutating plan preview as `tick`.
 
 The optional top-level `stability_schedule` controls durable outer windows:
 
@@ -198,8 +199,8 @@ claims at most one window. A later invocation marks every expired, unclaimed
 window as `missed`; those rows remain in the analysis denominator even though no
 canary lease was created.
 
-Use the same plan and database for every invocation. `--campaign-id` can set an
-explicit identity; otherwise the single Stability campaign already in the
+Use the same plan and database for every invocation. `--experiment-id` can set
+an explicit identity; otherwise the single Stability experiment already in the
 database is reused.
 
 ## Status, Cleanup, and Recovery
@@ -211,18 +212,20 @@ neocloud-trace status --db data/neocloud-trace/trace.db --run-id RUN_ID
 neocloud-trace cleanup \
   --db data/neocloud-trace/trace.db \
   --run-id RUN_ID \
-  --enable-active
+  --execute
 
 neocloud-trace recover \
   --db data/neocloud-trace/trace.db \
   --run-id RUN_ID \
-  --enable-active
+  --execute
 ```
 
 `status` includes lifecycle state, row counts, budget exposure, and unresolved
 resources. Recovery right-censors unfinished leases, closes the active capacity
 epoch or Stability window, and verifies cleanup. Future scheduled work is
 preserved when cleanup succeeds. Without `--run-id`, the latest run is selected.
+Without `--execute`, `cleanup` and `recover` only list the resources they would
+process and leave provider and experiment state unchanged.
 
 ## Export Data
 
@@ -298,8 +301,8 @@ SQLite records include:
 
 - run configuration, identity, and lifecycle;
 - host/network observations, provider API results, and catalog quotes;
-- capacity campaigns, scheduled epochs, trials, stages, and replicas;
-- Stability campaigns, scheduled windows, linked canary epochs, matched leases,
+- capacity experiments, scheduled epochs, trials, stages, and replicas;
+- Stability experiments, scheduled windows, linked canary epochs, matched leases,
   and lease observations;
 - budget commitments, releases, runtime settlements, and exposure;
 - cleanup attempts and verified deletion;

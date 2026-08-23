@@ -7,7 +7,7 @@ import time
 import urllib.request
 from collections.abc import Callable, Iterable
 
-from ..model import CollectionConfig, HostObservation
+from ..model import CatalogConfig, HostObservation
 from ..providers import CatalogFetch, classify_failure
 from ..storage import TraceStore
 
@@ -118,7 +118,7 @@ class HostMonitor:
         )
 
 
-class PassiveCollector:
+class CatalogCollector:
     def __init__(
         self,
         store: TraceStore,
@@ -134,8 +134,8 @@ class PassiveCollector:
     def request_stop(self) -> None:
         self.stop_event.set()
 
-    def run(self, config: CollectionConfig, *, once: bool = False) -> str:
-        run_id = self.store.start_collection(
+    def run(self, config: CatalogConfig, *, once: bool = False) -> str:
+        run_id = self.store.start_catalog(
             config,
             python_version=platform.python_version(),
         )

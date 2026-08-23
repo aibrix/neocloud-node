@@ -213,7 +213,6 @@ class CanaryRunnerTest(unittest.TestCase):
             ExperimentConfig(
                 protocol_version="2.0",
                 host_id="host",
-                vantage_id="vantage",
                 provider_budgets={"runpod": 5.0},
                 total_budget_usd=5.0,
             ),

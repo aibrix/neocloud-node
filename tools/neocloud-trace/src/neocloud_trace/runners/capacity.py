@@ -25,54 +25,34 @@ class CapacityTrialResult:
     gpu_count_per_instance: int
     target_gpu_depth: int
     target_instance_count: int
-    requested_depth: int
-    accepted_depth: int
-    provider_ready_depth: int
-    application_ready_depth: int
-    cleaned_depth: int
+    requested_instance_count: int
+    accepted_instance_count: int
+    provider_ready_instance_count: int
+    application_ready_instance_count: int
+    cleaned_instance_count: int
     first_failed_stage: int | None
     failure_class: FailureClass | None
     status: str
 
     @property
-    def requested_instance_count(self) -> int:
-        return self.requested_depth
-
-    @property
-    def accepted_instance_count(self) -> int:
-        return self.accepted_depth
-
-    @property
-    def provider_ready_instance_count(self) -> int:
-        return self.provider_ready_depth
-
-    @property
-    def application_ready_instance_count(self) -> int:
-        return self.application_ready_depth
-
-    @property
-    def cleaned_instance_count(self) -> int:
-        return self.cleaned_depth
-
-    @property
     def requested_gpu_depth(self) -> int:
-        return self.requested_depth * self.gpu_count_per_instance
+        return self.requested_instance_count * self.gpu_count_per_instance
 
     @property
     def accepted_gpu_depth(self) -> int:
-        return self.accepted_depth * self.gpu_count_per_instance
+        return self.accepted_instance_count * self.gpu_count_per_instance
 
     @property
     def provider_ready_gpu_depth(self) -> int:
-        return self.provider_ready_depth * self.gpu_count_per_instance
+        return self.provider_ready_instance_count * self.gpu_count_per_instance
 
     @property
     def application_ready_gpu_depth(self) -> int:
-        return self.application_ready_depth * self.gpu_count_per_instance
+        return self.application_ready_instance_count * self.gpu_count_per_instance
 
     @property
     def cleaned_gpu_depth(self) -> int:
-        return self.cleaned_depth * self.gpu_count_per_instance
+        return self.cleaned_instance_count * self.gpu_count_per_instance
 
 
 class CapacityProvider(Protocol):
@@ -134,11 +114,11 @@ class CapacityRunner:
         run_id: str,
         cell: TrialCell,
         *,
-        target_depth: int = 8,
+        target_gpu_depth: int = 8,
         trial_id: str | None = None,
     ) -> CapacityTrialResult:
         stages = capacity_stages(
-            target_gpu_depth=target_depth,
+            target_gpu_depth=target_gpu_depth,
             gpu_count_per_instance=cell.gpu_count,
         )
         if cell.provider != self.provider.provider:
@@ -147,7 +127,7 @@ class CapacityRunner:
         trial_id = self.store.start_capacity_trial(
             run_id,
             cell,
-            target_depth,
+            target_gpu_depth,
             trial_id=trial_id,
         )
         accepted: list[tuple[str, str, int]] = []
@@ -255,7 +235,7 @@ class CapacityRunner:
             self._cleanup(run_id, cell, accepted, seen_api_calls)
 
         row = self.store.capacity_trial_row(trial_id)
-        if row["cleaned_depth"] < row["accepted_depth"]:
+        if row["cleaned_instance_count"] < row["accepted_instance_count"]:
             status = "cleanup_incomplete"
         elif readiness_failed_trial:
             status = "readiness_failure"
@@ -281,13 +261,13 @@ class CapacityRunner:
         return CapacityTrialResult(
             trial_id=trial_id,
             gpu_count_per_instance=cell.gpu_count,
-            target_gpu_depth=target_depth,
-            target_instance_count=target_depth // cell.gpu_count,
-            requested_depth=row["requested_depth"],
-            accepted_depth=row["accepted_depth"],
-            provider_ready_depth=row["provider_ready_depth"],
-            application_ready_depth=row["application_ready_depth"],
-            cleaned_depth=row["cleaned_depth"],
+            target_gpu_depth=target_gpu_depth,
+            target_instance_count=target_gpu_depth // cell.gpu_count,
+            requested_instance_count=row["requested_instance_count"],
+            accepted_instance_count=row["accepted_instance_count"],
+            provider_ready_instance_count=row["provider_ready_instance_count"],
+            application_ready_instance_count=row["application_ready_instance_count"],
+            cleaned_instance_count=row["cleaned_instance_count"],
             first_failed_stage=row["first_failed_stage"],
             failure_class=FailureClass(row["failure_class"]) if row["failure_class"] else None,
             status=row["status"],

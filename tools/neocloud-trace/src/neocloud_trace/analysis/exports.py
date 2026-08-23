@@ -100,12 +100,6 @@ CAPACITY_DEPTH_FIELDS = (
     "provider_ready_gpu_depth",
     "application_ready_gpu_depth",
     "cleaned_gpu_depth",
-    "target_depth",
-    "requested_depth",
-    "accepted_depth",
-    "provider_ready_depth",
-    "application_ready_depth",
-    "cleaned_depth",
     "provider_depth_success",
     "application_depth_success",
     "depth_success",
@@ -125,7 +119,7 @@ CAPACITY_DEPTH_FIELDS = (
 
 STABILITY_WINDOW_FIELDS = (
     "run_id",
-    "campaign_id",
+    "experiment_id",
     "cohort_name",
     "window_sequence",
     "scheduled_offset_seconds",
@@ -191,7 +185,7 @@ def survival_rows(store: TraceStore, run_id: str) -> list[dict[str, Any]]:
         provider_ready = _parse(row["provider_ready_at"])
         application_ready = _parse(row["application_ready_at"])
         terminal = _parse(row["event_at"] or row["cleaned_at"])
-        reason = row["censor_reason"]
+        reason = row["terminal_reason"]
         pre_ready_terminal = application_ready or terminal
         epoch_details = json.loads(row["epoch_details_json"])
         group_size = len(pairs[str(row["pair_id"])])
@@ -293,7 +287,7 @@ def stability_window_rows(
     store.run_row(run_id)
     rows = store.connection.execute(
         """
-        SELECT w.*, c.campaign_id,
+        SELECT w.*, e.experiment_id,
                COUNT(DISTINCT l.epoch_id) AS canary_epoch_count,
                COUNT(cl.id) AS lease_count,
                COALESCE(SUM(CASE WHEN cl.interruptible=1 THEN 1 ELSE 0 END), 0)
@@ -304,10 +298,10 @@ def stability_window_rows(
                  AS provider_ready_lease_count,
                COALESCE(SUM(CASE WHEN cl.application_ready_at IS NOT NULL THEN 1 ELSE 0 END), 0)
                  AS application_ready_lease_count,
-               COALESCE(SUM(CASE WHEN cl.censor_reason IS NOT NULL THEN 1 ELSE 0 END), 0)
+               COALESCE(SUM(CASE WHEN cl.terminal_reason IS NOT NULL THEN 1 ELSE 0 END), 0)
                  AS terminal_lease_count
         FROM stability_windows w
-        JOIN stability_campaigns c ON c.run_id=w.run_id
+        JOIN experiment_runs e ON e.id=w.run_id
         LEFT JOIN stability_window_epochs l ON l.window_id=w.id
         LEFT JOIN canary_leases cl ON cl.pair_id=l.epoch_id
         WHERE w.run_id=?
@@ -322,7 +316,7 @@ def stability_window_rows(
         result.append(
             {
                 "run_id": row["run_id"],
-                "campaign_id": row["campaign_id"],
+                "experiment_id": row["experiment_id"],
                 "cohort_name": row["cohort_name"],
                 "window_sequence": row["sequence"],
                 "scheduled_offset_seconds": row["scheduled_offset_seconds"],
@@ -413,7 +407,7 @@ def capacity_depth_rows(store: TraceStore, run_id: str) -> list[dict[str, Any]]:
         quote = None
         if trial and trial["catalog_quote_id"]:
             quote = store.connection.execute(
-                "SELECT * FROM catalog_quotes_v2 WHERE id=?",
+                "SELECT * FROM catalog_quotes WHERE id=?",
                 (trial["catalog_quote_id"],),
             ).fetchone()
         trial_details = json.loads(trial["details_json"]) if trial else {}
@@ -423,7 +417,7 @@ def capacity_depth_rows(store: TraceStore, run_id: str) -> list[dict[str, Any]]:
             else "provider"
         )
         target_gpu_depth = (
-            int(trial["target_depth"]) if trial else int(epoch["target_depth"])
+            int(trial["target_gpu_depth"]) if trial else int(epoch["target_gpu_depth"])
         )
         epoch_details = json.loads(epoch["details_json"]) if epoch else {}
         gpu_count_per_instance = (
@@ -432,13 +426,13 @@ def capacity_depth_rows(store: TraceStore, run_id: str) -> list[dict[str, Any]]:
             else int(epoch_details.get("gpu_count_per_instance") or 1)
         )
         target_instance_count = target_gpu_depth // gpu_count_per_instance
-        requested_instances = int(trial["requested_depth"]) if trial else 0
-        accepted_instances = int(trial["accepted_depth"]) if trial else 0
-        provider_ready_instances = int(trial["provider_ready_depth"]) if trial else 0
+        requested_instances = int(trial["requested_instance_count"]) if trial else 0
+        accepted_instances = int(trial["accepted_instance_count"]) if trial else 0
+        provider_ready_instances = int(trial["provider_ready_instance_count"]) if trial else 0
         application_ready_instances = (
-            int(trial["application_ready_depth"]) if trial else 0
+            int(trial["application_ready_instance_count"]) if trial else 0
         )
-        cleaned_instances = int(trial["cleaned_depth"]) if trial else 0
+        cleaned_instances = int(trial["cleaned_instance_count"]) if trial else 0
         provider_ready_gpu_depth = provider_ready_instances * gpu_count_per_instance
         application_ready_gpu_depth = (
             application_ready_instances * gpu_count_per_instance
@@ -498,14 +492,6 @@ def capacity_depth_rows(store: TraceStore, run_id: str) -> list[dict[str, Any]]:
                 "cleaned_gpu_depth": (
                     cleaned_instances * gpu_count_per_instance if trial else None
                 ),
-                "target_depth": target_gpu_depth,
-                "requested_depth": requested_instances if trial else None,
-                "accepted_depth": accepted_instances if trial else None,
-                "provider_ready_depth": provider_ready_instances if trial else None,
-                "application_ready_depth": (
-                    application_ready_instances if trial else None
-                ),
-                "cleaned_depth": cleaned_instances if trial else None,
                 "provider_depth_success": provider_success,
                 "application_depth_success": application_success,
                 "depth_success": (
@@ -534,7 +520,7 @@ def capacity_depth_rows(store: TraceStore, run_id: str) -> list[dict[str, Any]]:
                     quote["quoted_price_usd_hr"] if quote else None
                 ),
                 "cleanup_verified": (
-                    int(trial["cleaned_depth"] >= trial["accepted_depth"])
+                    int(trial["cleaned_instance_count"] >= trial["accepted_instance_count"])
                     if trial
                     else None
                 ),
@@ -550,7 +536,7 @@ def capacity_trial_payload(
     row = store.capacity_trial_row(trial_id)
     trial = dict(row)
     gpu_count = int(trial["gpu_count"])
-    target_gpu_depth = int(trial["target_depth"])
+    target_gpu_depth = int(trial["target_gpu_depth"])
     replicas = [dict(item) for item in store.capacity_replica_rows(trial_id)]
     for replica in replicas:
         replica["details"] = json.loads(replica.pop("details_json"))
@@ -584,7 +570,7 @@ def capacity_trial_payload(
     quote = None
     if trial["catalog_quote_id"]:
         quote_row = store.connection.execute(
-            "SELECT * FROM catalog_quotes_v2 WHERE id=?",
+            "SELECT * FROM catalog_quotes WHERE id=?",
             (trial["catalog_quote_id"],),
         ).fetchone()
         if quote_row:
@@ -610,7 +596,7 @@ def capacity_trial_payload(
     budget = [
         dict(item)
         for item in store.connection.execute(
-            "SELECT * FROM budget_ledger_v2 WHERE run_id=? AND reference=? "
+            "SELECT * FROM budget_ledger WHERE run_id=? AND reference=? "
             "ORDER BY observed_at, id",
             (trial["run_id"], trial_id),
         ).fetchall()
@@ -618,11 +604,11 @@ def capacity_trial_payload(
     for item in budget:
         item["details"] = json.loads(item.pop("details_json"))
 
-    requested_instances = int(trial["requested_depth"])
-    accepted_instances = int(trial["accepted_depth"])
-    provider_ready_instances = int(trial["provider_ready_depth"])
-    application_ready_instances = int(trial["application_ready_depth"])
-    cleaned_instances = int(trial["cleaned_depth"])
+    requested_instances = int(trial["requested_instance_count"])
+    accepted_instances = int(trial["accepted_instance_count"])
+    provider_ready_instances = int(trial["provider_ready_instance_count"])
+    application_ready_instances = int(trial["application_ready_instance_count"])
+    cleaned_instances = int(trial["cleaned_instance_count"])
     trial_details = json.loads(trial.pop("details_json"))
     summary = {
         **trial,
