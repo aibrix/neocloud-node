@@ -1,6 +1,7 @@
 import json
 import datetime as dt
 import pathlib
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -57,11 +58,96 @@ class TraceStoreTest(unittest.TestCase):
                 "budget_ledger_v2",
             }.issubset(tables)
         )
+        self.assertNotIn("capacity_experiments", tables)
+        self.assertNotIn("stability_experiments", tables)
+        self.assertNotIn("capacity_campaigns", tables)
+        self.assertNotIn("stability_campaigns", tables)
         row = self.store.connection.execute(
-            "SELECT protocol_version, host_id, vantage_id, status FROM experiment_runs WHERE id=?",
+            """
+            SELECT workflow, protocol_version, host_id, vantage_id, status
+            FROM experiment_runs WHERE id=?
+            """,
             (run_id,),
         ).fetchone()
-        self.assertEqual(tuple(row), ("2.0", "test-host", "test-vantage", "running"))
+        self.assertEqual(
+            tuple(row),
+            ("standalone", "2.0", "test-host", "test-vantage", "running"),
+        )
+
+    def test_migrates_legacy_experiment_identity_without_dropping_data(self):
+        legacy_path = pathlib.Path(self.tempdir.name) / "legacy.db"
+        connection = sqlite3.connect(legacy_path)
+        connection.executescript(
+            """
+            CREATE TABLE experiment_runs (
+                id TEXT PRIMARY KEY,
+                protocol_version TEXT NOT NULL,
+                config_hash TEXT NOT NULL,
+                config_json TEXT NOT NULL,
+                host_id TEXT NOT NULL,
+                vantage_id TEXT NOT NULL,
+                collector_revision TEXT,
+                python_version TEXT,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                status TEXT NOT NULL,
+                termination_reason TEXT,
+                total_budget_usd REAL NOT NULL,
+                max_active_gpus_per_provider INTEGER NOT NULL
+            );
+            CREATE TABLE capacity_campaigns (
+                campaign_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL UNIQUE,
+                cohort_name TEXT NOT NULL,
+                config_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                finished_at TEXT,
+                status TEXT NOT NULL
+            );
+            INSERT INTO experiment_runs VALUES (
+                'run-1', 'capacity-v1', 'hash', '{}', 'host', 'vantage',
+                NULL, NULL, '2026-08-11T00:00:00+00:00', NULL, 'running',
+                NULL, 1.0, 8
+            );
+            INSERT INTO experiment_runs VALUES (
+                'run-2', '1.0-passive-catalog', 'catalog-hash',
+                '{"collection": {}}', 'host', 'vantage', NULL, NULL,
+                '2026-08-11T00:00:00+00:00', NULL, 'complete', NULL, 0.0, 0
+            );
+            INSERT INTO capacity_campaigns VALUES (
+                'capacity-60d', 'run-1', 'depth', 'hash',
+                '2026-08-11T00:00:00+00:00',
+                '2026-08-12T00:00:00+00:00', 'complete'
+            );
+            """
+        )
+        connection.close()
+
+        migrated = TraceStore(legacy_path)
+        self.addCleanup(migrated.close)
+        row = migrated.run_row("run-1")
+
+        self.assertEqual(row["workflow"], "capacity")
+        self.assertEqual(row["experiment_id"], "capacity-60d")
+        self.assertEqual(row["cohort_name"], "depth")
+        self.assertEqual(row["status"], "complete")
+        self.assertEqual(row["finished_at"], "2026-08-12T00:00:00+00:00")
+        self.assertEqual(migrated.run_row("run-2")["workflow"], "catalog")
+        self.assertTrue(migrated._table_exists("capacity_campaigns"))
+
+        with migrated.connection:
+            migrated.connection.execute(
+                """
+                UPDATE experiment_runs
+                SET status='running', finished_at=NULL
+                WHERE id='run-1'
+                """
+            )
+        reopened = TraceStore(legacy_path)
+        self.addCleanup(reopened.close)
+        reopened_row = reopened.run_row("run-1")
+        self.assertEqual(reopened_row["status"], "running")
+        self.assertIsNone(reopened_row["finished_at"])
 
     def test_redacts_nested_secrets_before_persisting_raw_provider_data(self):
         run_id = self.store.start_run(self.config(), config_document={"mode": "test"})
@@ -136,7 +222,7 @@ class TraceStoreTest(unittest.TestCase):
         self.store.mark_replica_cleaned(replica_id)
         self.assertEqual(self.store.owned_resources(run_id, provider="runpod"), [])
 
-    def test_capacity_campaign_claim_is_idempotent_across_store_connections(self):
+    def test_capacity_experiment_claim_is_idempotent_across_store_connections(self):
         cell = TrialCell(
             provider="runpod",
             sku="NVIDIA A40",
@@ -157,32 +243,32 @@ class TraceStoreTest(unittest.TestCase):
                 "selection_seed": 7,
             }
         ]
-        first_run, first_created = self.store.ensure_capacity_campaign(
+        first_run, first_created = self.store.ensure_capacity_experiment(
             self.config(),
             {"mode": "capacity-tick"},
-            campaign_id="shared-campaign",
+            experiment_id="shared-experiment",
             cohort_name="depth",
             started_at=now.isoformat(),
             epochs=epochs,
         )
         other = TraceStore(self.db_path)
         self.addCleanup(other.close)
-        second_run, second_created = other.ensure_capacity_campaign(
+        second_run, second_created = other.ensure_capacity_experiment(
             self.config(),
             {"mode": "capacity-tick"},
-            campaign_id="shared-campaign",
+            experiment_id="shared-experiment",
             cohort_name="depth",
             started_at=now.isoformat(),
             epochs=epochs,
         )
 
         first_status, first_epoch = self.store.claim_due_capacity_epoch(
-            "shared-campaign",
+            "shared-experiment",
             due_at=now.isoformat(),
             expired_before=(now - dt.timedelta(minutes=1)).isoformat(),
         )
         second_status, second_epoch = other.claim_due_capacity_epoch(
-            "shared-campaign",
+            "shared-experiment",
             due_at=now.isoformat(),
             expired_before=(now - dt.timedelta(minutes=1)).isoformat(),
         )
@@ -204,20 +290,20 @@ class TraceStoreTest(unittest.TestCase):
                 "scheduled_end_at": (now + dt.timedelta(minutes=5)).isoformat(),
             }
         ]
-        first_run, first_created = self.store.ensure_stability_campaign(
+        first_run, first_created = self.store.ensure_stability_experiment(
             self.config(),
             {"mode": "stability"},
-            campaign_id="shared-stability",
+            experiment_id="shared-stability",
             cohort_name="survival",
             started_at=now.isoformat(),
             windows=windows,
         )
         other = TraceStore(self.db_path)
         self.addCleanup(other.close)
-        second_run, second_created = other.ensure_stability_campaign(
+        second_run, second_created = other.ensure_stability_experiment(
             self.config(),
             {"mode": "stability"},
-            campaign_id="shared-stability",
+            experiment_id="shared-stability",
             cohort_name="survival",
             started_at=now.isoformat(),
             windows=windows,

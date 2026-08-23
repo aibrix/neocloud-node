@@ -27,7 +27,7 @@ from .storage import TraceStore
 UTC = dt.timezone.utc
 
 
-class ActiveRunDisabled(RuntimeError):
+class ExecutionDisabled(RuntimeError):
     pass
 
 
@@ -598,12 +598,12 @@ class PilotSupervisor:
         self,
         plan: PilotPlan,
         *,
-        campaign_id: str,
-        enable_active: bool = False,
+        experiment_id: str,
+        execute: bool = False,
         now: dt.datetime | None = None,
     ) -> dict[str, Any]:
-        if not enable_active:
-            raise ActiveRunDisabled("capacity-tick requires --enable-active")
+        if not execute:
+            raise ExecutionDisabled("capacity tick requires execute=True")
         try:
             cohort = plan.capacity_cohorts[0]
         except IndexError as error:
@@ -657,21 +657,21 @@ class PilotSupervisor:
                     },
                 }
             )
-        run_id, campaign_created = self.store.ensure_capacity_campaign(
+        run_id, experiment_created = self.store.ensure_capacity_experiment(
             plan.experiment,
             plan.raw_document,
-            campaign_id=campaign_id,
+            experiment_id=experiment_id,
             cohort_name=cohort.name,
             started_at=current.isoformat(),
             epochs=epochs,
             python_version=platform.python_version(),
         )
 
-        campaign = self.store.capacity_campaign_row(campaign_id)
-        if campaign["status"] == "complete":
+        experiment = self.store.capacity_experiment_row(experiment_id)
+        if experiment["status"] == "complete":
             return {
-                "campaign_id": campaign_id,
-                "campaign_created": campaign_created,
+                "experiment_id": experiment_id,
+                "experiment_created": experiment_created,
                 "run_id": run_id,
                 "cohort_name": cohort.name,
                 "status": "complete",
@@ -690,18 +690,18 @@ class PilotSupervisor:
             host_observation_id=host.id,
         )
         claim_status, epoch = self.store.claim_due_capacity_epoch(
-            campaign_id,
+            experiment_id,
             due_at=current.isoformat(),
             expired_before=(
                 current - dt.timedelta(seconds=cohort.interval_seconds)
             ).isoformat(),
         )
         if claim_status == "complete":
-            self.store.finish_capacity_campaign_if_complete(campaign_id)
+            self.store.finish_capacity_experiment_if_complete(experiment_id)
         if claim_status != "claimed" or epoch is None:
             return {
-                "campaign_id": campaign_id,
-                "campaign_created": campaign_created,
+                "experiment_id": experiment_id,
+                "experiment_created": experiment_created,
                 "run_id": run_id,
                 "cohort_name": cohort.name,
                 "status": claim_status,
@@ -739,10 +739,12 @@ class PilotSupervisor:
         except Exception:
             self._cleanup_owned(run_id)
             raise
-        campaign_complete = self.store.finish_capacity_campaign_if_complete(campaign_id)
+        experiment_complete = self.store.finish_capacity_experiment_if_complete(
+            experiment_id
+        )
         return {
-            "campaign_id": campaign_id,
-            "campaign_created": campaign_created,
+            "experiment_id": experiment_id,
+            "experiment_created": experiment_created,
             "run_id": run_id,
             "cohort_name": cohort.name,
             "status": "executed",
@@ -754,19 +756,19 @@ class PilotSupervisor:
                 else execution.stop_reason
             ),
             "cleanup_verified": execution.cleanup_verified,
-            "campaign_complete": campaign_complete,
+            "experiment_complete": experiment_complete,
         }
 
     def stability_run(
         self,
         plan: PilotPlan,
         *,
-        campaign_id: str,
-        enable_active: bool = False,
+        experiment_id: str,
+        execute: bool = False,
         now: dt.datetime | None = None,
     ) -> dict[str, Any]:
-        if not enable_active:
-            raise ActiveRunDisabled("stability run requires --enable-active")
+        if not execute:
+            raise ExecutionDisabled("stability run requires execute=True")
         if len(plan.canary_cohorts) != 1:
             raise ValueError("stability run requires exactly one canary cohort")
         cohort = plan.canary_cohorts[0]
@@ -797,23 +799,23 @@ class PilotSupervisor:
                     },
                 }
             )
-        run_id, campaign_created = self.store.ensure_stability_campaign(
+        run_id, experiment_created = self.store.ensure_stability_experiment(
             plan.experiment,
             plan.raw_document,
-            campaign_id=campaign_id,
+            experiment_id=experiment_id,
             cohort_name=cohort.name,
             started_at=current.isoformat(),
             windows=windows,
             python_version=platform.python_version(),
         )
-        campaign = self.store.stability_campaign_row(campaign_id)
-        if campaign["status"] != "running":
+        experiment = self.store.stability_experiment_row(experiment_id)
+        if experiment["status"] != "running":
             return {
-                "campaign_id": campaign_id,
-                "campaign_created": campaign_created,
+                "experiment_id": experiment_id,
+                "experiment_created": experiment_created,
                 "run_id": run_id,
                 "cohort_name": cohort.name,
-                "status": str(campaign["status"]),
+                "status": str(experiment["status"]),
                 "window_id": None,
             }
 
@@ -835,15 +837,15 @@ class PilotSupervisor:
         )
 
         claim_status, window = self.store.claim_due_stability_window(
-            campaign_id,
+            experiment_id,
             due_at=current.isoformat(),
         )
         if claim_status == "complete":
-            self.store.finish_stability_campaign_if_complete(campaign_id)
+            self.store.finish_stability_experiment_if_complete(experiment_id)
         if claim_status != "claimed" or window is None:
             return {
-                "campaign_id": campaign_id,
-                "campaign_created": campaign_created,
+                "experiment_id": experiment_id,
+                "experiment_created": experiment_created,
                 "run_id": run_id,
                 "cohort_name": cohort.name,
                 "status": claim_status,
@@ -872,19 +874,19 @@ class PilotSupervisor:
                     "minimum_remaining_seconds": cohort.min_remaining_seconds,
                 },
             )
-            campaign_complete = self.store.finish_stability_campaign_if_complete(
-                campaign_id
+            experiment_complete = self.store.finish_stability_experiment_if_complete(
+                experiment_id
             )
             return {
-                "campaign_id": campaign_id,
-                "campaign_created": campaign_created,
+                "experiment_id": experiment_id,
+                "experiment_created": experiment_created,
                 "run_id": run_id,
                 "cohort_name": cohort.name,
                 "status": "missed",
                 "window_id": window["id"],
                 "window_sequence": sequence,
                 "window_status": "missed",
-                "campaign_complete": campaign_complete,
+                "experiment_complete": experiment_complete,
             }
         hard_deadline = self.monotonic() + remaining_seconds
         self.store.mark_stability_window_started(
@@ -1006,53 +1008,48 @@ class PilotSupervisor:
                 },
             )
 
-        campaign_finish: dict[str, str | None] = {}
+        finish_options: dict[str, str | None] = {}
         if window_status == "budget_exhausted":
-            campaign_finish = {
-                "campaign_status": "budget_exhausted",
-                "run_status": "budget_exhausted",
+            finish_options = {
+                "status": "budget_exhausted",
                 "termination_reason": "budget_exhausted",
             }
         elif window_status == "stopped":
-            campaign_finish = {
-                "campaign_status": "stopped",
-                "run_status": "stopped",
+            finish_options = {
+                "status": "stopped",
                 "termination_reason": "operator_stop",
             }
         elif window_status == "cleanup_incomplete":
-            campaign_finish = {
-                "campaign_status": "cleanup_incomplete",
-                "run_status": "cleanup_incomplete",
+            finish_options = {
+                "status": "cleanup_incomplete",
                 "termination_reason": "provider resources remain unresolved",
             }
         elif window_status == "complete_with_sampling_errors":
-            campaign_finish = {
-                "campaign_status": "complete_with_sampling_errors",
-                "run_status": "complete_with_sampling_errors",
+            finish_options = {
+                "status": "complete_with_sampling_errors",
                 "termination_reason": stop_reason,
             }
         elif window_status == "failed":
-            campaign_finish = {
-                "campaign_status": "failed",
-                "run_status": "failed",
+            finish_options = {
+                "status": "failed",
                 "termination_reason": stop_reason,
             }
-        campaign_complete = self.store.finish_stability_campaign_if_complete(
-            campaign_id,
-            **campaign_finish,
+        experiment_complete = self.store.finish_stability_experiment_if_complete(
+            experiment_id,
+            **finish_options,
         )
         if caught_error is not None:
             raise caught_error
         return {
-            "campaign_id": campaign_id,
-            "campaign_created": campaign_created,
+            "experiment_id": experiment_id,
+            "experiment_created": experiment_created,
             "run_id": run_id,
             "cohort_name": cohort.name,
             "status": "executed",
             "window_id": window["id"],
             "window_sequence": sequence,
             "window_status": window_status,
-            "campaign_complete": campaign_complete,
+            "experiment_complete": experiment_complete,
         }
 
     def _host_loop(self, run_id: str, monitor: HostMonitor, interval: float) -> None:
@@ -1662,7 +1659,7 @@ class PilotSupervisor:
 
     def cleanup_run(self, run_id: str) -> list[object]:
         run = self.store.run_row(run_id)
-        stability_campaign = self.store.stability_campaign_for_run(run_id)
+        stability_experiment = self.store.stability_experiment_for_run(run_id)
         self._censor_unfinished_canaries(run_id, TerminalReason.OPERATOR_CLEANUP)
         self._cleanup_owned(run_id)
         remaining = list(self.store.owned_resources(run_id))
@@ -1678,7 +1675,10 @@ class PilotSupervisor:
             reason=TerminalReason.OPERATOR_CLEANUP.value,
             cleanup_verified=not remaining,
         )
-        if stability_campaign is not None and stability_campaign["status"] == "running":
+        if (
+            stability_experiment is not None
+            and stability_experiment["status"] == "running"
+        ):
             self.store.finish_active_stability_windows(
                 run_id,
                 status=capacity_status,
@@ -1690,10 +1690,9 @@ class PilotSupervisor:
                 status="not_run_operator_stop",
                 stop_reason=TerminalReason.OPERATOR_CLEANUP.value,
             )
-            self.store.finish_stability_campaign_if_complete(
-                stability_campaign["campaign_id"],
-                campaign_status=("cleanup_incomplete" if remaining else "stopped"),
-                run_status=("cleanup_incomplete" if remaining else "stopped"),
+            self.store.finish_stability_experiment_if_complete(
+                stability_experiment["experiment_id"],
+                status=("cleanup_incomplete" if remaining else "stopped"),
                 termination_reason=(
                     "provider resources remain unresolved"
                     if remaining
@@ -1718,8 +1717,8 @@ class PilotSupervisor:
 
     def recover_run(self, run_id: str) -> list[object]:
         self.store.run_row(run_id)
-        capacity_campaign = self.store.capacity_campaign_for_run(run_id)
-        stability_campaign = self.store.stability_campaign_for_run(run_id)
+        capacity_experiment = self.store.capacity_experiment_for_run(run_id)
+        stability_experiment = self.store.stability_experiment_for_run(run_id)
         self._censor_unfinished_canaries(
             run_id,
             TerminalReason.RIGHT_CENSORED_COLLECTOR_LOSS,
@@ -1730,7 +1729,7 @@ class PilotSupervisor:
             run_id,
             status=("recovery_cleanup_incomplete" if remaining else "collector_loss"),
             reason=TerminalReason.RIGHT_CENSORED_COLLECTOR_LOSS.value,
-            preserve_scheduled=capacity_campaign is not None,
+            preserve_scheduled=capacity_experiment is not None,
         )
         self._finish_unfinished_canary_epochs(
             run_id,
@@ -1738,7 +1737,10 @@ class PilotSupervisor:
             reason=TerminalReason.RIGHT_CENSORED_COLLECTOR_LOSS.value,
             cleanup_verified=not remaining,
         )
-        if stability_campaign is not None and stability_campaign["status"] == "running":
+        if (
+            stability_experiment is not None
+            and stability_experiment["status"] == "running"
+        ):
             recovery_status = (
                 "recovery_cleanup_incomplete" if remaining else "collector_loss"
             )
@@ -1756,16 +1758,11 @@ class PilotSupervisor:
                 for row in self.store.stability_window_rows(run_id)
             )
             if not remaining and has_future:
-                self.store.resume_stability_campaign(run_id)
+                self.store.resume_stability_experiment(run_id)
             elif not has_future:
-                self.store.finish_stability_campaign_if_complete(
-                    stability_campaign["campaign_id"],
-                    campaign_status=(
-                        "recovery_cleanup_incomplete"
-                        if remaining
-                        else "recovered_after_collector_loss"
-                    ),
-                    run_status=(
+                self.store.finish_stability_experiment_if_complete(
+                    stability_experiment["experiment_id"],
+                    status=(
                         "recovery_cleanup_incomplete"
                         if remaining
                         else "recovered_after_collector_loss"
@@ -1776,15 +1773,15 @@ class PilotSupervisor:
                         else "collector process loss"
                     ),
                 )
-        if stability_campaign is not None:
+        if stability_experiment is not None:
             if remaining:
                 self.store.finish_run(
                     run_id,
                     "recovery_cleanup_incomplete",
                     "provider resources remain unresolved",
                 )
-        elif capacity_campaign is not None and not remaining:
-            self.store.resume_capacity_campaign(run_id)
+        elif capacity_experiment is not None and not remaining:
+            self.store.resume_capacity_experiment(run_id)
         else:
             self.store.finish_run(
                 run_id,

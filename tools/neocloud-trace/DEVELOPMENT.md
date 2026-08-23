@@ -124,8 +124,8 @@ The public parser is built in `src/neocloud_trace/cli.py`.
 When adding or changing a command:
 
 1. place operational options on the command parser, not on the top-level parser;
-2. require `--enable-active` for every path that can create or delete a provider
-   resource;
+2. default every path that can create, delete, or advance provider resources to
+   a useful dry-run, and require `--execute` for mutations;
 3. load plan metadata through the shared host/vantage resolution path for
    plan-based commands;
 4. keep stdout JSON stable and machine-readable;
@@ -149,6 +149,11 @@ The schema is defined in `src/neocloud_trace/storage/schema.sql`; persistence
 operations are implemented in `storage/store.py`. Opening a database runs the
 idempotent schema statements and enables WAL mode.
 
+Active experiment identity, workflow, cohort, configuration, and lifecycle are
+stored together in `experiment_runs`. Older databases are migrated in place;
+retired identity-mapping tables are left untouched for recovery safety but are
+not used after their values have been imported.
+
 For schema or exporter changes:
 
 1. state the row grain and primary linkage before adding columns;
@@ -163,9 +168,9 @@ outer sampling unit and must include missed windows. `canary_epochs` is an
 actually selected pair inside a window; `stability_window_epochs` provides the
 explicit link. Do not derive the outer denominator from canary rows.
 
-Campaign tests should cover schedule materialization, idempotent claims from two
-SQLite connections, missed slots, recovery with future work preserved, cleanup
-failure, and exports containing zero-observation scheduled rows.
+Experiment tests should cover schedule materialization, idempotent claims from
+two SQLite connections, missed slots, recovery with future work preserved,
+cleanup failure, and exports containing zero-observation scheduled rows.
 
 Local databases, `-wal`/`-shm` files, exports, logs, and temporary results are
 ignored by Git. Use a temporary or `data/neocloud-trace/` path for development
@@ -188,8 +193,9 @@ neocloud-trace catalog \
 ```
 
 Do not put real credentials in plans, fixtures, shell history examples, or test
-output. Active manual tests require an explicit reviewed plan, budget, cleanup
-procedure, and `--enable-active`.
+output. Exercise the default dry-run before an active manual test. Active manual
+tests require an explicit reviewed plan, budget, cleanup procedure, and
+`--execute`; missing credentials are not a substitute for this guard.
 
 After an active test, always inspect ownership:
 

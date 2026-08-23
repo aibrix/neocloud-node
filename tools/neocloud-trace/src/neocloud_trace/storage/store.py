@@ -83,7 +83,101 @@ class TraceStore:
             if self.path != ":memory:":
                 self.connection.execute("PRAGMA journal_mode=WAL")
             self.connection.executescript(SCHEMA)
+            self._migrate_experiment_identity()
             self.connection.commit()
+
+    def _table_exists(self, table: str) -> bool:
+        return (
+            self.connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+            is not None
+        )
+
+    def _column_names(self, table: str) -> set[str]:
+        return {
+            str(row["name"])
+            for row in self.connection.execute(f"PRAGMA table_info({table})")
+        }
+
+    def _migrate_experiment_identity(self) -> None:
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            columns = self._column_names("experiment_runs")
+            for column in ("workflow", "experiment_id", "cohort_name"):
+                if column in columns:
+                    continue
+                self.connection.execute(
+                    f"ALTER TABLE experiment_runs ADD COLUMN {column} TEXT"
+                )
+
+            legacy_tables = (
+                ("capacity_campaigns", "capacity"),
+                ("stability_campaigns", "stability"),
+            )
+            for table, workflow in legacy_tables:
+                if not self._table_exists(table):
+                    continue
+                self.connection.execute(
+                    f"""
+                    UPDATE experiment_runs
+                    SET workflow=?,
+                        experiment_id=(
+                            SELECT campaign_id FROM {table} legacy
+                            WHERE legacy.run_id=experiment_runs.id
+                        ),
+                        cohort_name=(
+                            SELECT cohort_name FROM {table} legacy
+                            WHERE legacy.run_id=experiment_runs.id
+                        ),
+                        status=(
+                            SELECT status FROM {table} legacy
+                            WHERE legacy.run_id=experiment_runs.id
+                        ),
+                        finished_at=COALESCE(
+                            (
+                                SELECT finished_at FROM {table} legacy
+                                WHERE legacy.run_id=experiment_runs.id
+                            ),
+                            experiment_runs.finished_at
+                        )
+                    WHERE (
+                        experiment_runs.workflow IS NULL
+                        OR experiment_runs.workflow=''
+                        OR experiment_runs.experiment_id IS NULL
+                    ) AND EXISTS (
+                        SELECT 1 FROM {table} legacy
+                        WHERE legacy.run_id=experiment_runs.id
+                    )
+                    """,
+                    (workflow,),
+                )
+
+            self.connection.execute(
+                """
+                UPDATE experiment_runs
+                SET workflow=CASE
+                    WHEN config_json LIKE '%\"catalog\"%'
+                      OR config_json LIKE '%\"collection\"%'
+                    THEN 'catalog'
+                    ELSE 'standalone'
+                END
+                WHERE workflow IS NULL OR workflow=''
+                """
+            )
+            self.connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                  experiment_runs_workflow_experiment_id_uq
+                ON experiment_runs(workflow, experiment_id)
+                WHERE experiment_id IS NOT NULL
+                """
+            )
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
 
     def close(self) -> None:
         with self._lock:
@@ -101,6 +195,7 @@ class TraceStore:
             {"experiment": dataclasses.asdict(config), "document": config_document}
         )
         return self._start_trace_run(
+            workflow="standalone",
             protocol_version=config.protocol_version,
             config_json=config_json,
             host_id=config.host_id,
@@ -119,6 +214,7 @@ class TraceStore:
         python_version: str | None = None,
     ) -> str:
         return self._start_trace_run(
+            workflow="catalog",
             protocol_version=config.protocol_version,
             config_json=json_text({"catalog": dataclasses.asdict(config)}),
             host_id=config.host_id,
@@ -132,6 +228,7 @@ class TraceStore:
     def _start_trace_run(
         self,
         *,
+        workflow: str,
         protocol_version: str,
         config_json: str,
         host_id: str,
@@ -147,13 +244,15 @@ class TraceStore:
             self.connection.execute(
                 """
                 INSERT INTO experiment_runs
-                  (id, protocol_version, config_hash, config_json, host_id, vantage_id,
-                   collector_revision, python_version, started_at, status,
-                   total_budget_usd, max_active_gpus_per_provider)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)
+                  (id, workflow, protocol_version, config_hash, config_json,
+                   host_id, vantage_id, collector_revision, python_version,
+                   started_at, status, total_budget_usd,
+                   max_active_gpus_per_provider)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)
                 """,
                 (
                     run_id,
+                    workflow,
                     protocol_version,
                     config_hash,
                     config_json,
@@ -168,22 +267,22 @@ class TraceStore:
             )
         return run_id
 
-    def ensure_capacity_campaign(
+    def ensure_capacity_experiment(
         self,
         config: ExperimentConfig,
         config_document: dict[str, Any],
         *,
-        campaign_id: str,
+        experiment_id: str,
         cohort_name: str,
         started_at: str,
         epochs: list[dict[str, Any]],
         collector_revision: str | None = None,
         python_version: str | None = None,
     ) -> tuple[str, bool]:
-        if not campaign_id.strip() or not cohort_name.strip():
-            raise ValueError("capacity campaign ID and cohort name are required")
+        if not experiment_id.strip() or not cohort_name.strip():
+            raise ValueError("capacity experiment ID and cohort name are required")
         if not epochs:
-            raise ValueError("capacity campaign requires scheduled epochs")
+            raise ValueError("capacity experiment requires scheduled epochs")
         config_json = json_text(
             {"experiment": dataclasses.asdict(config), "document": config_document}
         )
@@ -192,8 +291,11 @@ class TraceStore:
             self.connection.execute("BEGIN IMMEDIATE")
             try:
                 existing = self.connection.execute(
-                    "SELECT * FROM capacity_campaigns WHERE campaign_id=?",
-                    (campaign_id,),
+                    """
+                    SELECT * FROM experiment_runs
+                    WHERE workflow='capacity' AND experiment_id=?
+                    """,
+                    (experiment_id,),
                 ).fetchone()
                 if existing is not None:
                     if (
@@ -205,19 +307,23 @@ class TraceStore:
                             "experiment definition"
                         )
                     self.connection.commit()
-                    return str(existing["run_id"]), False
+                    return str(existing["id"]), False
 
                 run_id = str(uuid.uuid4())
                 self.connection.execute(
                     """
                     INSERT INTO experiment_runs
-                      (id, protocol_version, config_hash, config_json, host_id,
-                       vantage_id, collector_revision, python_version, started_at,
-                       status, total_budget_usd, max_active_gpus_per_provider)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)
+                      (id, workflow, experiment_id, cohort_name, protocol_version,
+                       config_hash, config_json, host_id, vantage_id,
+                       collector_revision, python_version, started_at, status,
+                       total_budget_usd, max_active_gpus_per_provider)
+                    VALUES (?, 'capacity', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            'running', ?, ?)
                     """,
                     (
                         run_id,
+                        experiment_id,
+                        cohort_name,
                         config.protocol_version,
                         config_hash,
                         config_json,
@@ -229,15 +335,6 @@ class TraceStore:
                         config.total_budget_usd,
                         config.max_active_gpus_per_provider,
                     ),
-                )
-                self.connection.execute(
-                    """
-                    INSERT INTO capacity_campaigns
-                      (campaign_id, run_id, cohort_name, config_hash, created_at,
-                       status)
-                    VALUES (?, ?, ?, ?, ?, 'running')
-                    """,
-                    (campaign_id, run_id, cohort_name, config_hash, started_at),
                 )
                 for epoch in epochs:
                     cell = epoch["cell"]
@@ -278,38 +375,34 @@ class TraceStore:
                 self.connection.rollback()
                 raise
 
-    def capacity_campaign_row(self, campaign_id: str) -> sqlite3.Row:
+    def capacity_experiment_row(self, experiment_id: str) -> sqlite3.Row:
         with self._lock:
             row = self.connection.execute(
-                "SELECT * FROM capacity_campaigns WHERE campaign_id=?",
-                (campaign_id,),
+                """
+                SELECT * FROM experiment_runs
+                WHERE workflow='capacity' AND experiment_id=?
+                """,
+                (experiment_id,),
             ).fetchone()
         if row is None:
-            raise KeyError(campaign_id)
+            raise KeyError(experiment_id)
         return row
 
-    def capacity_campaign_for_run(self, run_id: str) -> sqlite3.Row | None:
+    def capacity_experiment_for_run(self, run_id: str) -> sqlite3.Row | None:
         with self._lock:
             return self.connection.execute(
-                "SELECT * FROM capacity_campaigns WHERE run_id=?",
+                "SELECT * FROM experiment_runs WHERE id=? AND workflow='capacity'",
                 (run_id,),
             ).fetchone()
 
-    def resume_capacity_campaign(self, run_id: str) -> None:
+    def resume_capacity_experiment(self, run_id: str) -> None:
         with self._lock, self.connection:
-            campaign = self.connection.execute(
-                "SELECT * FROM capacity_campaigns WHERE run_id=?",
+            experiment = self.connection.execute(
+                "SELECT * FROM experiment_runs WHERE id=? AND workflow='capacity'",
                 (run_id,),
             ).fetchone()
-            if campaign is None:
+            if experiment is None:
                 raise KeyError(run_id)
-            self.connection.execute(
-                """
-                UPDATE capacity_campaigns
-                SET status='running', finished_at=NULL WHERE run_id=?
-                """,
-                (run_id,),
-            )
             self.connection.execute(
                 """
                 UPDATE experiment_runs
@@ -322,7 +415,7 @@ class TraceStore:
 
     def claim_due_capacity_epoch(
         self,
-        campaign_id: str,
+        experiment_id: str,
         *,
         due_at: str,
         expired_before: str,
@@ -330,13 +423,16 @@ class TraceStore:
         with self._lock:
             self.connection.execute("BEGIN IMMEDIATE")
             try:
-                campaign = self.connection.execute(
-                    "SELECT * FROM capacity_campaigns WHERE campaign_id=?",
-                    (campaign_id,),
+                experiment = self.connection.execute(
+                    """
+                    SELECT * FROM experiment_runs
+                    WHERE workflow='capacity' AND experiment_id=?
+                    """,
+                    (experiment_id,),
                 ).fetchone()
-                if campaign is None:
-                    raise KeyError(campaign_id)
-                if campaign["status"] != "running":
+                if experiment is None:
+                    raise KeyError(experiment_id)
+                if experiment["status"] != "running":
                     self.connection.commit()
                     return "complete", None
                 active = self.connection.execute(
@@ -346,7 +442,7 @@ class TraceStore:
                       AND status IN ('claimed', 'running')
                     ORDER BY sequence LIMIT 1
                     """,
-                    (campaign["run_id"], campaign["cohort_name"]),
+                    (experiment["id"], experiment["cohort_name"]),
                 ).fetchone()
                 if active is not None:
                     self.connection.commit()
@@ -376,8 +472,8 @@ class TraceStore:
                     """,
                     (
                         finished_at,
-                        campaign["run_id"],
-                        campaign["cohort_name"],
+                        experiment["id"],
+                        experiment["cohort_name"],
                         expired_before,
                     ),
                 )
@@ -388,7 +484,7 @@ class TraceStore:
                       AND scheduled_at<=?
                     ORDER BY scheduled_at, sequence LIMIT 1
                     """,
-                    (campaign["run_id"], campaign["cohort_name"], due_at),
+                    (experiment["id"], experiment["cohort_name"], due_at),
                 ).fetchone()
                 if epoch is None:
                     remaining = self.connection.execute(
@@ -396,7 +492,7 @@ class TraceStore:
                         SELECT COUNT(*) FROM capacity_epochs
                         WHERE run_id=? AND cohort_name=? AND status='scheduled'
                         """,
-                        (campaign["run_id"], campaign["cohort_name"]),
+                        (experiment["id"], experiment["cohort_name"]),
                     ).fetchone()[0]
                     self.connection.commit()
                     return ("idle" if remaining else "complete"), None
@@ -420,58 +516,54 @@ class TraceStore:
                 self.connection.rollback()
                 raise
 
-    def finish_capacity_campaign_if_complete(self, campaign_id: str) -> bool:
+    def finish_capacity_experiment_if_complete(self, experiment_id: str) -> bool:
         with self._lock, self.connection:
-            campaign = self.connection.execute(
-                "SELECT * FROM capacity_campaigns WHERE campaign_id=?",
-                (campaign_id,),
+            experiment = self.connection.execute(
+                """
+                SELECT * FROM experiment_runs
+                WHERE workflow='capacity' AND experiment_id=?
+                """,
+                (experiment_id,),
             ).fetchone()
-            if campaign is None:
-                raise KeyError(campaign_id)
+            if experiment is None:
+                raise KeyError(experiment_id)
             remaining = self.connection.execute(
                 """
                 SELECT COUNT(*) FROM capacity_epochs
                 WHERE run_id=? AND cohort_name=?
                   AND status IN ('scheduled', 'claimed', 'running')
                 """,
-                (campaign["run_id"], campaign["cohort_name"]),
+                (experiment["id"], experiment["cohort_name"]),
             ).fetchone()[0]
             if remaining:
                 return False
             finished_at = utc_now()
             self.connection.execute(
                 """
-                UPDATE capacity_campaigns
-                SET status='complete', finished_at=? WHERE campaign_id=?
-                """,
-                (finished_at, campaign_id),
-            )
-            self.connection.execute(
-                """
                 UPDATE experiment_runs
                 SET status='complete', finished_at=?, termination_reason=NULL
                 WHERE id=?
                 """,
-                (finished_at, campaign["run_id"]),
+                (finished_at, experiment["id"]),
             )
         return True
 
-    def ensure_stability_campaign(
+    def ensure_stability_experiment(
         self,
         config: ExperimentConfig,
         config_document: dict[str, Any],
         *,
-        campaign_id: str,
+        experiment_id: str,
         cohort_name: str,
         started_at: str,
         windows: list[dict[str, Any]],
         collector_revision: str | None = None,
         python_version: str | None = None,
     ) -> tuple[str, bool]:
-        if not campaign_id.strip() or not cohort_name.strip():
-            raise ValueError("stability campaign ID and cohort name are required")
+        if not experiment_id.strip() or not cohort_name.strip():
+            raise ValueError("stability experiment ID and cohort name are required")
         if not windows:
-            raise ValueError("stability campaign requires scheduled windows")
+            raise ValueError("stability experiment requires scheduled windows")
         config_json = json_text(
             {"experiment": dataclasses.asdict(config), "document": config_document}
         )
@@ -480,8 +572,11 @@ class TraceStore:
             self.connection.execute("BEGIN IMMEDIATE")
             try:
                 existing = self.connection.execute(
-                    "SELECT * FROM stability_campaigns WHERE campaign_id=?",
-                    (campaign_id,),
+                    """
+                    SELECT * FROM experiment_runs
+                    WHERE workflow='stability' AND experiment_id=?
+                    """,
+                    (experiment_id,),
                 ).fetchone()
                 if existing is not None:
                     if (
@@ -493,19 +588,23 @@ class TraceStore:
                             "experiment definition"
                         )
                     self.connection.commit()
-                    return str(existing["run_id"]), False
+                    return str(existing["id"]), False
 
                 run_id = str(uuid.uuid4())
                 self.connection.execute(
                     """
                     INSERT INTO experiment_runs
-                      (id, protocol_version, config_hash, config_json, host_id,
-                       vantage_id, collector_revision, python_version, started_at,
-                       status, total_budget_usd, max_active_gpus_per_provider)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)
+                      (id, workflow, experiment_id, cohort_name, protocol_version,
+                       config_hash, config_json, host_id, vantage_id,
+                       collector_revision, python_version, started_at, status,
+                       total_budget_usd, max_active_gpus_per_provider)
+                    VALUES (?, 'stability', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            'running', ?, ?)
                     """,
                     (
                         run_id,
+                        experiment_id,
+                        cohort_name,
                         config.protocol_version,
                         config_hash,
                         config_json,
@@ -517,15 +616,6 @@ class TraceStore:
                         config.total_budget_usd,
                         config.max_active_gpus_per_provider,
                     ),
-                )
-                self.connection.execute(
-                    """
-                    INSERT INTO stability_campaigns
-                      (campaign_id, run_id, cohort_name, config_hash, created_at,
-                       status)
-                    VALUES (?, ?, ?, ?, ?, 'running')
-                    """,
-                    (campaign_id, run_id, cohort_name, config_hash, started_at),
                 )
                 for window in windows:
                     self.connection.execute(
@@ -553,38 +643,34 @@ class TraceStore:
                 self.connection.rollback()
                 raise
 
-    def stability_campaign_row(self, campaign_id: str) -> sqlite3.Row:
+    def stability_experiment_row(self, experiment_id: str) -> sqlite3.Row:
         with self._lock:
             row = self.connection.execute(
-                "SELECT * FROM stability_campaigns WHERE campaign_id=?",
-                (campaign_id,),
+                """
+                SELECT * FROM experiment_runs
+                WHERE workflow='stability' AND experiment_id=?
+                """,
+                (experiment_id,),
             ).fetchone()
         if row is None:
-            raise KeyError(campaign_id)
+            raise KeyError(experiment_id)
         return row
 
-    def stability_campaign_for_run(self, run_id: str) -> sqlite3.Row | None:
+    def stability_experiment_for_run(self, run_id: str) -> sqlite3.Row | None:
         with self._lock:
             return self.connection.execute(
-                "SELECT * FROM stability_campaigns WHERE run_id=?",
+                "SELECT * FROM experiment_runs WHERE id=? AND workflow='stability'",
                 (run_id,),
             ).fetchone()
 
-    def resume_stability_campaign(self, run_id: str) -> None:
+    def resume_stability_experiment(self, run_id: str) -> None:
         with self._lock, self.connection:
-            campaign = self.connection.execute(
-                "SELECT * FROM stability_campaigns WHERE run_id=?",
+            experiment = self.connection.execute(
+                "SELECT * FROM experiment_runs WHERE id=? AND workflow='stability'",
                 (run_id,),
             ).fetchone()
-            if campaign is None:
+            if experiment is None:
                 raise KeyError(run_id)
-            self.connection.execute(
-                """
-                UPDATE stability_campaigns
-                SET status='running', finished_at=NULL WHERE run_id=?
-                """,
-                (run_id,),
-            )
             self.connection.execute(
                 """
                 UPDATE experiment_runs
@@ -597,20 +683,23 @@ class TraceStore:
 
     def claim_due_stability_window(
         self,
-        campaign_id: str,
+        experiment_id: str,
         *,
         due_at: str,
     ) -> tuple[str, sqlite3.Row | None]:
         with self._lock:
             self.connection.execute("BEGIN IMMEDIATE")
             try:
-                campaign = self.connection.execute(
-                    "SELECT * FROM stability_campaigns WHERE campaign_id=?",
-                    (campaign_id,),
+                experiment = self.connection.execute(
+                    """
+                    SELECT * FROM experiment_runs
+                    WHERE workflow='stability' AND experiment_id=?
+                    """,
+                    (experiment_id,),
                 ).fetchone()
-                if campaign is None:
-                    raise KeyError(campaign_id)
-                if campaign["status"] != "running":
+                if experiment is None:
+                    raise KeyError(experiment_id)
+                if experiment["status"] != "running":
                     self.connection.commit()
                     return "complete", None
                 active = self.connection.execute(
@@ -620,7 +709,7 @@ class TraceStore:
                       AND status IN ('claimed', 'running')
                     ORDER BY sequence LIMIT 1
                     """,
-                    (campaign["run_id"], campaign["cohort_name"]),
+                    (experiment["id"], experiment["cohort_name"]),
                 ).fetchone()
                 if active is not None:
                     self.connection.commit()
@@ -649,8 +738,8 @@ class TraceStore:
                     """,
                     (
                         finished_at,
-                        campaign["run_id"],
-                        campaign["cohort_name"],
+                        experiment["id"],
+                        experiment["cohort_name"],
                         due_at,
                     ),
                 )
@@ -662,8 +751,8 @@ class TraceStore:
                     ORDER BY scheduled_at, sequence LIMIT 1
                     """,
                     (
-                        campaign["run_id"],
-                        campaign["cohort_name"],
+                        experiment["id"],
+                        experiment["cohort_name"],
                         due_at,
                         due_at,
                     ),
@@ -674,7 +763,7 @@ class TraceStore:
                         SELECT COUNT(*) FROM stability_windows
                         WHERE run_id=? AND cohort_name=? AND status='scheduled'
                         """,
-                        (campaign["run_id"], campaign["cohort_name"]),
+                        (experiment["id"], experiment["cohort_name"]),
                     ).fetchone()[0]
                     self.connection.commit()
                     return ("idle" if remaining else "complete"), None
@@ -824,39 +913,34 @@ class TraceStore:
                 (run_id,),
             ).fetchall()
 
-    def finish_stability_campaign_if_complete(
+    def finish_stability_experiment_if_complete(
         self,
-        campaign_id: str,
+        experiment_id: str,
         *,
-        campaign_status: str = "complete",
-        run_status: str = "complete",
+        status: str = "complete",
         termination_reason: str | None = None,
     ) -> bool:
         with self._lock, self.connection:
-            campaign = self.connection.execute(
-                "SELECT * FROM stability_campaigns WHERE campaign_id=?",
-                (campaign_id,),
+            experiment = self.connection.execute(
+                """
+                SELECT * FROM experiment_runs
+                WHERE workflow='stability' AND experiment_id=?
+                """,
+                (experiment_id,),
             ).fetchone()
-            if campaign is None:
-                raise KeyError(campaign_id)
+            if experiment is None:
+                raise KeyError(experiment_id)
             remaining = self.connection.execute(
                 """
                 SELECT COUNT(*) FROM stability_windows
                 WHERE run_id=? AND cohort_name=?
                   AND status IN ('scheduled', 'claimed', 'running')
                 """,
-                (campaign["run_id"], campaign["cohort_name"]),
+                (experiment["id"], experiment["cohort_name"]),
             ).fetchone()[0]
             if remaining:
                 return False
             finished_at = utc_now()
-            self.connection.execute(
-                """
-                UPDATE stability_campaigns
-                SET status=?, finished_at=? WHERE campaign_id=?
-                """,
-                (campaign_status, finished_at, campaign_id),
-            )
             self.connection.execute(
                 """
                 UPDATE experiment_runs
@@ -864,10 +948,10 @@ class TraceStore:
                 WHERE id=?
                 """,
                 (
-                    run_status,
+                    status,
                     finished_at,
                     termination_reason,
-                    campaign["run_id"],
+                    experiment["id"],
                 ),
             )
         return True

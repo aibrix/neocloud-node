@@ -125,7 +125,7 @@ CAPACITY_DEPTH_FIELDS = (
 
 STABILITY_WINDOW_FIELDS = (
     "run_id",
-    "campaign_id",
+    "experiment_id",
     "cohort_name",
     "window_sequence",
     "scheduled_offset_seconds",
@@ -293,7 +293,7 @@ def stability_window_rows(
     store.run_row(run_id)
     rows = store.connection.execute(
         """
-        SELECT w.*, c.campaign_id,
+        SELECT w.*, e.experiment_id,
                COUNT(DISTINCT l.epoch_id) AS canary_epoch_count,
                COUNT(cl.id) AS lease_count,
                COALESCE(SUM(CASE WHEN cl.interruptible=1 THEN 1 ELSE 0 END), 0)
@@ -307,7 +307,7 @@ def stability_window_rows(
                COALESCE(SUM(CASE WHEN cl.censor_reason IS NOT NULL THEN 1 ELSE 0 END), 0)
                  AS terminal_lease_count
         FROM stability_windows w
-        JOIN stability_campaigns c ON c.run_id=w.run_id
+        JOIN experiment_runs e ON e.id=w.run_id
         LEFT JOIN stability_window_epochs l ON l.window_id=w.id
         LEFT JOIN canary_leases cl ON cl.pair_id=l.epoch_id
         WHERE w.run_id=?
@@ -322,7 +322,7 @@ def stability_window_rows(
         result.append(
             {
                 "run_id": row["run_id"],
-                "campaign_id": row["campaign_id"],
+                "experiment_id": row["experiment_id"],
                 "cohort_name": row["cohort_name"],
                 "window_sequence": row["sequence"],
                 "scheduled_offset_seconds": row["scheduled_offset_seconds"],

@@ -2,6 +2,9 @@ PRAGMA foreign_keys=ON;
 
 CREATE TABLE IF NOT EXISTS experiment_runs (
     id TEXT PRIMARY KEY,
+    workflow TEXT NOT NULL,
+    experiment_id TEXT,
+    cohort_name TEXT,
     protocol_version TEXT NOT NULL,
     config_hash TEXT NOT NULL,
     config_json TEXT NOT NULL,
@@ -145,26 +148,6 @@ CREATE TABLE IF NOT EXISTS capacity_epochs (
     stop_reason TEXT,
     details_json TEXT NOT NULL,
     UNIQUE(run_id, cohort_name, sequence)
-);
-
-CREATE TABLE IF NOT EXISTS capacity_campaigns (
-    campaign_id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL UNIQUE REFERENCES experiment_runs(id),
-    cohort_name TEXT NOT NULL,
-    config_hash TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    finished_at TEXT,
-    status TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS stability_campaigns (
-    campaign_id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL UNIQUE REFERENCES experiment_runs(id),
-    cohort_name TEXT NOT NULL,
-    config_hash TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    finished_at TEXT,
-    status TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS stability_windows (

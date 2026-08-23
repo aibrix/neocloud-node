@@ -21,15 +21,9 @@ from .model import CatalogConfig
 from .providers import LambdaResearchClient, RunPodResearchClient
 from .runners import CatalogCollector
 from .storage import TraceStore
-from .supervisor import ActiveRunDisabled, PilotSupervisor, load_plan
+from .supervisor import ExecutionDisabled, PilotSupervisor, load_plan
 
 
-ACTIVE_COMMANDS = {
-    "run",
-    "tick",
-    "cleanup",
-    "recover",
-}
 SUPPORTED_PROVIDERS = ("lambda", "runpod")
 CATALOG_PROTOCOL_VERSION = "1.0-passive-catalog"
 ACTIVE_PLAN_SECTIONS = ("capacity_cohorts", "canary_cohorts")
@@ -56,11 +50,11 @@ def _add_plan_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_active_argument(parser: argparse.ArgumentParser) -> None:
+def _add_execute_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "--enable-active",
+        "--execute",
         action="store_true",
-        help="allow billable create/delete API calls",
+        help="execute provider mutations (default: dry-run)",
     )
 
 
@@ -129,10 +123,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="run one due stability sampling window",
     )
     _add_plan_arguments(run)
-    _add_active_argument(run)
+    _add_execute_argument(run)
     run.add_argument(
-        "--campaign-id",
-        help="stable campaign identity (default: reuse the database campaign)",
+        "--experiment-id",
+        help="stable experiment identity (default: reuse the database experiment)",
     )
 
     tick = subparsers.add_parser(
@@ -140,10 +134,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="advance one due capacity-cohort epoch",
     )
     _add_plan_arguments(tick)
-    _add_active_argument(tick)
+    _add_execute_argument(tick)
     tick.add_argument(
-        "--campaign-id",
-        help="stable campaign identity (default: reuse the database campaign)",
+        "--experiment-id",
+        help="stable experiment identity (default: reuse the database experiment)",
     )
 
     status = subparsers.add_parser("status", help="show persisted run status")
@@ -152,7 +146,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     cleanup = subparsers.add_parser("cleanup", help="delete and verify owned resources")
     _add_database_argument(cleanup)
-    _add_active_argument(cleanup)
+    _add_execute_argument(cleanup)
     cleanup.add_argument("--run-id")
 
     recover = subparsers.add_parser(
@@ -160,7 +154,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="right-censor a lost collector run and verify remote cleanup",
     )
     _add_database_argument(recover)
-    _add_active_argument(recover)
+    _add_execute_argument(recover)
     recover.add_argument("--run-id")
 
     trial = subparsers.add_parser(
@@ -230,11 +224,6 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def require_active(args: argparse.Namespace) -> None:
-    if args.command in ACTIVE_COMMANDS and not args.enable_active:
-        raise ActiveRunDisabled(f"{args.command} requires --enable-active")
-
-
 def _provider_clients(names: set[str]) -> dict[str, object]:
     clients: dict[str, object] = {}
     if "lambda" in names:
@@ -280,27 +269,35 @@ def _load_cli_plan(
     return plan
 
 
-def _capacity_campaign_id(store: TraceStore) -> str:
+def _capacity_experiment_id(store: TraceStore) -> str:
     rows = store.connection.execute(
-        "SELECT campaign_id FROM capacity_campaigns ORDER BY created_at"
+        """
+        SELECT experiment_id FROM experiment_runs
+        WHERE workflow='capacity' AND experiment_id IS NOT NULL
+        ORDER BY started_at
+        """
     ).fetchall()
     if len(rows) > 1:
         raise ValueError(
             "capacity database contains multiple experiments; use one database "
             "per experiment"
         )
-    return str(rows[0]["campaign_id"]) if rows else "capacity-experiment"
+    return str(rows[0]["experiment_id"]) if rows else "capacity-experiment"
 
 
-def _stability_campaign_id(store: TraceStore) -> str:
+def _stability_experiment_id(store: TraceStore) -> str:
     rows = store.connection.execute(
-        "SELECT campaign_id FROM stability_campaigns ORDER BY created_at"
+        """
+        SELECT experiment_id FROM experiment_runs
+        WHERE workflow='stability' AND experiment_id IS NOT NULL
+        ORDER BY started_at
+        """
     ).fetchall()
     if len(rows) > 1:
         raise ValueError(
-            "stability database contains multiple experiments; pass --campaign-id"
+            "stability database contains multiple experiments; pass --experiment-id"
         )
-    return str(rows[0]["campaign_id"]) if rows else "stability-experiment"
+    return str(rows[0]["experiment_id"]) if rows else "stability-experiment"
 
 
 def _capacity_cohort_summary(cohort) -> dict[str, Any]:
@@ -393,8 +390,8 @@ def _run_capacity_tick(
     store: TraceStore,
     plan,
     *,
-    campaign_id: str,
-    enable_active: bool,
+    experiment_id: str,
+    execute: bool,
 ) -> dict[str, Any]:
     cohort = plan.capacity_cohorts[0]
     providers = _provider_clients({trial.cell.provider for trial in cohort.cells})
@@ -403,8 +400,8 @@ def _run_capacity_tick(
     try:
         return supervisor.capacity_tick(
             plan,
-            campaign_id=campaign_id,
-            enable_active=enable_active,
+            experiment_id=experiment_id,
+            execute=execute,
         )
     finally:
         _restore_signal_handlers(previous)
@@ -414,8 +411,8 @@ def _run_stability_window(
     store: TraceStore,
     plan,
     *,
-    campaign_id: str,
-    enable_active: bool,
+    experiment_id: str,
+    execute: bool,
 ) -> dict[str, Any]:
     cohort = plan.canary_cohorts[0]
     providers = _provider_clients({trial.cell.provider for trial in cohort.cells})
@@ -424,8 +421,8 @@ def _run_stability_window(
     try:
         return supervisor.stability_run(
             plan,
-            campaign_id=campaign_id,
-            enable_active=enable_active,
+            experiment_id=experiment_id,
+            execute=execute,
         )
     finally:
         _restore_signal_handlers(previous)
@@ -510,6 +507,9 @@ def _status(store: TraceStore, run_id: str | None) -> dict[str, Any]:
     }
     return {
         "run_id": selected,
+        "workflow": run["workflow"],
+        "experiment_id": run["experiment_id"],
+        "cohort_name": run["cohort_name"],
         "status": run["status"],
         "started_at": run["started_at"],
         "finished_at": run["finished_at"],
@@ -690,15 +690,50 @@ def _plan_summary(plan, db_path: str) -> dict[str, Any]:
     }
 
 
+def _plan_execution_preview(
+    store: TraceStore,
+    args: argparse.Namespace,
+    plan,
+) -> dict[str, Any]:
+    if args.command == "tick":
+        workflow = "capacity"
+        cohort_name = plan.capacity_cohorts[0].name
+        experiment_id = args.experiment_id or _capacity_experiment_id(store)
+    else:
+        workflow = "stability"
+        cohort_name = plan.canary_cohorts[0].name
+        experiment_id = args.experiment_id or _stability_experiment_id(store)
+    return {
+        "mode": "dry-run",
+        "status": "dry-run",
+        "command": args.command,
+        "workflow": workflow,
+        "experiment_id": experiment_id,
+        "cohort_name": cohort_name,
+        "provider_mutations": False,
+        **_plan_summary(plan, args.db),
+    }
+
+
 def _cleanup_or_recover(
     store: TraceStore,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     action = "clean" if args.command == "cleanup" else "recover"
     run_id = args.run_id or _latest_run_id(store, action)
-    providers = _provider_clients(
-        {item.provider for item in store.owned_resources(run_id)}
-    )
+    owned_resources = store.owned_resources(run_id)
+    if not args.execute:
+        return {
+            "mode": "dry-run",
+            "status": "dry-run",
+            "command": args.command,
+            "run_id": run_id,
+            "provider_mutations": False,
+            "would_process_resources": [
+                dataclasses.asdict(item) for item in owned_resources
+            ],
+        }
+    providers = _provider_clients({item.provider for item in owned_resources})
     supervisor = PilotSupervisor(store, providers)
     if args.command == "cleanup":
         remaining = supervisor.cleanup_run(run_id)
@@ -709,11 +744,11 @@ def _cleanup_or_recover(
     result["remaining_owned_resources"] = [
         dataclasses.asdict(item) for item in remaining
     ]
+    result["mode"] = "execute"
     return result
 
 
 def execute(args: argparse.Namespace) -> dict[str, Any]:
-    require_active(args)
     plan = None
     catalog_config = None
     if args.command in {"init", "tick", "run"}:
@@ -748,20 +783,24 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         assert plan is not None
         if args.command == "init":
             return _plan_summary(plan, args.db)
+        if args.command in {"tick", "run"} and not args.execute:
+            return _plan_execution_preview(store, args, plan)
         if args.command == "tick":
-            return _run_capacity_tick(
+            result = _run_capacity_tick(
                 store,
                 plan,
-                campaign_id=args.campaign_id or _capacity_campaign_id(store),
-                enable_active=args.enable_active,
+                experiment_id=args.experiment_id or _capacity_experiment_id(store),
+                execute=args.execute,
             )
+            return {"mode": "execute", **result}
         if args.command == "run":
-            return _run_stability_window(
+            result = _run_stability_window(
                 store,
                 plan,
-                campaign_id=args.campaign_id or _stability_campaign_id(store),
-                enable_active=args.enable_active,
+                experiment_id=args.experiment_id or _stability_experiment_id(store),
+                execute=args.execute,
             )
+            return {"mode": "execute", **result}
         raise ValueError(f"unsupported command: {args.command}")
     finally:
         store.close()
@@ -772,7 +811,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         result = execute(args)
-    except (ActiveRunDisabled, ValueError, RuntimeError) as error:
+    except (ExecutionDisabled, ValueError, RuntimeError) as error:
         print(
             json.dumps({"error": f"{type(error).__name__}: {error}"}), file=sys.stderr
         )

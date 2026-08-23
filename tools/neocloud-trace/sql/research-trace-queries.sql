@@ -310,7 +310,7 @@ WHERE l.run_id = :run_id
 -- 13. Durable Stability-window coverage. Keep missed windows with zero linked
 -- epochs or leases in the denominator.
 SELECT
-  c.campaign_id,
+  e.experiment_id,
   w.cohort_name,
   w.sequence AS window_sequence,
   w.scheduled_at,
@@ -328,7 +328,7 @@ SELECT
   SUM(l.interruptible = 0) AS matched_control_leases,
   SUM(l.application_ready_at IS NOT NULL) AS application_ready_leases
 FROM stability_windows w
-JOIN stability_campaigns c ON c.run_id = w.run_id
+JOIN experiment_runs e ON e.id = w.run_id
 LEFT JOIN stability_window_epochs link ON link.window_id = w.id
 LEFT JOIN canary_leases l ON l.pair_id = link.epoch_id
 WHERE w.run_id = :run_id
