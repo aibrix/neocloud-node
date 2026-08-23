@@ -10,13 +10,13 @@ sys.path.insert(0, str(TRACE_ROOT / "src"))
 from neocloud_trace.analysis.billing import import_billing_file, reconcile_costs
 from neocloud_trace.model import ExperimentConfig, TrialCell
 from neocloud_trace.providers import ProviderBillingRecord
-from neocloud_trace.storage import ResearchStore
+from neocloud_trace.storage import TraceStore
 
 
 class BillingReconciliationTest(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
-        self.store = ResearchStore(pathlib.Path(self.tempdir.name) / "trace.db")
+        self.store = TraceStore(pathlib.Path(self.tempdir.name) / "trace.db")
         self.run_id = self.store.start_run(
             ExperimentConfig(
                 protocol_version="3.0-billing",

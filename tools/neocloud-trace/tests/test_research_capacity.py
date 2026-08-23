@@ -22,7 +22,7 @@ from neocloud_trace.providers import (
     ResourceObservation,
 )
 from neocloud_trace.runners.capacity import CapacityRunner
-from neocloud_trace.storage import ResearchStore
+from neocloud_trace.storage import TraceStore
 
 
 class FakeCapacityProvider:
@@ -63,7 +63,7 @@ class FakeCapacityProvider:
 class CapacityRunnerTest(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
-        self.store = ResearchStore(pathlib.Path(self.tempdir.name) / "trace.db")
+        self.store = TraceStore(pathlib.Path(self.tempdir.name) / "trace.db")
         self.run_id = self.store.start_run(
             ExperimentConfig(
                 protocol_version="2.0",

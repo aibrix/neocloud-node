@@ -7,7 +7,7 @@ from collections.abc import Callable, Iterable
 
 from ..model import HostObservation
 from ..providers import CatalogFetch, classify_failure
-from ..storage import ResearchStore
+from ..storage import TraceStore
 
 
 @dataclasses.dataclass(frozen=True)
@@ -18,7 +18,7 @@ class PassiveResult:
 
 
 class PassiveWorker:
-    def __init__(self, store: ResearchStore, providers: Iterable[object]) -> None:
+    def __init__(self, store: TraceStore, providers: Iterable[object]) -> None:
         self.store = store
         self.providers = tuple(providers)
 
@@ -73,7 +73,7 @@ def default_network_probe(url: str, timeout: int = 10) -> tuple[str, int]:
 class HostMonitor:
     def __init__(
         self,
-        store: ResearchStore,
+        store: TraceStore,
         *,
         drift_threshold_seconds: float = 5.0,
         monotonic: Callable[[], float] = time.monotonic,

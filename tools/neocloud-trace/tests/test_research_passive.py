@@ -10,7 +10,7 @@ sys.path.insert(0, str(TRACE_ROOT / "src"))
 from neocloud_trace.model import ExperimentConfig
 from neocloud_trace.providers import HTTPResponse, LambdaResearchClient, RunPodResearchClient
 from neocloud_trace.runners.passive import HostMonitor, PassiveWorker
-from neocloud_trace.storage import ResearchStore
+from neocloud_trace.storage import TraceStore
 
 
 class ExactCatalogTest(unittest.TestCase):
@@ -132,7 +132,7 @@ class ExactCatalogTest(unittest.TestCase):
 class PassiveWorkerTest(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
-        self.store = ResearchStore(pathlib.Path(self.tempdir.name) / "trace.db")
+        self.store = TraceStore(pathlib.Path(self.tempdir.name) / "trace.db")
         self.run_id = self.store.start_run(
             ExperimentConfig(
                 protocol_version="2.0",

@@ -25,7 +25,7 @@ from neocloud_trace.providers import (
     HTTPResponse,
     ResourceObservation,
 )
-from neocloud_trace.storage import ResearchStore
+from neocloud_trace.storage import TraceStore
 from neocloud_trace.supervisor import (
     ActiveRunDisabled,
     BudgetExceeded,
@@ -279,7 +279,7 @@ class ResearchSupervisorTest(unittest.TestCase):
 
     def test_active_plan_cannot_run_without_explicit_enable_flag(self):
         plan = load_plan(self.plan_path)
-        store = ResearchStore(self.root / "trace.db")
+        store = TraceStore(self.root / "trace.db")
         self.addCleanup(store.close)
         supervisor = PilotSupervisor(store, providers={})
 
@@ -501,7 +501,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         self.assertFalse(second["campaign_created"])
         self.assertEqual(first["run_id"], second["run_id"])
         self.assertEqual(len(provider.created), 1)
-        store = ResearchStore(db_path)
+        store = TraceStore(db_path)
         self.addCleanup(store.close)
         run = store.run_row(first["run_id"])
         self.assertEqual(run["host_id"], socket.gethostname())
@@ -624,7 +624,7 @@ class ResearchSupervisorTest(unittest.TestCase):
     def test_show_depth_trial_cli_returns_shape_aware_payload(self):
         db_path = self.root / "payload.db"
         plan = load_plan(self.plan_path)
-        store = ResearchStore(db_path)
+        store = TraceStore(db_path)
         run_id = store.start_run(plan.experiment, plan.raw_document)
         cell = TrialCell(
             provider="runpod",
@@ -664,7 +664,7 @@ class ResearchSupervisorTest(unittest.TestCase):
 
     def test_budget_guard_records_conservative_hold_and_rejects_overspend(self):
         plan = load_plan(self.plan_path)
-        store = ResearchStore(self.root / "trace.db")
+        store = TraceStore(self.root / "trace.db")
         self.addCleanup(store.close)
         run_id = store.start_run(plan.experiment, plan.raw_document)
         guard = BudgetGuard(store, run_id, plan.experiment)
@@ -677,7 +677,7 @@ class ResearchSupervisorTest(unittest.TestCase):
 
     def test_budget_settlement_releases_unused_commitment_for_replacement(self):
         plan = load_plan(self.plan_path)
-        store = ResearchStore(self.root / "trace.db")
+        store = TraceStore(self.root / "trace.db")
         self.addCleanup(store.close)
         run_id = store.start_run(plan.experiment, plan.raw_document)
         guard = BudgetGuard(store, run_id, plan.experiment)
@@ -733,7 +733,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         )
         self.plan_path.write_text(json.dumps(document), encoding="utf-8")
         plan = load_plan(self.plan_path)
-        store = ResearchStore(self.root / "trace.db")
+        store = TraceStore(self.root / "trace.db")
         self.addCleanup(store.close)
         provider = FastFailingCanaryProvider()
         supervisor = PilotSupervisor(store, providers={"runpod": provider})
@@ -791,7 +791,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         )
         self.plan_path.write_text(json.dumps(document), encoding="utf-8")
         plan = load_plan(self.plan_path)
-        store = ResearchStore(self.root / "trace.db")
+        store = TraceStore(self.root / "trace.db")
         self.addCleanup(store.close)
         provider = SpotLaunchFailProvider()
 
@@ -847,7 +847,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         )
         self.plan_path.write_text(json.dumps(document), encoding="utf-8")
         plan = load_plan(self.plan_path)
-        store = ResearchStore(self.root / "trace.db")
+        store = TraceStore(self.root / "trace.db")
         self.addCleanup(store.close)
 
         run_id = PilotSupervisor(store, {"runpod": CleanupFailProvider()}).run(
@@ -863,7 +863,7 @@ class ResearchSupervisorTest(unittest.TestCase):
 
     def test_recovery_right_censors_collector_loss_before_cleanup(self):
         plan = load_plan(self.plan_path)
-        store = ResearchStore(self.root / "trace.db")
+        store = TraceStore(self.root / "trace.db")
         self.addCleanup(store.close)
         run_id = store.start_run(plan.experiment, plan.raw_document)
         cell = TrialCell(
@@ -967,7 +967,7 @@ class ResearchSupervisorTest(unittest.TestCase):
 
     def test_operator_cleanup_closes_unfinished_capacity_and_canary_epochs(self):
         plan = load_plan(self.plan_path)
-        store = ResearchStore(self.root / "trace.db")
+        store = TraceStore(self.root / "trace.db")
         self.addCleanup(store.close)
         run_id = store.start_run(plan.experiment, plan.raw_document)
         cell = TrialCell(
@@ -1096,7 +1096,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         )
         self.plan_path.write_text(json.dumps(document), encoding="utf-8")
         plan = load_plan(self.plan_path)
-        store = ResearchStore(self.root / "trace.db")
+        store = TraceStore(self.root / "trace.db")
         self.addCleanup(store.close)
         provider = ReadyCapacityProvider()
 
@@ -1159,7 +1159,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         )
         self.plan_path.write_text(json.dumps(document), encoding="utf-8")
         plan = load_plan(self.plan_path)
-        store = ResearchStore(self.root / "capacity-tick.db")
+        store = TraceStore(self.root / "capacity-tick.db")
         self.addCleanup(store.close)
         provider = ReadyCapacityProvider()
         supervisor = PilotSupervisor(store, {"runpod": provider})
@@ -1249,7 +1249,7 @@ class ResearchSupervisorTest(unittest.TestCase):
             }
         )
         self.plan_path.write_text(json.dumps(document), encoding="utf-8")
-        store = ResearchStore(self.root / "campaign-change.db")
+        store = TraceStore(self.root / "campaign-change.db")
         self.addCleanup(store.close)
         supervisor = PilotSupervisor(store, {"lambda": CountingCatalogProvider()})
         now = dt.datetime(2026, 8, 11, 0, 0, tzinfo=dt.timezone.utc)
@@ -1311,7 +1311,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         )
         self.plan_path.write_text(json.dumps(document), encoding="utf-8")
         plan = load_plan(self.plan_path)
-        store = ResearchStore(self.root / "missed-slots.db")
+        store = TraceStore(self.root / "missed-slots.db")
         self.addCleanup(store.close)
         provider = ReadyCapacityProvider()
         supervisor = PilotSupervisor(store, {"runpod": provider})
@@ -1380,7 +1380,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         )
         self.plan_path.write_text(json.dumps(document), encoding="utf-8")
         plan = load_plan(self.plan_path)
-        store = ResearchStore(self.root / "campaign-recovery.db")
+        store = TraceStore(self.root / "campaign-recovery.db")
         self.addCleanup(store.close)
         provider = CountingCatalogProvider()
         supervisor = PilotSupervisor(store, {"lambda": provider})
@@ -1592,7 +1592,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         )
         self.plan_path.write_text(json.dumps(document), encoding="utf-8")
         plan = load_plan(self.plan_path)
-        store = ResearchStore(self.root / "trace.db")
+        store = TraceStore(self.root / "trace.db")
         self.addCleanup(store.close)
         provider = ReadyCapacityProvider()
 
@@ -1650,7 +1650,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         )
         self.plan_path.write_text(json.dumps(document), encoding="utf-8")
         plan = load_plan(self.plan_path)
-        store = ResearchStore(self.root / "trace.db")
+        store = TraceStore(self.root / "trace.db")
         self.addCleanup(store.close)
         provider = FastFailingCanaryProvider()
 
@@ -1730,7 +1730,7 @@ class ResearchSupervisorTest(unittest.TestCase):
 
     def test_passive_sampling_continues_while_capacity_trial_is_blocked(self):
         plan = load_plan(self.plan_path)
-        store = ResearchStore(self.root / "trace.db")
+        store = TraceStore(self.root / "trace.db")
         self.addCleanup(store.close)
         provider = CountingCatalogProvider()
         supervisor = PilotSupervisor(

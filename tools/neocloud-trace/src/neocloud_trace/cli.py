@@ -18,7 +18,7 @@ from .analysis import (
 )
 from .analysis.billing import import_billing_file, reconcile_costs
 from .providers import LambdaResearchClient, RunPodResearchClient
-from .storage import ResearchStore
+from .storage import TraceStore
 from .supervisor import ActiveRunDisabled, PilotSupervisor, load_plan
 
 
@@ -269,7 +269,7 @@ def _load_cli_plan(
     return plan
 
 
-def _capacity_campaign_id(store: ResearchStore) -> str:
+def _capacity_campaign_id(store: TraceStore) -> str:
     rows = store.connection.execute(
         "SELECT campaign_id FROM capacity_campaigns ORDER BY created_at"
     ).fetchall()
@@ -334,7 +334,7 @@ def _restore_signal_handlers(previous) -> None:
         signal.signal(signum, handler)
 
 
-def _run_supervisor(store: ResearchStore, plan, *, enable_active: bool) -> str:
+def _run_supervisor(store: TraceStore, plan, *, enable_active: bool) -> str:
     providers = _provider_clients(_plan_providers(plan))
     supervisor = PilotSupervisor(store, providers)
     previous = _install_signal_handlers(supervisor)
@@ -345,7 +345,7 @@ def _run_supervisor(store: ResearchStore, plan, *, enable_active: bool) -> str:
 
 
 def _run_capacity_tick(
-    store: ResearchStore,
+    store: TraceStore,
     plan,
     *,
     campaign_id: str,
@@ -372,7 +372,7 @@ def _run_capacity_tick(
         _restore_signal_handlers(previous)
 
 
-def _status(store: ResearchStore, run_id: str | None) -> dict[str, Any]:
+def _status(store: TraceStore, run_id: str | None) -> dict[str, Any]:
     selected = run_id or store.latest_run_id()
     if not selected:
         return {"run_id": None, "status": "empty"}
@@ -428,14 +428,14 @@ def _status(store: ResearchStore, run_id: str | None) -> dict[str, Any]:
     }
 
 
-def _latest_run_id(store: ResearchStore, action: str) -> str:
+def _latest_run_id(store: TraceStore, action: str) -> str:
     run_id = store.latest_run_id()
     if not run_id:
         raise ValueError(f"no run exists to {action}")
     return run_id
 
 
-def _export_data(store: ResearchStore, args: argparse.Namespace) -> dict[str, Any]:
+def _export_data(store: TraceStore, args: argparse.Namespace) -> dict[str, Any]:
     run_id = args.run_id or _latest_run_id(store, "export")
     exporters = {
         "survival": export_survival_csv,
@@ -450,7 +450,7 @@ def _export_data(store: ResearchStore, args: argparse.Namespace) -> dict[str, An
     }
 
 
-def _trial_payload(store: ResearchStore, trial_id: str | None) -> dict[str, Any]:
+def _trial_payload(store: TraceStore, trial_id: str | None) -> dict[str, Any]:
     if not trial_id:
         row = store.connection.execute(
             "SELECT id FROM capacity_trials "
@@ -462,7 +462,7 @@ def _trial_payload(store: ResearchStore, trial_id: str | None) -> dict[str, Any]
     return capacity_trial_payload(store, trial_id)
 
 
-def _sync_billing(store: ResearchStore, args: argparse.Namespace) -> dict[str, Any]:
+def _sync_billing(store: TraceStore, args: argparse.Namespace) -> dict[str, Any]:
     run_id = args.run_id or _latest_run_id(store, "sync")
     run = store.run_row(run_id)
     if args.provider == "lambda":
@@ -520,7 +520,7 @@ def _sync_billing(store: ResearchStore, args: argparse.Namespace) -> dict[str, A
     }
 
 
-def _billing(store: ResearchStore, args: argparse.Namespace) -> dict[str, Any]:
+def _billing(store: TraceStore, args: argparse.Namespace) -> dict[str, Any]:
     if args.billing_action == "sync":
         return _sync_billing(store, args)
     if args.billing_action == "import":
@@ -669,7 +669,7 @@ def _select_run_target(plan, target: str, index: int):
 
 
 def _cleanup_or_recover(
-    store: ResearchStore,
+    store: TraceStore,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     action = "clean" if args.command == "cleanup" else "recover"
@@ -692,7 +692,7 @@ def _cleanup_or_recover(
 
 def execute(args: argparse.Namespace) -> dict[str, Any]:
     require_active(args)
-    store = ResearchStore(args.db)
+    store = TraceStore(args.db)
     try:
         if args.command == "status":
             return _status(store, args.run_id)

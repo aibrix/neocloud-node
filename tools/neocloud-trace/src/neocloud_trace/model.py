@@ -17,7 +17,7 @@ class FailureClass(str, enum.Enum):
     UNKNOWN = "unknown"
 
 
-class CensorReason(str, enum.Enum):
+class CanaryEndReason(str, enum.Enum):
     PROVIDER_INTERRUPTION_CANDIDATE = "provider_interruption_candidate"
     PROVIDER_PRE_READY_FAILURE = "provider_pre_ready_failure"
     APPLICATION_FAILURE = "application_failure"

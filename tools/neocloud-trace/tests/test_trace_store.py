@@ -12,14 +12,14 @@ sys.path.insert(0, str(TRACE_ROOT / "src"))
 
 from neocloud_trace.model import CatalogQuote, ExperimentConfig, TrialCell
 from neocloud_trace.providers import ProviderBillingRecord
-from neocloud_trace.storage import ResearchStore
+from neocloud_trace.storage import TraceStore
 
 
-class ResearchStoreTest(unittest.TestCase):
+class TraceStoreTest(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
-        self.db_path = pathlib.Path(self.tempdir.name) / "research.db"
-        self.store = ResearchStore(self.db_path)
+        self.db_path = pathlib.Path(self.tempdir.name) / "trace.db"
+        self.store = TraceStore(self.db_path)
 
     def tearDown(self):
         self.store.close()
@@ -166,7 +166,7 @@ class ResearchStoreTest(unittest.TestCase):
             started_at=now.isoformat(),
             epochs=epochs,
         )
-        other = ResearchStore(self.db_path)
+        other = TraceStore(self.db_path)
         self.addCleanup(other.close)
         second_run, second_created = other.ensure_capacity_campaign(
             self.config(),

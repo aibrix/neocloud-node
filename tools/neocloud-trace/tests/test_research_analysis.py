@@ -18,8 +18,8 @@ from neocloud_trace.analysis import (
     completion_window_rows,
     survival_rows,
 )
-from neocloud_trace.model import CatalogQuote, CensorReason, ExperimentConfig, TrialCell
-from neocloud_trace.storage import ResearchStore
+from neocloud_trace.model import CatalogQuote, CanaryEndReason, ExperimentConfig, TrialCell
+from neocloud_trace.storage import TraceStore
 
 
 UTC = dt.timezone.utc
@@ -29,7 +29,7 @@ class SurvivalExportTest(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
         self.root = pathlib.Path(self.tempdir.name)
-        self.store = ResearchStore(self.root / "trace.db")
+        self.store = TraceStore(self.root / "trace.db")
         self.run_id = self.store.start_run(
             ExperimentConfig(
                 protocol_version="3.0-survival-cohort",
@@ -107,12 +107,12 @@ class SurvivalExportTest(unittest.TestCase):
 
         self.store.finish_canary(
             spot_id,
-            CensorReason.PROVIDER_INTERRUPTION_CANDIDATE.value,
+            CanaryEndReason.PROVIDER_INTERRUPTION_CANDIDATE.value,
             event_at=(start + dt.timedelta(minutes=11)).isoformat(),
         )
         self.store.finish_canary(
             control_id,
-            CensorReason.RIGHT_CENSORED_PLANNED_END.value,
+            CanaryEndReason.RIGHT_CENSORED_PLANNED_END.value,
             event_at=planned_end.isoformat(),
         )
         self.store.mark_canary_cleaned(spot_id)
@@ -181,7 +181,7 @@ class SurvivalExportTest(unittest.TestCase):
         )
         self.store.finish_canary(
             lease_id,
-            CensorReason.RIGHT_CENSORED_PLANNED_END.value,
+            CanaryEndReason.RIGHT_CENSORED_PLANNED_END.value,
             event_at=planned_end.isoformat(),
         )
         self.store.mark_canary_cleaned(lease_id)

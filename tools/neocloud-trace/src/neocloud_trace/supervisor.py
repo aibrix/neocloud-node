@@ -14,14 +14,14 @@ from typing import Any
 from .runners.canary import CanaryRunner, CanarySample
 from .runners.capacity import CapacityRunner, CapacityTrialResult
 from .model import (
-    CensorReason,
+    CanaryEndReason,
     ExperimentConfig,
     TrialCell,
     validate_capacity_target,
 )
 from .runners.passive import HostMonitor, PassiveWorker
 from .providers import DeleteResult
-from .storage import ResearchStore
+from .storage import TraceStore
 
 
 UTC = dt.timezone.utc
@@ -777,7 +777,7 @@ def load_plan(
 class BudgetGuard:
     def __init__(
         self,
-        store: ResearchStore,
+        store: TraceStore,
         run_id: str,
         config: ExperimentConfig,
     ) -> None:
@@ -880,7 +880,7 @@ class BudgetGuard:
 class PilotSupervisor:
     def __init__(
         self,
-        store: ResearchStore,
+        store: TraceStore,
         providers: Mapping[str, object],
         *,
         capacity_runner_factory: Callable[..., object] = CapacityRunner,
@@ -1243,9 +1243,9 @@ class PilotSupervisor:
             for thread in threads:
                 thread.join(timeout=max(plan.host_interval_seconds, plan.passive_interval_seconds) + 5)
             orphan_reason = (
-                CensorReason.RIGHT_CENSORED_COLLECTOR_LOSS
+                CanaryEndReason.RIGHT_CENSORED_COLLECTOR_LOSS
                 if status == "failed"
-                else CensorReason.OPERATOR_CLEANUP
+                else CanaryEndReason.OPERATOR_CLEANUP
             )
             self._censor_unfinished_canaries(run_id, orphan_reason)
             self._cleanup_owned(run_id)
@@ -2090,9 +2090,9 @@ class PilotSupervisor:
 
         if active:
             final_reason = (
-                CensorReason.OPERATOR_CLEANUP
+                CanaryEndReason.OPERATOR_CLEANUP
                 if self.stop_event.is_set()
-                else CensorReason.RIGHT_CENSORED_PLANNED_END
+                else CanaryEndReason.RIGHT_CENSORED_PLANNED_END
             )
             runner.stop(
                 run_id,
@@ -2145,7 +2145,7 @@ class PilotSupervisor:
                 runner.stop(
                     run_id,
                     lease,
-                    reason=CensorReason.PAIR_SETUP_FAILURE,
+                    reason=CanaryEndReason.PAIR_SETUP_FAILURE,
                 )
             active.clear()
         while active and not self.stop_event.is_set() and dt.datetime.now(UTC) < planned_end:
@@ -2177,7 +2177,7 @@ class PilotSupervisor:
                             runner.stop(
                                 run_id,
                                 peer,
-                                reason=CensorReason.PAIR_SETUP_FAILURE,
+                                reason=CanaryEndReason.PAIR_SETUP_FAILURE,
                             )
                             active.pop(peer_id, None)
                         pair_setup_failed = True
@@ -2188,9 +2188,9 @@ class PilotSupervisor:
                 self.stop_event.wait(trial.interval_seconds)
 
         final_reason = (
-            CensorReason.OPERATOR_CLEANUP
+            CanaryEndReason.OPERATOR_CLEANUP
             if self.stop_event.is_set()
-            else CensorReason.RIGHT_CENSORED_PLANNED_END
+            else CanaryEndReason.RIGHT_CENSORED_PLANNED_END
         )
         for lease in active.values():
             runner.stop(
@@ -2339,7 +2339,7 @@ class PilotSupervisor:
     def _censor_unfinished_canaries(
         self,
         run_id: str,
-        reason: CensorReason,
+        reason: CanaryEndReason,
     ) -> None:
         for lease in self.store.canary_rows(run_id):
             if lease["censor_reason"] is not None:
@@ -2347,7 +2347,7 @@ class PilotSupervisor:
             self.store.finish_canary(
                 lease["id"],
                 reason.value,
-                operator_cleanup=reason == CensorReason.OPERATOR_CLEANUP,
+                operator_cleanup=reason == CanaryEndReason.OPERATOR_CLEANUP,
             )
             if not lease["provider_resource_id"]:
                 self.store.mark_canary_cleaned(lease["id"])
@@ -2443,24 +2443,24 @@ class PilotSupervisor:
 
     def cleanup_run(self, run_id: str) -> list[object]:
         run = self.store.run_row(run_id)
-        self._censor_unfinished_canaries(run_id, CensorReason.OPERATOR_CLEANUP)
+        self._censor_unfinished_canaries(run_id, CanaryEndReason.OPERATOR_CLEANUP)
         self._cleanup_owned(run_id)
         remaining = list(self.store.owned_resources(run_id))
         capacity_status = "cleanup_incomplete" if remaining else "operator_stop"
         self._finish_unfinished_capacity(
             run_id,
             status=capacity_status,
-            reason=CensorReason.OPERATOR_CLEANUP.value,
+            reason=CanaryEndReason.OPERATOR_CLEANUP.value,
         )
         self._finish_unfinished_completion_windows(
             run_id,
             status=capacity_status,
-            reason=CensorReason.OPERATOR_CLEANUP.value,
+            reason=CanaryEndReason.OPERATOR_CLEANUP.value,
         )
         self._finish_unfinished_canary_epochs(
             run_id,
             status=capacity_status,
-            reason=CensorReason.OPERATOR_CLEANUP.value,
+            reason=CanaryEndReason.OPERATOR_CLEANUP.value,
             cleanup_verified=not remaining,
         )
         if remaining:
@@ -2484,25 +2484,25 @@ class PilotSupervisor:
         capacity_campaign = self.store.capacity_campaign_for_run(run_id)
         self._censor_unfinished_canaries(
             run_id,
-            CensorReason.RIGHT_CENSORED_COLLECTOR_LOSS,
+            CanaryEndReason.RIGHT_CENSORED_COLLECTOR_LOSS,
         )
         self._cleanup_owned(run_id)
         remaining = list(self.store.owned_resources(run_id))
         self._finish_unfinished_capacity(
             run_id,
             status=("recovery_cleanup_incomplete" if remaining else "collector_loss"),
-            reason=CensorReason.RIGHT_CENSORED_COLLECTOR_LOSS.value,
+            reason=CanaryEndReason.RIGHT_CENSORED_COLLECTOR_LOSS.value,
             preserve_scheduled=capacity_campaign is not None,
         )
         self._finish_unfinished_completion_windows(
             run_id,
             status=("recovery_cleanup_incomplete" if remaining else "collector_loss"),
-            reason=CensorReason.RIGHT_CENSORED_COLLECTOR_LOSS.value,
+            reason=CanaryEndReason.RIGHT_CENSORED_COLLECTOR_LOSS.value,
         )
         self._finish_unfinished_canary_epochs(
             run_id,
             status=("recovery_cleanup_incomplete" if remaining else "collector_loss"),
-            reason=CensorReason.RIGHT_CENSORED_COLLECTOR_LOSS.value,
+            reason=CanaryEndReason.RIGHT_CENSORED_COLLECTOR_LOSS.value,
             cleanup_verified=not remaining,
         )
         if capacity_campaign is not None and not remaining:

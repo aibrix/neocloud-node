@@ -6,23 +6,23 @@ import json
 import pathlib
 from typing import Any
 
-from ..model import CensorReason
-from ..storage import ResearchStore
+from ..model import CanaryEndReason
+from ..storage import TraceStore
 
 
 PRE_READY_EVENTS = {
-    CensorReason.LAUNCH_FAILURE.value,
-    CensorReason.PROVIDER_PRE_READY_FAILURE.value,
+    CanaryEndReason.LAUNCH_FAILURE.value,
+    CanaryEndReason.PROVIDER_PRE_READY_FAILURE.value,
 }
 POST_READY_INTERRUPTION_EVENTS = {
-    CensorReason.MACHINE_REPLACEMENT.value,
-    CensorReason.PROVIDER_INTERRUPTION_CANDIDATE.value,
-    CensorReason.PROVIDER_UNHEALTHY.value,
+    CanaryEndReason.MACHINE_REPLACEMENT.value,
+    CanaryEndReason.PROVIDER_INTERRUPTION_CANDIDATE.value,
+    CanaryEndReason.PROVIDER_UNHEALTHY.value,
 }
 RIGHT_CENSOR_REASONS = {
-    CensorReason.OPERATOR_CLEANUP.value,
-    CensorReason.RIGHT_CENSORED_COLLECTOR_LOSS.value,
-    CensorReason.RIGHT_CENSORED_PLANNED_END.value,
+    CanaryEndReason.OPERATOR_CLEANUP.value,
+    CanaryEndReason.RIGHT_CENSORED_COLLECTOR_LOSS.value,
+    CanaryEndReason.RIGHT_CENSORED_PLANNED_END.value,
 }
 
 
@@ -185,7 +185,7 @@ def _duration(start: dt.datetime | None, end: dt.datetime | None) -> float | Non
     return max(0.0, (end - start).total_seconds())
 
 
-def survival_rows(store: ResearchStore, run_id: str) -> list[dict[str, Any]]:
+def survival_rows(store: TraceStore, run_id: str) -> list[dict[str, Any]]:
     store.run_row(run_id)
     leases = store.connection.execute(
         """
@@ -278,8 +278,8 @@ def survival_rows(store: ResearchStore, run_id: str) -> list[dict[str, Any]]:
                     provider_ready is not None
                     and reason
                     not in {
-                        CensorReason.LAUNCH_FAILURE.value,
-                        CensorReason.PAIR_SETUP_FAILURE.value,
+                        CanaryEndReason.LAUNCH_FAILURE.value,
+                        CanaryEndReason.PAIR_SETUP_FAILURE.value,
                     }
                 ),
                 "pre_ready_exposure_seconds": _duration(created, pre_ready_terminal),
@@ -289,15 +289,15 @@ def survival_rows(store: ResearchStore, run_id: str) -> list[dict[str, Any]]:
                     reason in POST_READY_INTERRUPTION_EVENTS
                 ),
                 "application_failure_event": int(
-                    reason == CensorReason.APPLICATION_FAILURE.value
+                    reason == CanaryEndReason.APPLICATION_FAILURE.value
                 ),
                 "right_censored": int(reason in RIGHT_CENSOR_REASONS),
                 "post_ready_analysis_eligible": int(
                     application_ready is not None
                     and reason
                     not in {
-                        CensorReason.LAUNCH_FAILURE.value,
-                        CensorReason.PAIR_SETUP_FAILURE.value,
+                        CanaryEndReason.LAUNCH_FAILURE.value,
+                        CanaryEndReason.PAIR_SETUP_FAILURE.value,
                     }
                 ),
             }
@@ -306,7 +306,7 @@ def survival_rows(store: ResearchStore, run_id: str) -> list[dict[str, Any]]:
 
 
 def export_survival_csv(
-    store: ResearchStore,
+    store: TraceStore,
     run_id: str,
     output: str | pathlib.Path,
 ) -> int:
@@ -320,7 +320,7 @@ def export_survival_csv(
     return len(rows)
 
 
-def capacity_depth_rows(store: ResearchStore, run_id: str) -> list[dict[str, Any]]:
+def capacity_depth_rows(store: TraceStore, run_id: str) -> list[dict[str, Any]]:
     store.run_row(run_id)
     epochs = [dict(row) for row in store.capacity_epoch_rows(run_id)]
     trials = {
@@ -507,7 +507,7 @@ def capacity_depth_rows(store: ResearchStore, run_id: str) -> list[dict[str, Any
 
 
 def capacity_trial_payload(
-    store: ResearchStore,
+    store: TraceStore,
     trial_id: str,
 ) -> dict[str, Any]:
     row = store.capacity_trial_row(trial_id)
@@ -619,7 +619,7 @@ def capacity_trial_payload(
 
 
 def export_capacity_depth_csv(
-    store: ResearchStore,
+    store: TraceStore,
     run_id: str,
     output: str | pathlib.Path,
 ) -> int:
@@ -634,7 +634,7 @@ def export_capacity_depth_csv(
 
 
 def completion_window_rows(
-    store: ResearchStore,
+    store: TraceStore,
     run_id: str,
 ) -> list[dict[str, Any]]:
     store.run_row(run_id)
@@ -760,7 +760,7 @@ def completion_window_rows(
 
 
 def export_completion_window_csv(
-    store: ResearchStore,
+    store: TraceStore,
     run_id: str,
     output: str | pathlib.Path,
 ) -> int:

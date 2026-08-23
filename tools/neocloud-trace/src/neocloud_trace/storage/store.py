@@ -410,7 +410,7 @@ CREATE INDEX IF NOT EXISTS idx_reconciliation_run_status
 """
 
 
-class ResearchStore:
+class TraceStore:
     def __init__(self, path: str | pathlib.Path):
         self.path = str(path)
         if self.path != ":memory:":
