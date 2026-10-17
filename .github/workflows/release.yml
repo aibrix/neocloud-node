@@ -23,7 +23,7 @@ env:
 jobs:
   verify:
     name: Verify release
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 25
     steps:
       - name: Check out source
@@ -55,7 +55,7 @@ jobs:
   publish:
     name: Publish release
     needs: verify
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 45
     permissions:
       contents: write
