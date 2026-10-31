@@ -53,14 +53,17 @@ type PodSpec struct {
 }
 
 type ContainerSpec struct {
-	Name            string
-	Image           string
-	Command         []string
-	Args            []string
-	Env             map[string]string
-	Ports           []PortSpec
-	Resources       ResourceSpec
-	SecurityContext SecurityContext
+	Name    string
+	Image   string
+	Command []string
+	Args    []string
+	Env     map[string]string
+	// EnvValueFromIndices preserves source positions for unsupported-field errors.
+	EnvValueFromIndices []int
+	HasEnvFrom          bool
+	Ports               []PortSpec
+	Resources           ResourceSpec
+	SecurityContext     SecurityContext
 }
 
 type RestartPolicy string
@@ -148,6 +151,20 @@ func (DefaultTransformer) Transform(pod PodSpec) (WorkloadRequest, error) {
 			Code:    "UnsupportedPrivilegedContainer",
 			Field:   "spec.containers[0].securityContext.privileged",
 			Message: "privileged containers are not supported on remote GPU providers",
+		}
+	}
+	if len(container.EnvValueFromIndices) > 0 {
+		return WorkloadRequest{}, &UnsupportedSpecError{
+			Code:    "UnsupportedEnvValueFrom",
+			Field:   fmt.Sprintf("spec.containers[0].env[%d].valueFrom", container.EnvValueFromIndices[0]),
+			Message: "environment valueFrom sources are not supported in Phase 1; use literal values",
+		}
+	}
+	if container.HasEnvFrom {
+		return WorkloadRequest{}, &UnsupportedSpecError{
+			Code:    "UnsupportedEnvFrom",
+			Field:   "spec.containers[0].envFrom",
+			Message: "environment envFrom sources are not supported in Phase 1; use literal values",
 		}
 	}
 	if strings.TrimSpace(container.Image) == "" {

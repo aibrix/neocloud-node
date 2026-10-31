@@ -307,3 +307,31 @@ func TestTransformerRejectsPhase1UnsupportedSpecs(t *testing.T) {
 		})
 	}
 }
+
+func TestTransformerRejectsEnvironmentSources(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name       string
+		indices    []int
+		hasEnvFrom bool
+		code       string
+		field      string
+	}{
+		{"valueFrom", []int{0, 2}, false, "UnsupportedEnvValueFrom", "spec.containers[0].env[0].valueFrom"},
+		{"envFrom", nil, true, "UnsupportedEnvFrom", "spec.containers[0].envFrom"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := (DefaultTransformer{}).Transform(PodSpec{Containers: []ContainerSpec{{
+				Image: "example.com/train:latest", Resources: ResourceSpec{GPUCount: 1},
+				EnvValueFromIndices: tt.indices, HasEnvFrom: tt.hasEnvFrom,
+			}}})
+			var unsupported *UnsupportedSpecError
+			if !errors.As(err, &unsupported) {
+				t.Fatalf("Transform error = %v, want UnsupportedSpecError", err)
+			}
+			if unsupported.Code != tt.code || unsupported.Field != tt.field {
+				t.Fatalf("unsupported error = %#v, want %s at %s", unsupported, tt.code, tt.field)
+			}
+		})
+	}
+}

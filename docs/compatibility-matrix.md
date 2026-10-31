@@ -34,6 +34,8 @@ Unsupported fields must fail with a stable `UnsupportedSpecError` code and field
 | more than one main container | `UnsupportedContainerCount` | `spec.containers` |
 | `spec.containers[0].image` missing | `MissingImage` | `spec.containers[0].image` |
 | GPU request missing or zero | `MissingGPURequest` | `spec.containers[0].resources.limits[nvidia.com/gpu]` |
+| `spec.containers[0].env[*].valueFrom` | `UnsupportedEnvValueFrom` | `spec.containers[0].env[i].valueFrom` (first source index) |
+| `spec.containers[0].envFrom` | `UnsupportedEnvFrom` | `spec.containers[0].envFrom` |
 | `spec.restartPolicy: Always` | `UnsupportedRestartPolicy` | `spec.restartPolicy` |
 | `spec.initContainers` | `UnsupportedInitContainers` | `spec.initContainers` |
 | `spec.volumes` | `UnsupportedVolumes` | `spec.volumes` |
