@@ -4,20 +4,40 @@ Target repo: `aibrix/neocloud-node`. Create #0 first, then #1–#9 as its sub-is
 Code links are pinned to neocloud-node `772c97f` and vllm-project/aibrix `68a2d49`.
 Findings come from reading the code. None has been reproduced on a live provider yet.
 
+## Coordination with the "New Cloud provider gap analysis" session
+
+That session files its own engineering backlog: I-1 to I-9 for the OSPP engineering intern, plus U-1 and U-2 for the RunPod v1 to v2 migration. Three of my drafts duplicate its issues, so I don't file them separately:
+
+| Mine | Theirs | Resolution |
+|---|---|---|
+| #1 Expose remote endpoints | I-5 Surface remote endpoints (public IP / port mappings) | Don't file. After I-5 exists, post the #1 text below as a comment on it, adding the dogfood requirements: set `status.podIP`, handle remapped ports, and the ModelClaim consumer |
+| #3 Exit reported without exit code | I-8 RunPod `EXITED` mapped to `Succeeded` hides spot reclaim | Don't file. Post a comment on I-8: the same mapping breaks batch exit codes, and Vast has the opposite bug (`exited` → `Failed`). This angle can be verified without spot credits |
+| #4 `valueFrom` / `envFrom` dropped | I-1, same bug | Drop. I-1 covers it. Secret projection is on their core-team list |
+
+Related, but not duplicates:
+- #7 multi-cluster orphan sweeper and I-2 "orphan sweeper only covers the primary provider": both change `pkg/core/orphan_sweeper.go`. File both, link them to each other, and do them together or one after the other.
+- #2 `restartPolicy: Always` and their gap "`OnFailure` is accepted but nothing recreates the workload": both are about restart semantics. Link them.
+- #5 readiness, #8 budget and cost, plus Secret projection: these are on their core-team list but not among the I-issues. My drafts can serve as those issues.
+
+Ordering: U-1 (RunPod v2, v1 retires around 2026-11-15) changes `pkg/providers/runpod/client.go`. Do the RunPod parts of I-5, I-8, and #9 against v2, not v1. According to the other session's reading of the v2 OpenAPI spec, v2 includes port info with the public IP and a `/v2/pods/{id}/logs` endpoint. I haven't verified either myself.
+
+## What to file from here
+
 | # | Title | Type / label |
 |---|---|---|
 | 0 | Dogfood NeoCloud Node with AIBrix workloads on a shared control plane | Task / enhancement |
-| 1 | [Feature]: Expose remote workload endpoints through Pod status | Feature / enhancement |
 | 2 | [Feature]: Support long-running serving Pods (restartPolicy: Always) | Feature / enhancement |
-| 3 | [Bug]: Container exit is reported as Succeeded or Failed without the exit code | Bug / bug |
-| 4 | [Bug]: valueFrom and envFrom environment variables are silently dropped | Bug / bug |
 | 5 | [Feature]: Derive Pod readiness from readinessProbe instead of remote running state | Feature / enhancement |
 | 6 | [Feature]: Map host memory, disk, and shared memory requirements to provider placement | Feature / enhancement |
 | 7 | [Bug]: Orphan sweeper treats other clusters' resources in the same provider account as orphans | Bug / bug |
 | 8 | [Feature]: Per-namespace cost accounting, budgets, and runtime limits for shared control planes | Feature / enhancement |
 | 9 | [Feature]: Container logs and debug access for remote workloads | Feature / enhancement |
+| — | Comment on I-5 (text from #1 below) | comment |
+| — | Comment on I-8 (text from #3 below) | comment |
 
-Not filed here: the AIBrix ModelClaim runtime client needs to read the endpoint annotation from #1
+Also attach I-1, I-5, and I-8 as sub-issues of #0, and replace the `#1` / `#3` / `#4` references below with the real numbers.
+
+Not filed here: the AIBrix ModelClaim runtime client needs to read the endpoint annotation from I-5
 when a provider remaps ports (RunPod, Vast). That change belongs in `vllm-project/aibrix`.
 
 ---
@@ -53,17 +73,17 @@ AIBrix manifests can have NeoCloud-specific variants. The goal is to hide provid
 
 The gaps below were found by reading the code at 772c97f against this workload. They have not yet been reproduced on a live provider. Each one is tracked as a sub-issue.
 
-- [ ] Expose remote workload endpoints through Pod status
+- [ ] I-5: Expose remote workload endpoints (filed separately; must also set `status.podIP`)
 - [ ] Support long-running serving Pods (`restartPolicy: Always`)
-- [ ] Container exit is reported as Succeeded or Failed without the exit code
-- [ ] `valueFrom` and `envFrom` environment variables are silently dropped
+- [ ] I-8: Container exit mapping (filed separately; covers both spot reclaim and batch exit codes)
+- [ ] I-1: `valueFrom` and `envFrom` environment variables are silently dropped (filed separately)
 - [ ] Derive Pod readiness from `readinessProbe`
 - [ ] Map host memory, disk, and shared memory requirements to provider placement
 - [ ] Orphan sweeper treats other clusters' resources in the same provider account as orphans
 - [ ] Per-namespace cost accounting, budgets, and runtime limits
 - [ ] Container logs and debug access
 
-Related existing issues: #2 (orphan cleanup), #4 (VM runner callbacks), #6 (cost and burn-rate metrics), #7 (events and conditions), #21 (workload grouping).
+Related existing issues: #2 (orphan cleanup), #4 (VM runner callbacks), #6 (cost and burn-rate metrics), #7 (events and conditions), #21 (workload grouping). The RunPod parts depend on U-1, the RunPod REST v1 to v2 migration.
 
 ### Later dogfood scenarios
 
@@ -75,9 +95,9 @@ _Generated by [Claude Code](https://claude.ai/code)_
 
 ---
 
-## #1 [Feature]: Expose remote workload endpoints through Pod status
+## #1 → Comment on I-5 (do not file as a separate issue)
 
-Type: Feature · Labels: `enhancement` · Parent: #0
+Post the text below as a comment on I-5, "Surface remote endpoints (public IP / port mappings)". It adds the requirements from the dogfood workload. For RunPod, build on the v2 API after U-1 instead of the v1 fields cited here.
 
 ### Problem
 
@@ -147,9 +167,9 @@ _Generated by [Claude Code](https://claude.ai/code)_
 
 ---
 
-## #3 [Bug]: Container exit is reported as Succeeded or Failed without the exit code
+## #3 → Comment on I-8 (do not file as a separate issue)
 
-Type: Bug · Labels: `bug` · Parent: #0
+Post the text below as a comment on I-8, "RunPod `EXITED` mapped to `Succeeded` hides spot reclaim". It adds the batch exit-code angle and the opposite Vast bug. Neither needs spot credits to verify.
 
 ### Version
 
@@ -217,57 +237,9 @@ _Generated by [Claude Code](https://claude.ai/code)_
 
 ---
 
-## #4 [Bug]: valueFrom and envFrom environment variables are silently dropped
+## #4 → Dropped: duplicate of I-1
 
-Type: Bug · Labels: `bug` · Parent: #0
-
-### Version
-
-772c97f
-
-### Provider
-
-Provider-independent
-
-### What happened?
-
-`envFromCoreV1` keeps only literal values and skips every variable that uses `valueFrom` ([kube/transformer.go#L94-L104](https://github.com/aibrix/neocloud-node/blob/772c97fd93936c423718879f1e87265b2fdb97f7/pkg/kube/transformer.go#L94-L104)). `envFrom` is not read at all. The Pod is accepted, and those variables are simply missing in the remote container.
-
-This contradicts [compatibility-matrix.md](https://github.com/aibrix/neocloud-node/blob/772c97fd93936c423718879f1e87265b2fdb97f7/docs/compatibility-matrix.md?plain=1#L7): "Unsupported fields must fail with a stable `UnsupportedSpecError` code and field path. They must not be silently ignored."
-
-Impact: `secretKeyRef` is the normal way to pass secrets such as `HF_TOKEN` for gated models. When they silently disappear, the workload fails later with a confusing authentication error.
-
-### What did you expect?
-
-One of the following:
-
-- Reject such Pods with an `UnsupportedSpecError` whose field path points at `spec.containers[0].env[i].valueFrom` or `spec.containers[0].envFrom`.
-- Or resolve `secretKeyRef` and `configMapKeyRef` when the remote workload is created, and pass the values to the provider. This needs read access to Secrets and ConfigMaps in the Pod's namespace, and secret values must never be written to `CloudPodBinding` status, events, or logs.
-
-### Reproduction
-
-```yaml
-env:
-  - name: HF_TOKEN
-    valueFrom:
-      secretKeyRef:
-        name: hf-token
-        key: token
-```
-
-The Pod is accepted, and `HF_TOKEN` is absent in the remote container.
-
-### Environment
-
-Found by code inspection at 772c97f.
-
-### Safety check
-
-- [x] I removed credentials and private or billable resource identifiers.
-- [x] No remote resources were created while investigating.
-
----
-_Generated by [Claude Code](https://claude.ai/code)_
+I-1 in the provider gap analysis session covers the same bug and the same code location.
 
 ---
 
@@ -285,13 +257,13 @@ ModelClaim uses `IsPodReady` to decide which Pods can take claims ([backoff.go#L
 
 ### Proposed behavior
 
-- If the container has an `httpGet` or `tcpSocket` readiness probe, NeoCloud Node runs it from the controller against the exposed endpoint (depends on #1). It sets `Ready` from the result and honors the probe's period and thresholds.
+- If the container has an `httpGet` or `tcpSocket` readiness probe, NeoCloud Node runs it from the controller against the exposed endpoint (depends on I-5). It sets `Ready` from the result and honors the probe's period and thresholds.
 - Without a probe, keep the current behavior.
 - `exec` probes stay unsupported. Either reject them or document that they are ignored.
 
 ### Provider portability
 
-Provider-neutral. Depends on #1 for the endpoint address.
+Provider-neutral. Depends on I-5 for the endpoint address.
 
 ---
 _Generated by [Claude Code](https://claude.ai/code)_
@@ -346,7 +318,7 @@ The orphan sweeper lists every remote resource in the provider account. It treat
 
 When two control planes share one provider account, each one sees the other's live workloads as orphans. Examples: a shared dev cluster and a CI cluster, two concurrent CI runs, or a developer's local cluster. With `--orphan-sweeper-dry-run=false`, the sweeper deletes them. The sweeper is disabled and in dry-run mode by default ([app/app.go#L153-L154](https://github.com/aibrix/neocloud-node/blob/772c97fd93936c423718879f1e87265b2fdb97f7/pkg/app/app.go#L153-L154)), so today this is latent. It blocks turning cleanup on in the shared control plane, though.
 
-Related: #2 asks that the sweeper delete only resources managed by NeoCloud Node. The missing part is "managed by this NeoCloud Node instance".
+Related: #2 asks that the sweeper delete only resources managed by NeoCloud Node. The missing part is "managed by this NeoCloud Node instance". I-2 ("orphan sweeper only covers the primary provider") changes the same code, so the two should be done together or one after the other.
 
 ### What did you expect?
 
@@ -426,7 +398,7 @@ Developing and debugging the AIBrix runtime and ModelClaim on remote GPUs.
 
 Each of these needs investigating per provider:
 
-- Logs: use provider log APIs where they exist. Otherwise, have the runner or wrapper ship container output somewhere the controller can serve through `GetContainerLogs`.
+- Logs: use provider log APIs where they exist. The RunPod v2 API reportedly has `/v2/pods/{id}/logs`, so the RunPod part should follow U-1. Otherwise, have the runner or wrapper ship container output somewhere the controller can serve through `GetContainerLogs`.
 - Debug access: where the provider supports SSH, surface the SSH endpoint on the Pod (as an annotation) and inject the requesting user's public key. Members can then debug without holding provider credentials.
 - Record which providers support which features in the compatibility matrix.
 
