@@ -1,5 +1,10 @@
 # Draft issues: dogfooding NeoCloud Node with AIBrix workloads
 
+> **Filed on 2026-10-31.** Tracking issue: #53. Sub-issues: #54 (endpoints on the Pod), #55 (`restartPolicy: Always`),
+> #56 (readiness), #57 (memory/disk/shm), #58 (multi-cluster orphan sweeper), #59 (cost and budgets), #60 (logs and debug).
+> The Vast exit-code note was posted as a comment on #51. #44, #48, and #51 are listed in #53 for tracking.
+> The issues on GitHub are the source of truth; this file is kept as a record of the drafts.
+
 Target repo: `aibrix/neocloud-node`. Create #0 first, then #1–#9 as its sub-issues.
 Code links are pinned to neocloud-node `772c97f` and vllm-project/aibrix `68a2d49`.
 Findings come from reading the code. None has been reproduced on a live provider yet.
