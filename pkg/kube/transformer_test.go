@@ -71,6 +71,9 @@ func TestTransformerTransformsCoreV1Pod(t *testing.T) {
 	if binding.Request.Image != "example.com/train:latest" {
 		t.Fatalf("image = %q, want example.com/train:latest", binding.Request.Image)
 	}
+	if binding.Request.Env["MODEL"] != "llama" {
+		t.Fatalf("env = %#v, want MODEL=llama", binding.Request.Env)
+	}
 	if binding.Request.GPUCount != 2 {
 		t.Fatalf("gpu count = %d, want 2", binding.Request.GPUCount)
 	}
@@ -172,5 +175,40 @@ func TestTransformerIgnoresDefaultServiceAccountProjectedVolume(t *testing.T) {
 	}
 	if binding.Request.Image != "example.com/train:latest" {
 		t.Fatalf("request image = %q, want example.com/train:latest", binding.Request.Image)
+	}
+}
+
+func TestTransformerRejectsEnvironmentSources(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name      string
+		valueFrom *corev1.EnvVarSource
+		envFrom   []corev1.EnvFromSource
+		code      string
+		field     string
+	}{
+		{"secret key", &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{}}, nil, "UnsupportedEnvValueFrom", "spec.containers[0].env[1].valueFrom"},
+		{"config map key", &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{}}, nil, "UnsupportedEnvValueFrom", "spec.containers[0].env[1].valueFrom"},
+		{"field", &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{}}, nil, "UnsupportedEnvValueFrom", "spec.containers[0].env[1].valueFrom"},
+		{"resource field", &corev1.EnvVarSource{ResourceFieldRef: &corev1.ResourceFieldSelector{}}, nil, "UnsupportedEnvValueFrom", "spec.containers[0].env[1].valueFrom"},
+		{"secret envFrom", nil, []corev1.EnvFromSource{{SecretRef: &corev1.SecretEnvSource{}}}, "UnsupportedEnvFrom", "spec.containers[0].envFrom"},
+		{"config map envFrom", nil, []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{}}}, "UnsupportedEnvFrom", "spec.containers[0].envFrom"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			pod := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+				Image:     "example.com/train:latest",
+				Env:       []corev1.EnvVar{{Name: "LITERAL", Value: "kept"}, {Name: "SOURCE", ValueFrom: tt.valueFrom}},
+				EnvFrom:   tt.envFrom,
+				Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("1")}},
+			}}}}
+			_, err := (Transformer{}).TransformPod(pod)
+			var unsupported *core.UnsupportedSpecError
+			if !errors.As(err, &unsupported) {
+				t.Fatalf("TransformPod error = %v, want UnsupportedSpecError", err)
+			}
+			if unsupported.Code != tt.code || unsupported.Field != tt.field {
+				t.Fatalf("unsupported error = %#v, want %s at %s", unsupported, tt.code, tt.field)
+			}
+		})
 	}
 }
