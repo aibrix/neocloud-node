@@ -10,7 +10,7 @@ Lambda Cloud's public documentation states that API-launched instances can use c
 
 1. Provider adapter launches one VM for one workload.
 2. Provider adapter passes generated cloud-init to the VM launch request.
-3. cloud-init installs Docker.
+3. cloud-init reuses Docker and the NVIDIA runtime when the base image already provides both; otherwise it installs them.
 4. cloud-init pulls the requested image.
 5. cloud-init runs the container with `--gpus all`.
 6. cloud-init posts a `Running` payload when the bootstrap starts, then posts a terminal payload when the container exits.
@@ -20,8 +20,8 @@ Lambda Cloud's public documentation states that API-launched instances can use c
 
 Phase 4 cloud-init contains:
 
-- `package_update: true`
-- `docker.io` package installation
+- a Docker and NVIDIA runtime presence check
+- conditional `docker.io` and `nvidia-container-runtime` installation for base images that do not provide both
 - `docker pull <image>`
 - `docker run --rm --gpus all`
 - literal env var propagation
@@ -55,7 +55,7 @@ Terminal payload:
 }
 ```
 
-The controller resolves `workloadID` as `<namespace>/<podUID>` and updates the durable binding:
+The `Running` message says whether the bootstrap reused the base image's Docker and NVIDIA runtime or installed them. The controller resolves `workloadID` as `<namespace>/<podUID>` and updates the durable binding:
 
 - `phase=Running` -> `CloudPodBinding.status.phase=Running` with `Ready=True/RunnerRunning`
 - `phase=Succeeded` -> `CloudPodBinding.status.phase=Succeeded`
