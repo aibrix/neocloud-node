@@ -57,7 +57,7 @@ work before it should be treated as a production provider.
 
 ## Local Verification
 
-Development requires Go 1.25.13 or newer and Kustomize 5.4 or newer. Docker is optional and
+Development requires Go 1.26.10 or newer and Kustomize 5.4 or newer. Docker is optional and
 is only needed for container builds.
 
 ```bash
