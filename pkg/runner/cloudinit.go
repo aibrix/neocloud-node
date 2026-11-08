@@ -39,10 +39,6 @@ func BuildCloudInit(config CloudInitConfig) (string, error) {
 	command := runnerCommand(config)
 	return strings.Join([]string{
 		"#cloud-config",
-		"package_update: true",
-		"packages:",
-		"  - curl",
-		"  - docker.io",
 		"runcmd:",
 		"  - " + strconv.Quote(command),
 		"",
@@ -51,13 +47,14 @@ func BuildCloudInit(config CloudInitConfig) (string, error) {
 
 func runnerCommand(config CloudInitConfig) string {
 	image := shellQuote(config.Request.Image)
-	runningPayloadFormat := shellQuote(`{"workloadID":%s,"phase":"Running","message":"runner started"}`)
+	runningPayloadFormat := shellQuote(`{"workloadID":%s,"phase":"Running","message":"%s"}`)
 	terminalPayloadFormat := shellQuote(`{"workloadID":%s,"phase":"%s","exitCode":%s}`)
 	workloadID := shellQuote(strconv.Quote(config.WorkloadID))
 
 	return strings.Join([]string{
 		"set -e",
-		callbackCommand(config, "$(printf "+runningPayloadFormat+" "+workloadID+")") + " || true",
+		bootstrapRunnerCommand(),
+		callbackCommand(config, "$(printf "+runningPayloadFormat+" "+workloadID+` "$runner_message")`) + " || true",
 		"docker pull " + image,
 		"set +e",
 		dockerRunCommand(config.Request),
@@ -66,6 +63,21 @@ func runnerCommand(config CloudInitConfig) string {
 		callbackCommand(config, "$(printf "+terminalPayloadFormat+" "+workloadID+` "$phase" "$code")`),
 		"exit $code",
 	}, "; ")
+}
+
+func bootstrapRunnerCommand() string {
+	return strings.Join([]string{
+		"if command -v docker >/dev/null 2>&1 && command -v nvidia-container-runtime >/dev/null 2>&1; then",
+		`runner_message='using preinstalled Docker and NVIDIA runtime'`,
+		"else",
+		"export DEBIAN_FRONTEND=noninteractive",
+		"apt-get update",
+		"apt-get install -y curl docker.io nvidia-container-runtime",
+		"systemctl enable --now docker",
+		`runner_message='installed Docker and the NVIDIA runtime'`,
+		"fi",
+		"if ! command -v curl >/dev/null 2>&1; then apt-get update && apt-get install -y curl; fi",
+	}, " ")
 }
 
 func callbackCommand(config CloudInitConfig, payloadExpression string) string {

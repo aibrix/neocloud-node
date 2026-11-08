@@ -27,8 +27,7 @@ func TestBuildCloudInit(t *testing.T) {
 	}
 
 	assertContains(t, cloudInit, "#cloud-config")
-	assertContains(t, cloudInit, "docker.io")
-	assertContains(t, cloudInit, "curl")
+	assertNotContains(t, cloudInit, "package_update: true")
 	assertContains(t, cloudInit, "docker pull 'example.com/train:latest'")
 	assertContains(t, cloudInit, "--gpus all")
 	assertContains(t, cloudInit, "-e 'MODEL=llama'")
@@ -36,6 +35,23 @@ func TestBuildCloudInit(t *testing.T) {
 	assertContains(t, cloudInit, "https://controller.example.com/v1/runner/status")
 	assertContains(t, cloudInit, "--retry 60 --retry-all-errors --retry-delay 10 --max-time 10")
 	assertContains(t, cloudInit, "default/pod-123")
+}
+
+func TestRunnerCommandBootstrapsOnlyWhenDockerOrNvidiaRuntimeIsMissing(t *testing.T) {
+	t.Parallel()
+
+	command := runnerCommand(CloudInitConfig{
+		WorkloadID:  "default/pod-123",
+		CallbackURL: "https://controller.example.com/v1/runner/status",
+		Request:     core.WorkloadRequest{Image: "example.com/train:latest"},
+	})
+
+	assertContains(t, command, "if command -v docker >/dev/null 2>&1 && command -v nvidia-container-runtime >/dev/null 2>&1; then")
+	assertContains(t, command, "runner_message='using preinstalled Docker and NVIDIA runtime'")
+	assertContains(t, command, "apt-get install -y curl docker.io nvidia-container-runtime")
+	assertContains(t, command, "runner_message='installed Docker and the NVIDIA runtime'")
+	assertContains(t, command, "systemctl enable --now docker")
+	assertContains(t, command, `payload=$(printf '{"workloadID":%s,"phase":"Running","message":"%s"}' '"default/pod-123"' "$runner_message")`)
 }
 
 func TestRunnerCommandExpandsExitCodeInStatusPayload(t *testing.T) {
@@ -49,7 +65,7 @@ func TestRunnerCommandExpandsExitCodeInStatusPayload(t *testing.T) {
 		},
 	})
 
-	assertContains(t, command, `payload=$(printf '{"workloadID":%s,"phase":"Running","message":"runner started"}' '"default/pod-123"')`)
+	assertContains(t, command, `payload=$(printf '{"workloadID":%s,"phase":"Running","message":"%s"}' '"default/pod-123"' "$runner_message")`)
 	assertContains(t, command, `if [ "$code" -eq 0 ]; then phase=Succeeded; else phase=Failed; fi`)
 	assertContains(t, command, `payload=$(printf '{"workloadID":%s,"phase":"%s","exitCode":%s}' '"default/pod-123"' "$phase" "$code")`)
 	assertContains(t, command, `-d "$payload"`)
@@ -131,5 +147,13 @@ func assertContains(t *testing.T, s string, substr string) {
 
 	if !strings.Contains(s, substr) {
 		t.Fatalf("cloud-init does not contain %q:\n%s", substr, s)
+	}
+}
+
+func assertNotContains(t *testing.T, s string, substr string) {
+	t.Helper()
+
+	if strings.Contains(s, substr) {
+		t.Fatalf("cloud-init unexpectedly contains %q:\n%s", substr, s)
 	}
 }
