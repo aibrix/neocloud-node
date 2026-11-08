@@ -77,31 +77,37 @@ func containersFromCoreV1(containers []corev1.Container) []core.ContainerSpec {
 	}
 	out := make([]core.ContainerSpec, 0, len(containers))
 	for _, container := range containers {
+		env, valueFromIndices := envFromCoreV1(container.Env)
 		out = append(out, core.ContainerSpec{
-			Name:            container.Name,
-			Image:           container.Image,
-			Command:         append([]string(nil), container.Command...),
-			Args:            append([]string(nil), container.Args...),
-			Env:             envFromCoreV1(container.Env),
-			Ports:           portsFromCoreV1(container.Ports),
-			Resources:       resourcesFromCoreV1(container.Resources),
-			SecurityContext: securityContextFromCoreV1(container.SecurityContext),
+			Name:                container.Name,
+			Image:               container.Image,
+			Command:             append([]string(nil), container.Command...),
+			Args:                append([]string(nil), container.Args...),
+			Env:                 env,
+			EnvValueFromIndices: valueFromIndices,
+			HasEnvFrom:          len(container.EnvFrom) > 0,
+			Ports:               portsFromCoreV1(container.Ports),
+			Resources:           resourcesFromCoreV1(container.Resources),
+			SecurityContext:     securityContextFromCoreV1(container.SecurityContext),
 		})
 	}
 	return out
 }
 
-func envFromCoreV1(env []corev1.EnvVar) map[string]string {
+func envFromCoreV1(env []corev1.EnvVar) (map[string]string, []int) {
 	if len(env) == 0 {
-		return nil
+		return nil, nil
 	}
 	out := make(map[string]string, len(env))
-	for _, item := range env {
+	var valueFromIndices []int
+	for index, item := range env {
 		if item.ValueFrom == nil {
 			out[item.Name] = item.Value
+		} else {
+			valueFromIndices = append(valueFromIndices, index)
 		}
 	}
-	return out
+	return out, valueFromIndices
 }
 
 func portsFromCoreV1(ports []corev1.ContainerPort) []core.PortSpec {
