@@ -1,0 +1,3 @@
+# Default reviewer for the repository. Add narrower path rules below as ownership grows.
+# This requests review and does not restrict external contributors from opening PRs.
+* @seedjeffwan
