@@ -29,7 +29,7 @@ tools/neocloud-trace/**/*.token
 tools/neocloud-trace/**/*.credentials
 
 # Local binaries and generated runtime cache.
-neocloud-node
+/neocloud-node
 gpu-burst-node
 bin/
 dist/

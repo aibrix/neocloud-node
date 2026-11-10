@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "neocloud.name" . }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name | quote }}
+      app.kubernetes.io/name: neocloud-node
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: {{ .Release.Name | quote }}
+        app.kubernetes.io/name: neocloud-node
+    spec:
+      serviceAccountName: {{ include "neocloud.name" . }}
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: aibrix-neocloud-node
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --node-name=$(GPU_BURST_NODE_NAME)
+            - --provider=$(GPU_BURST_PROVIDER)
+            - --fallback-providers=$(GPU_BURST_FALLBACK_PROVIDERS)
+            - --binding-store=kubernetes
+            - --listen-addr=:10250
+            - --advertise-gpu-count=$(GPU_BURST_ADVERTISE_GPU_COUNT)
+            - --advertise-pod-capacity=$(GPU_BURST_ADVERTISE_POD_CAPACITY)
+            - --status-sync-interval=$(GPU_BURST_STATUS_SYNC_INTERVAL)
+            - --orphan-sweeper-interval=$(GPU_BURST_ORPHAN_SWEEPER_INTERVAL)
+            - --orphan-sweeper-dry-run=$(GPU_BURST_ORPHAN_SWEEPER_DRY_RUN)
+            - --placement-offers=$(GPU_BURST_PLACEMENT_OFFERS)
+            - --placement-offer-ttl=$(GPU_BURST_PLACEMENT_OFFER_TTL)
+            - --placement-refresh-interval=$(GPU_BURST_PLACEMENT_REFRESH_INTERVAL)
+            - --placement-signal-cooldown=$(GPU_BURST_PLACEMENT_SIGNAL_COOLDOWN)
+          env:
+            - name: GPU_BURST_PROVIDER
+              value: {{ .Values.provider | quote }}
+            - name: GPU_BURST_NODE_NAME
+              value: {{ .Values.nodeName | quote }}
+            {{- range $name, $value := .Values.env }}
+            - name: {{ $name }}
+              value: {{ $value | toString | quote }}
+            {{- end }}
+            {{- range $provider, $secret := .Values.credentials }}
+            {{- if $secret.secretName }}
+            - name: {{ $provider | upper }}_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret.secretName | quote }}
+                  key: {{ $secret.key | quote }}
+            {{- end }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsGroup: 65532
+            runAsNonRoot: true
+            runAsUser: 65532
+          terminationMessagePolicy: FallbackToLogsOnError
+      nodeSelector:
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
+      tolerations:
+        {{- toYaml .Values.tolerations | nindent 8 }}
+      imagePullSecrets:
+        {{- toYaml .Values.imagePullSecrets | nindent 8 }}
