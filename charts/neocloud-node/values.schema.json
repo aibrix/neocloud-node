@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "provider": {
+      "enum": [
+        "fake",
+        "runpod",
+        "vast",
+        "lambda"
+      ]
+    },
+    "nodeName": {
+      "type": "string",
+      "minLength": 1
+    },
+    "env": {
+      "type": "object",
+      "propertyNames": {
+        "not": {
+          "enum": [
+            "GPU_BURST_PROVIDER",
+            "GPU_BURST_NODE_NAME"
+          ]
+        }
+      }
+    },
+    "image": {
+      "type": "object",
+      "required": [
+        "repository",
+        "tag",
+        "pullPolicy"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tag": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pullPolicy": {
+          "enum": [
+            "Always",
+            "IfNotPresent",
+            "Never"
+          ]
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,45 @@
+# One controller replica per virtual node. Credentials reference existing Secrets.
+image:
+  repository: ghcr.io/aibrix/neocloud-node
+  tag: 0.1.0
+  pullPolicy: IfNotPresent
+provider: fake
+nodeName: neocloud-node
+credentials:
+  runpod:
+    secretName: ''
+    key: apiKey
+  lambda:
+    secretName: ''
+    key: apiKey
+  vast:
+    secretName: ''
+    key: apiKey
+env:
+  GPU_BURST_FALLBACK_PROVIDERS: ''
+  GPU_BURST_ADVERTISE_GPU_COUNT: '100'
+  GPU_BURST_ADVERTISE_POD_CAPACITY: '1000'
+  GPU_BURST_STATUS_SYNC_INTERVAL: 15s
+  GPU_BURST_PLACEMENT_OFFERS: ''
+  GPU_BURST_PLACEMENT_OFFER_TTL: 24h
+  GPU_BURST_PLACEMENT_REFRESH_INTERVAL: '0'
+  GPU_BURST_PLACEMENT_SIGNAL_COOLDOWN: 5m
+  GPU_BURST_ORPHAN_SWEEPER_INTERVAL: '0'
+  GPU_BURST_ORPHAN_SWEEPER_DRY_RUN: 'true'
+  GPU_BURST_VAST_DISK_GB: '20'
+  GPU_BURST_VAST_MIN_RELIABILITY: '0.95'
+  GPU_BURST_VAST_OFFER_LIMIT: '100'
+  GPU_BURST_LAMBDA_CALLBACK_URL: ''
+  GPU_BURST_LAMBDA_REGION: ''
+  GPU_BURST_LAMBDA_INSTANCE_TYPE: ''
+  GPU_BURST_LAMBDA_SSH_KEY_NAMES: ''
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: '1'
+    memory: 512Mi
+nodeSelector: {}
+tolerations: []
+imagePullSecrets: []

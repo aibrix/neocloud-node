@@ -1,0 +1,9 @@
+Controller: {{ include "neocloud.name" . }}
+Virtual node: {{ .Values.nodeName }} (provider: {{ .Values.provider }})
+
+kubectl -n {{ .Release.Namespace }} rollout status deployment/{{ include "neocloud.name" . }}
+kubectl get node {{ .Values.nodeName }}
+
+Helm readiness confirms the controller Pod, not remote GPU availability.
+Delete remote workloads and confirm provider cleanup before uninstalling.
+CRDs and virtual Nodes are not automatically removed by Helm.

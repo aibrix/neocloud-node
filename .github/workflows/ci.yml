@@ -140,3 +140,31 @@ jobs:
           DIGEST: ${{ steps.image.outputs.digest }}
         run: |
           printf 'Image: %s\n\nDigest: %s\n' "${IMAGE}" "${DIGEST}" >> "${GITHUB_STEP_SUMMARY}"
+
+  helm:
+    name: Helm chart
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install Helm
+        env:
+          HELM_VERSION: v3.19.0
+        run: |
+          archive="helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          cd "${RUNNER_TEMP}"
+          curl --fail --silent --show-error --location --output "${archive}" "https://get.helm.sh/${archive}"
+          curl --fail --silent --show-error --location --output "${archive}.sha256sum" "https://get.helm.sh/${archive}.sha256sum"
+          sha256sum --check "${archive}.sha256sum"
+          tar -xzf "${archive}"
+          echo "${RUNNER_TEMP}/linux-amd64" >> "${GITHUB_PATH}"
+      - name: Validate chart
+        run: |
+          helm lint charts/neocloud-node --strict
+          helm template neocloud charts/neocloud-node --namespace aibrix-system --include-crds > /dev/null
+          helm template alternate charts/neocloud-node --namespace alternate --set provider=vast --set credentials.vast.secretName=vast-key --set nodeName=alternate-node > /dev/null
+          cmp config/crd/bases/cloud.aibrix.ai_cloudpodbindings.yaml charts/neocloud-node/crds/cloudpodbindings.yaml
+          helm package charts/neocloud-node --destination "${RUNNER_TEMP}"

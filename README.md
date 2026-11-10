@@ -68,22 +68,21 @@ make docker-build
 
 ## Install On Kubernetes
 
-The default deployment uses the fake provider so the control-plane path can be
-tested without cloud credentials. The Kustomize bases under `config/` are the
-canonical deployment source. `deploy/neocloud-node.yaml` is the generated,
-single-file equivalent for users who do not use Kustomize.
+Helm is the recommended installation method. The default provider is `fake`,
+so no cloud credentials are required for control-plane validation.
 
 ```bash
-kubectl apply -k config/default
-kubectl -n aibrix-system rollout status deploy/aibrix-neocloud-node
+helm upgrade --install neocloud ./charts/neocloud-node \
+  --namespace aibrix-system --create-namespace --wait --timeout 3m
+kubectl get node neocloud-node
 kubectl apply -f config/samples/fake-pod.yaml
-kubectl get pod neocloud-node-fake-smoke -w
 kubectl get cloudpodbindings
 ```
 
-For a pinned image or environment-specific settings, create a Kustomize overlay
-that references `config/default` and patches the Deployment. Run `make manifests`
-after changing a base so the generated installation manifest stays current.
+See the [chart guide](charts/neocloud-node/README.md) for provider Secrets,
+commit-pinned images, DOKS workload tolerations, CRD upgrades, and migration
+from the legacy YAML installation. The chart is currently installed from a
+repository checkout. Legacy Kustomize and generated YAML remain available.
 
 Every push to `main` (including a merged PR) runs CI and, after verification,
 race tests, and the container build pass, publishes a Linux amd64/arm64 image:
@@ -94,12 +93,12 @@ job summary. Each main commit has its own run, so newer merges do not cancel
 earlier publications. PR and manual CI runs do not publish images.
 The `latest` tag continues to track formal releases.
 
-To switch the deployment to RunPod, set `GPU_BURST_PROVIDER=runpod` and provide
-`RUNPOD_API_KEY` through the `aibrix-neocloud-node-runpod` Secret referenced by
-the deployment. Provider credentials are never included in the repository.
+For RunPod, set Helm values `provider=runpod` and
+`credentials.runpod.secretName` to an existing Secret containing `apiKey`.
+Provider credentials are never included in the repository.
 
-To use Vast.ai, set `GPU_BURST_PROVIDER=vast` and provide `VAST_API_KEY` through
-the optional `aibrix-neocloud-node-vast` Secret. The adapter defaults to 20 GiB
+For Vast.ai, set `provider=vast` and `credentials.vast.secretName`.
+The adapter defaults to 20 GiB
 of disk, verified hosts, reliability of at least 0.95, and on-demand pricing.
 Pods can narrow placement with `cloud.aibrix.ai/vast-verified`,
 `cloud.aibrix.ai/vast-machine-id`, `cloud.aibrix.ai/vast-disk-gb`, and
