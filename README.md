@@ -85,6 +85,15 @@ For a pinned image or environment-specific settings, create a Kustomize overlay
 that references `config/default` and patches the Deployment. Run `make manifests`
 after changing a base so the generated installation manifest stays current.
 
+Every push to `main` (including a merged PR) runs CI and, after verification,
+race tests, and the container build pass, publishes a Linux amd64/arm64 image:
+`ghcr.io/aibrix/neocloud-node:<full-40-character-commit-SHA>`.
+Use the resulting commit on `main`, which may differ from the PR branch's SHA
+after squash or merge. The image reference and digest appear in the CI run's
+job summary. Each main commit has its own run, so newer merges do not cancel
+earlier publications. PR and manual CI runs do not publish images.
+The `latest` tag continues to track formal releases.
+
 To switch the deployment to RunPod, set `GPU_BURST_PROVIDER=runpod` and provide
 `RUNPOD_API_KEY` through the `aibrix-neocloud-node-runpod` Secret referenced by
 the deployment. Provider credentials are never included in the repository.
