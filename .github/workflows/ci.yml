@@ -139,4 +139,4 @@ jobs:
           IMAGE: ghcr.io/${{ github.repository }}:${{ github.sha }}
           DIGEST: ${{ steps.image.outputs.digest }}
         run: |
-          printf 'Image: `%s`\n\nDigest: `%s`\n' "${IMAGE}" "${DIGEST}" >> "${GITHUB_STEP_SUMMARY}"
+          printf 'Image: %s\n\nDigest: %s\n' "${IMAGE}" "${DIGEST}" >> "${GITHUB_STEP_SUMMARY}"
