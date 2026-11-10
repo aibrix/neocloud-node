@@ -126,11 +126,15 @@ jobs:
           provenance: mode=max
           sbom: true
       - name: Create GitHub release
-        uses: softprops/action-gh-release@c12583777ecdfd3be55c69cf75464299dc01057e # v3
-        with:
-          generate_release_notes: true
-          fail_on_unmatched_files: true
-          files: |
-            bin/neocloud-node-*.yaml
-            bin/LICENSE
-            bin/SHA256SUMS
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          assets=("bin/neocloud-node-${version}.yaml" bin/LICENSE bin/SHA256SUMS)
+          for asset in "${assets[@]}"; do
+            test -f "${asset}"
+          done
+          gh release create "${GITHUB_REF_NAME}" "${assets[@]}" \
+            --verify-tag --generate-notes
