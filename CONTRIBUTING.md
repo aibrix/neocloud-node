@@ -38,6 +38,18 @@ the required environment variables set.
 - Never commit API keys, cloud credentials, provider logs, local trace outputs,
   or paid resource identifiers.
 
+## Self-assigning an issue or pull request
+
+Any contributor can claim an open issue or pull request by commenting `/assign` on it.
+The repository's assign workflow adds you as an assignee:
+
+- Comment `/assign` on an issue or pull request to assign it to yourself. The command
+  works on both issues and pull requests.
+- It is safe to repeat `/assign`; assigning an already-assigned user is a no-op.
+- Only comment `/assign` when you plan to work on the item soon. If you become
+  unavailable, ask a maintainer to unassign or reassign it so others can pick it up.
+- Maintainers may change assignees at any time.
+
 ## Good First Areas
 
 - Documentation consistency and examples.

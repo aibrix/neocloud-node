@@ -1,0 +1,30 @@
+name: Assign issue or pull request to commenter
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  assign:
+    name: Assign to commenter
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    if: |
+      github.event.comment.body == '/assign' ||
+      startsWith(github.event.comment.body, '/assign ')
+    steps:
+      - name: Assign the issue or pull request to the commenter
+        run: |
+          curl \
+            --fail \
+            --silent \
+            --show-error \
+            --request POST \
+            --url "https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/assignees" \
+            --header "Authorization: Bearer ${{ github.token }}" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --data "{\"assignees\":[\"${{ github.event.comment.user.login }}\"]}"

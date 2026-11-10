@@ -19,6 +19,25 @@ body:
       placeholder: https://...
     validations:
       required: true
+  - type: input
+    id: kubernetes_version
+    attributes:
+      label: Kubernetes version
+      description: Target or tested Kubernetes version, when the request depends on one.
+      placeholder: v1.31.4 or Not applicable
+  - type: input
+    id: manifest_version
+    attributes:
+      label: Manifest version
+      description: NeoCloud Node release or install manifest version this request targets; use main for a new integration.
+      placeholder: v0.1.0, main, or 0123456789abcdef
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Kubernetes and provider behavior
+      description: Describe how Pod creation, status, completion, failure, deletion, and cleanup should map to this provider.
+    validations:
+      required: true
   - type: textarea
     id: compute
     attributes:

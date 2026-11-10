@@ -10,14 +10,6 @@ body:
       value: |
         Search existing issues before filing. Never include API keys, SSH keys,
         callback secrets, private endpoints, account IDs, or paid resource IDs.
-  - type: input
-    id: version
-    attributes:
-      label: Version
-      description: Release tag, image digest, or git commit.
-      placeholder: v0.1.0 or 0123456789abcdef
-    validations:
-      required: true
   - type: dropdown
     id: provider
     attributes:
@@ -26,8 +18,25 @@ body:
         - fake
         - RunPod
         - Lambda Cloud
+        - Vast.ai
         - Provider-independent
         - Other
+    validations:
+      required: true
+  - type: input
+    id: kubernetes_version
+    attributes:
+      label: Kubernetes version
+      description: Provide the server version without cluster addresses or other private details.
+      placeholder: v1.31.4
+    validations:
+      required: true
+  - type: input
+    id: manifest_version
+    attributes:
+      label: Manifest version
+      description: NeoCloud Node release, install manifest tag, image digest, or git commit in use.
+      placeholder: v0.1.0, sha256:..., or 0123456789abcdef
     validations:
       required: true
   - type: textarea
@@ -47,10 +56,15 @@ body:
     id: reproduce
     attributes:
       label: Reproduction
-      description: Include a minimal sanitized Pod and the commands needed to reproduce the problem.
-      render: shell
+      description: List the commands or steps needed to reproduce the problem.
     validations:
       required: true
+  - type: textarea
+    id: pod_manifest
+    attributes:
+      label: Minimal Pod manifest
+      description: Include a minimal sanitized manifest when the problem involves a Pod.
+      render: yaml
   - type: textarea
     id: state
     attributes:
@@ -60,14 +74,11 @@ body:
   - type: textarea
     id: environment
     attributes:
-      label: Environment
+      label: Additional environment details
       placeholder: |
-        Kubernetes version:
         Installation method:
         Controller configuration:
         Provider API or region:
-    validations:
-      required: true
   - type: checkboxes
     id: safety
     attributes:
