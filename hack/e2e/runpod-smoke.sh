@@ -296,8 +296,9 @@ wait_for_started_remote() {
   fail "timed out waiting for ${pod_name} to start with remoteID"
 }
 
-# RunPod does not report exit codes, so a container that exits is reported as
-# Failed with reason RemoteExited. Any other failure reason fails the smoke.
+# RunPod restarts an exited container in place without an exit code. The
+# controller stops the Pod and reports it as Failed with reason ContainerExited.
+# Any other result fails the smoke.
 wait_for_remote_exit() {
   local pod_name="$1"
   local timeout="$2"
@@ -308,14 +309,14 @@ wait_for_remote_exit() {
     phase="$(pod_phase "$pod_name")"
     reason="$(pod_terminated_reason "$pod_name")"
     log "pod=${pod_name} phase=${phase:-unknown} reason=${reason:-none}"
-    if [[ "$phase" == "Failed" && "$reason" == "RemoteExited" ]]; then
+    if [[ "$phase" == "Failed" && "$reason" == "ContainerExited" ]]; then
       return 0
     fi
     if [[ "$phase" == "Failed" || "$phase" == "Succeeded" ]]; then
       "$KUBECTL" -n "$NAMESPACE" describe pod "$pod_name" >&2 || true
       "$KUBECTL" -n "$NAMESPACE" get cloudpodbindings.cloud.aibrix.ai \
         -l "cloud.aibrix.ai/pod-name=${pod_name}" -o yaml >&2 || true
-      fail "${pod_name} ended with phase=${phase} reason=${reason:-none}, want Failed/RemoteExited"
+      fail "${pod_name} ended with phase=${phase} reason=${reason:-none}, want Failed/ContainerExited"
     fi
     sleep 5
   done

@@ -216,10 +216,105 @@ func (s *LifecycleService) SyncStatus(ctx context.Context, namespace string, wor
 	recordRemoteFailure(&binding, remote)
 	recordRemoteCost(&binding, remote)
 	recordRemoteEndpoints(&binding, remote)
+	if err := handleContainerRestart(ctx, provider, &binding, remote); err != nil {
+		_ = s.store.Update(ctx, binding)
+		return binding, err
+	}
 	if err := s.store.Update(ctx, binding); err != nil {
 		return Binding{}, err
 	}
 	return binding, nil
+}
+
+const (
+	// ReasonContainerExited marks a Pod whose container exited and was
+	// restarted in place by the provider, which its restartPolicy forbids.
+	ReasonContainerExited = "ContainerExited"
+	reasonStopFailed      = "StopFailed"
+)
+
+// handleContainerRestart applies the Pod restartPolicy when the provider
+// reports that it restarted the container in place. The uptime of one
+// container never decreases, although a provider may report the same stale
+// value for a while, so only an uptime lower than the last one observed counts
+// as a restart. With Always that matches kubelet and is only counted. With
+// Never or OnFailure the original command has finished; the controller stops
+// the remote workload so that it does not run again, and fails the Pod. The
+// exit code is not known, so the Pod cannot be reported as Succeeded. The
+// restart is recorded only after the stop succeeds, and a failed stop is
+// retried on the next sync.
+func handleContainerRestart(ctx context.Context, provider ProviderAdapter, binding *Binding, remote RemoteResource) error {
+	uptime := remote.ContainerUptime
+	if binding == nil || remote.Phase != RemoteRunning || uptime <= 0 {
+		return nil
+	}
+	if uptime >= binding.ContainerUptime && !stopPending(binding) {
+		binding.ContainerUptime = uptime
+		return nil
+	}
+
+	if binding.Request.RestartPolicy == string(RestartPolicyAlways) {
+		binding.RestartCount++
+		binding.ContainerUptime = uptime
+		return nil
+	}
+
+	if err := stopRemote(ctx, provider, binding.RemoteID); err != nil {
+		message := "the container exited and the provider restarted it; stopping the remote workload failed: " + err.Error()
+		binding.LastError = message
+		SetCondition(binding, BindingCondition{
+			Type:    ConditionProviderError,
+			Status:  ConditionTrue,
+			Reason:  reasonStopFailed,
+			Message: message,
+		})
+		return err
+	}
+	binding.RestartCount++
+	binding.ContainerUptime = uptime
+	binding.Phase = BindingFailed
+	message := "the container exited and the provider restarted it, which restartPolicy " +
+		defaultString(binding.Request.RestartPolicy, string(RestartPolicyNever)) +
+		" does not allow; the remote workload was stopped. The exit code is not available"
+	binding.LastError = message
+	for _, conditionType := range []ConditionType{ConditionReady, ConditionProviderError} {
+		status := ConditionTrue
+		if conditionType == ConditionReady {
+			status = ConditionFalse
+		}
+		SetCondition(binding, BindingCondition{
+			Type:    conditionType,
+			Status:  status,
+			Reason:  ReasonContainerExited,
+			Message: message,
+		})
+	}
+	return nil
+}
+
+// stopPending reports a restart whose stop failed. The new container's uptime
+// soon exceeds the last one observed, so the restart is remembered by the
+// condition rather than detected again.
+func stopPending(binding *Binding) bool {
+	condition := FindCondition(binding.Conditions, ConditionProviderError)
+	return condition != nil && condition.Status == ConditionTrue && condition.Reason == reasonStopFailed
+}
+
+// stopRemote stops the remote workload, or deletes it when the provider
+// cannot stop one, so that a finished container stops billing compute.
+func stopRemote(ctx context.Context, provider ProviderAdapter, remoteID string) error {
+	if stopper, ok := provider.(RemoteStopper); ok {
+		err := stopper.Stop(ctx, remoteID)
+		if errors.Is(err, ErrRemoteNotFound) {
+			return nil
+		}
+		return err
+	}
+	err := provider.Delete(ctx, remoteID)
+	if errors.Is(err, ErrRemoteNotFound) {
+		return nil
+	}
+	return err
 }
 
 // recordRemoteFailure explains a failed remote workload on the binding so the

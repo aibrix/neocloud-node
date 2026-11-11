@@ -228,18 +228,20 @@ func objectForBinding(binding core.Binding) *unstructured.Unstructured {
 
 func statusFromBinding(binding core.Binding) map[string]interface{} {
 	return map[string]interface{}{
-		"podName":     binding.Name,
-		"workloadUID": binding.WorkloadUID,
-		"phase":       string(binding.Phase),
-		"remoteID":    binding.RemoteID,
-		"request":     requestToMap(binding.Request),
-		"placement":   placementToMap(binding.Placement),
-		"cost":        costToMap(binding.Cost),
-		"attempts":    attemptsToSlice(binding.Attempts),
-		"conditions":  conditionsToSlice(binding.Conditions),
-		"endpoints":   endpointsToSlice(binding.Endpoints),
-		"deleting":    binding.Deleting,
-		"lastError":   binding.LastError,
+		"podName":                binding.Name,
+		"workloadUID":            binding.WorkloadUID,
+		"phase":                  string(binding.Phase),
+		"remoteID":               binding.RemoteID,
+		"request":                requestToMap(binding.Request),
+		"placement":              placementToMap(binding.Placement),
+		"cost":                   costToMap(binding.Cost),
+		"attempts":               attemptsToSlice(binding.Attempts),
+		"conditions":             conditionsToSlice(binding.Conditions),
+		"endpoints":              endpointsToSlice(binding.Endpoints),
+		"containerUptimeSeconds": int64(binding.ContainerUptime / time.Second),
+		"restartCount":           int64(binding.RestartCount),
+		"deleting":               binding.Deleting,
+		"lastError":              binding.LastError,
 	}
 }
 
@@ -258,19 +260,21 @@ func bindingFromObject(object *unstructured.Unstructured) (core.Binding, error) 
 	}
 
 	return core.Binding{
-		Namespace:   namespace,
-		Name:        name,
-		WorkloadUID: workloadUID,
-		Request:     requestFromMap(asMap(status["request"])),
-		RemoteID:    stringValue(status["remoteID"]),
-		Phase:       core.BindingPhase(stringValue(status["phase"])),
-		Placement:   placementFromMap(asMap(status["placement"])),
-		Cost:        costFromMap(asMap(status["cost"])),
-		Attempts:    attemptsFromSlice(asSlice(status["attempts"])),
-		Conditions:  conditionsFromSlice(asSlice(status["conditions"])),
-		Endpoints:   endpointsFromSlice(asSlice(status["endpoints"])),
-		Deleting:    boolValue(status["deleting"]),
-		LastError:   stringValue(status["lastError"]),
+		Namespace:       namespace,
+		Name:            name,
+		WorkloadUID:     workloadUID,
+		Request:         requestFromMap(asMap(status["request"])),
+		RemoteID:        stringValue(status["remoteID"]),
+		Phase:           core.BindingPhase(stringValue(status["phase"])),
+		Placement:       placementFromMap(asMap(status["placement"])),
+		Cost:            costFromMap(asMap(status["cost"])),
+		Attempts:        attemptsFromSlice(asSlice(status["attempts"])),
+		Conditions:      conditionsFromSlice(asSlice(status["conditions"])),
+		Endpoints:       endpointsFromSlice(asSlice(status["endpoints"])),
+		ContainerUptime: time.Duration(intValue(status["containerUptimeSeconds"])) * time.Second,
+		RestartCount:    intValue(status["restartCount"]),
+		Deleting:        boolValue(status["deleting"]),
+		LastError:       stringValue(status["lastError"]),
 	}, nil
 }
 

@@ -393,6 +393,10 @@ func (p *Provider) syncPodStatus(ctx context.Context, pod *corev1.Pod) (*corev1.
 	}
 	p.mu.Unlock()
 
+	if restarts := restartCount(synced.Status) - restartCount(pod.Status); restarts > 0 && len(pod.Status.ContainerStatuses) > 0 {
+		p.recordPodEvent(synced, corev1.EventTypeWarning, "ContainerRestarted",
+			"the provider restarted the container in place after it exited; the exit code is not available")
+	}
 	if podStatusChanged(pod.Status, synced.Status) {
 		p.notify(synced)
 	}
@@ -496,10 +500,18 @@ func endpointsAnnotation(endpoints []core.Endpoint) (string, error) {
 }
 
 func podStatusChanged(before corev1.PodStatus, after corev1.PodStatus) bool {
-	if before.Phase != after.Phase || before.PodIP != after.PodIP {
+	if before.Phase != after.Phase || before.PodIP != after.PodIP || restartCount(before) != restartCount(after) {
 		return true
 	}
 	return podReady(before.Conditions) != podReady(after.Conditions)
+}
+
+func restartCount(status corev1.PodStatus) int32 {
+	var count int32
+	for _, container := range status.ContainerStatuses {
+		count += container.RestartCount
+	}
+	return count
 }
 
 func podReady(conditions []corev1.PodCondition) corev1.ConditionStatus {
@@ -540,6 +552,9 @@ func podWithBindingStatus(pod *corev1.Pod, binding core.Binding) *corev1.Pod {
 	out.Status.StartTime = startTime(out, now)
 	out.Status.Conditions = podConditions(phase, reason, message)
 	out.Status.ContainerStatuses = containerStatuses(out.Spec.Containers, phase, now, reason, message)
+	for index := range out.Status.ContainerStatuses {
+		out.Status.ContainerStatuses[index].RestartCount = int32(binding.RestartCount)
+	}
 	applyEndpointAddress(&out.Status, binding.Endpoints)
 	return out
 }

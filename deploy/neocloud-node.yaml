@@ -92,6 +92,9 @@ spec:
                       type: string
                   type: object
                 type: array
+              containerUptimeSeconds:
+                description: Container uptime the provider last reported, in seconds.
+                type: integer
               cost:
                 properties:
                   hourlyUSD:
@@ -138,6 +141,9 @@ spec:
               request:
                 type: object
                 x-kubernetes-preserve-unknown-fields: true
+              restartCount:
+                description: Container restarts performed in place by the provider.
+                type: integer
               workloadUID:
                 type: string
             type: object

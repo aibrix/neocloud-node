@@ -59,6 +59,10 @@ A single-element `command` without `args` still gets the image CMD appended.
 | `TERMINATED` | `RemoteDeleted` | `Succeeded`, reason `RemoteWorkloadDeleted` |
 | unknown / empty | `RemotePending` | `Pending` |
 
+`EXITED` means the Pod was stopped, by the controller, by a user or by the host.
+A container that exits on its own is restarted by RunPod instead; see
+[Container restarts](#container-restarts).
+
 RunPod does not report the container exit code. `EXITED` therefore cannot be
 told apart from a crash, an out-of-memory kill, or a reclaimed host, so it is
 reported as `Failed` with reason `RemoteExited` instead of `Succeeded`. A Job
@@ -68,6 +72,23 @@ callback that reports exit code 0, which RunPod Pods do not have yet.
 
 The exited RunPod Pod is not deleted automatically. It no longer bills GPU time,
 but it keeps its disk until the Kubernetes Pod is deleted.
+
+## Container Restarts
+
+RunPod restarts an exited container in place: `desiredStatus` stays `RUNNING`
+and no exit code is reported. The v1 API exposes no signal for this, so `Get`
+also reads `GET https://api.runpod.io/v2/pods/{podId}` and sets
+`RemoteResource.ContainerUptime` from `runtime.uptime` while the v2 `status` is
+`RUNNING`. `runtime` is null while the image is pulled. A failed v2 read is
+ignored for that sync.
+
+RunPod refreshes `runtime.uptime` about every 30 seconds and reports the same
+value in between, so the uptime cannot be turned into an exact start time. The
+lifecycle records the last uptime on the binding, and an uptime lower than that
+is a restart. See
+[Restart semantics](compatibility-matrix.md#restart-semantics) for how
+`restartPolicy` is applied. `Stop` calls `POST /pods/{podId}/stop`, which
+releases the GPU and keeps the disk; the Pod then reports `EXITED`.
 
 ## Endpoints
 

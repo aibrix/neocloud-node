@@ -133,8 +133,12 @@ type Binding struct {
 	Attempts    []Attempt
 	Conditions  []BindingCondition
 	Endpoints   []Endpoint
-	Deleting    bool
-	LastError   string
+	// ContainerUptime is the container uptime the provider last reported.
+	// RestartCount counts container restarts observed by the provider.
+	ContainerUptime time.Duration
+	RestartCount    int
+	Deleting        bool
+	LastError       string
 }
 
 func FindCondition(conditions []BindingCondition, conditionType ConditionType) *BindingCondition {

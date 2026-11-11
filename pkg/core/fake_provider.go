@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 )
 
 var ErrRemoteNotFound = errors.New("remote resource not found")
@@ -35,6 +36,10 @@ type RemoteResource struct {
 	// reports more than a phase, for example why a remote workload failed.
 	StatusReason  string
 	StatusMessage string
+	// ContainerUptime is how long the container has run, or zero when
+	// unknown. Some providers restart an exited container in place, so an
+	// uptime lower than previously observed means the container exited.
+	ContainerUptime time.Duration
 }
 
 type ProviderAdapter interface {
@@ -43,11 +48,19 @@ type ProviderAdapter interface {
 	Delete(ctx context.Context, remoteID string) error
 }
 
+// RemoteStopper is implemented by providers that can stop a remote workload
+// without deleting it. Stopping releases compute but keeps the disk.
+type RemoteStopper interface {
+	Stop(ctx context.Context, remoteID string) error
+}
+
 type FakeProvider struct {
 	mu          sync.RWMutex
 	provider    string
 	sequence    int
 	createCount int
+	stopCount   int
+	stopErr     error
 	byKey       map[string]RemoteResource
 	byID        map[string]RemoteResource
 }
@@ -149,6 +162,63 @@ func (p *FakeProvider) ListRemoteResources(ctx context.Context) ([]RemoteResourc
 		remotes = append(remotes, remote)
 	}
 	return remotes, nil
+}
+
+// Stop stops a fake remote resource, like a provider that keeps the disk of a
+// stopped workload.
+func (p *FakeProvider) Stop(ctx context.Context, remoteID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.stopErr != nil {
+		return p.stopErr
+	}
+	remote, ok := p.byID[remoteID]
+	if !ok {
+		return ErrRemoteNotFound
+	}
+	p.stopCount++
+	remote.Phase = RemoteFailed
+	remote.StatusReason = "RemoteStopped"
+	remote.StatusMessage = "remote workload was stopped"
+	p.byID[remoteID] = remote
+	p.byKey[remote.IdempotencyKey] = remote
+	return nil
+}
+
+// SetStopError makes Stop fail with err until it is set back to nil.
+func (p *FakeProvider) SetStopError(err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.stopErr = err
+}
+
+// StopCount returns how many times Stop succeeded.
+func (p *FakeProvider) StopCount() int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	return p.stopCount
+}
+
+// SetContainerUptime changes how long the fake container has run.
+func (p *FakeProvider) SetContainerUptime(remoteID string, uptime time.Duration) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	remote, ok := p.byID[remoteID]
+	if !ok {
+		return ErrRemoteNotFound
+	}
+	remote.ContainerUptime = uptime
+	p.byID[remoteID] = remote
+	p.byKey[remote.IdempotencyKey] = remote
+	return nil
 }
 
 func (p *FakeProvider) CreateCount() int {
