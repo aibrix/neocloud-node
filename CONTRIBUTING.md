@@ -43,8 +43,30 @@ cleanup plan, and the required environment variables set. See the
   classification, and cleanup behavior.
 - Keep RBAC least-privileged. Add a verb only when a concrete controller call
   requires it, and cover the change in the manifest tests.
-- Never commit API keys, cloud credentials, provider logs, local trace outputs,
-  or paid resource identifiers.
+- Never commit provider API keys, cloud credentials, cloud or provider logs,
+  local trace outputs, or paid resource identifiers.
+
+## Local Secret Scanning
+
+Before each commit, stage the intended changes and scan them locally. Install
+[Gitleaks](https://github.com/gitleaks/gitleaks#installing) using its official
+instructions, then run from the repository root:
+
+```bash
+gitleaks git --staged --redact
+git diff --cached
+```
+
+Review the staged diff manually as well: scanners may miss cloud logs, provider
+keys, and paid resource identifiers. Use clearly fake placeholders in examples
+and fixtures. Fix findings, stage the corrected files, and rerun the scan before
+committing. Repeat after further edits and before opening a pull request; if
+changes are already committed, `gitleaks git --redact` scans local Git history.
+
+If a real credential was committed, revoke or rotate it immediately and remove
+it from the affected commits before pushing. If it was already pushed, notify
+the maintainers privately so they can coordinate cleanup. Never paste the secret
+or unsanitized logs into an issue or pull request.
 
 ## Self-assigning an issue or pull request
 
