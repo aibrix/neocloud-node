@@ -123,3 +123,17 @@ spec:
                       lastTransitionTime:
                         type: string
                         format: date-time
+                endpoints:
+                  description: Public addresses of published container ports.
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      containerPort:
+                        type: integer
+                      protocol:
+                        type: string
+                      host:
+                        type: string
+                      port:
+                        type: integer

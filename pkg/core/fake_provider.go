@@ -26,8 +26,11 @@ type RemoteResource struct {
 	Provider       string
 	Phase          RemotePhase
 	Request        WorkloadRequest
-	HourlyCost     float64
-	CostSource     string
+	// Endpoints lists the published container ports, when the provider has
+	// assigned an address.
+	Endpoints  []Endpoint
+	HourlyCost float64
+	CostSource string
 	// StatusReason and StatusMessage explain the phase when the provider
 	// reports more than a phase, for example why a remote workload failed.
 	StatusReason  string
@@ -153,4 +156,19 @@ func (p *FakeProvider) CreateCount() int {
 	defer p.mu.RUnlock()
 
 	return p.createCount
+}
+
+// SetEndpoints changes the published endpoints of an existing fake remote resource.
+func (p *FakeProvider) SetEndpoints(remoteID string, endpoints []Endpoint) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	remote, ok := p.byID[remoteID]
+	if !ok {
+		return ErrRemoteNotFound
+	}
+	remote.Endpoints = append([]Endpoint(nil), endpoints...)
+	p.byID[remoteID] = remote
+	p.byKey[remote.IdempotencyKey] = remote
+	return nil
 }

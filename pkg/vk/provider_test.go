@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	kubefake "k8s.io/client-go/kubernetes/fake"
 	"strings"
 	"sync"
 	"testing"
@@ -867,4 +868,114 @@ func (p pricedProvider) Get(ctx context.Context, remoteID string) (core.RemoteRe
 
 func (p pricedProvider) Delete(ctx context.Context, remoteID string) error {
 	return nil
+}
+
+func TestRemoteEndpointsSetPodIPAndAnnotation(t *testing.T) {
+	ctx := context.Background()
+	adapter := core.NewFakeProvider("runpod")
+	pod := gpuPod("serve", "uid-serve")
+	pod.Spec.Containers[0].Ports = []corev1.ContainerPort{{Name: "http", ContainerPort: 8000, Protocol: corev1.ProtocolTCP}}
+	clientset := kubefake.NewSimpleClientset(pod.DeepCopy())
+	provider := newTestProviderWithConfig(t, Config{Adapter: adapter, PodClient: clientset.CoreV1()})
+
+	var mu sync.Mutex
+	var notified []*corev1.Pod
+	provider.NotifyPods(ctx, func(pod *corev1.Pod) {
+		mu.Lock()
+		defer mu.Unlock()
+		notified = append(notified, pod.DeepCopy())
+	})
+
+	if err := provider.CreatePod(ctx, pod); err != nil {
+		t.Fatalf("CreatePod() error = %v", err)
+	}
+	created, err := provider.GetPodStatus(ctx, "default", "serve")
+	if err != nil {
+		t.Fatalf("GetPodStatus() error = %v", err)
+	}
+	if created.Phase != corev1.PodRunning || created.PodIP != "" {
+		t.Fatalf("status = %s/%q, want Running without Pod IP", created.Phase, created.PodIP)
+	}
+
+	// The provider publishes the address after the workload is already running.
+	binding, err := provider.lifecycle.SyncStatus(ctx, "default", "uid-serve")
+	if err != nil {
+		t.Fatalf("SyncStatus() setup error = %v", err)
+	}
+	if err := adapter.SetEndpoints(binding.RemoteID, []core.Endpoint{
+		{ContainerPort: 8000, Protocol: "TCP", Host: "203.0.113.10", Port: 40123},
+	}); err != nil {
+		t.Fatalf("SetEndpoints() setup error = %v", err)
+	}
+	mu.Lock()
+	notified = nil
+	mu.Unlock()
+
+	status, err := provider.GetPodStatus(ctx, "default", "serve")
+	if err != nil {
+		t.Fatalf("GetPodStatus() error = %v", err)
+	}
+	if status.PodIP != "203.0.113.10" || len(status.PodIPs) != 1 || status.PodIPs[0].IP != "203.0.113.10" {
+		t.Fatalf("pod IPs = %q/%#v, want 203.0.113.10", status.PodIP, status.PodIPs)
+	}
+	mu.Lock()
+	if len(notified) != 1 || notified[0].Status.PodIP != "203.0.113.10" {
+		mu.Unlock()
+		t.Fatalf("notified = %d pods, want one notification with the Pod IP", len(notified))
+	}
+	mu.Unlock()
+
+	stored, err := clientset.CoreV1().Pods("default").Get(ctx, "serve", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Get pod error = %v", err)
+	}
+	want := `[{"containerPort":8000,"protocol":"TCP","host":"203.0.113.10","port":40123}]`
+	if got := stored.Annotations[core.AnnotationEndpoints]; got != want {
+		t.Fatalf("endpoints annotation = %q, want %q", got, want)
+	}
+
+	// The Pod IP is set once. A later address change does not rewrite it.
+	if err := adapter.SetEndpoints(binding.RemoteID, []core.Endpoint{
+		{ContainerPort: 8000, Protocol: "TCP", Host: "198.51.100.7", Port: 40999},
+	}); err != nil {
+		t.Fatalf("SetEndpoints() setup error = %v", err)
+	}
+	changed, err := provider.GetPodStatus(ctx, "default", "serve")
+	if err != nil {
+		t.Fatalf("GetPodStatus() error = %v", err)
+	}
+	if changed.PodIP != "203.0.113.10" {
+		t.Fatalf("pod IP = %q, want unchanged 203.0.113.10", changed.PodIP)
+	}
+}
+
+func TestRemoteEndpointsWithoutPodClientOnlySetPodIP(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	adapter := core.NewFakeProvider("runpod")
+	provider := newTestProvider(t, adapter)
+	pod := gpuPod("serve", "uid-serve-no-client")
+
+	if err := provider.CreatePod(ctx, pod); err != nil {
+		t.Fatalf("CreatePod() error = %v", err)
+	}
+	binding, err := provider.lifecycle.SyncStatus(ctx, "default", "uid-serve-no-client")
+	if err != nil {
+		t.Fatalf("SyncStatus() setup error = %v", err)
+	}
+	if err := adapter.SetEndpoints(binding.RemoteID, []core.Endpoint{
+		{ContainerPort: 8000, Protocol: "TCP", Host: "proxy.example.com", Port: 443},
+		{ContainerPort: 9000, Protocol: "TCP", Host: "203.0.113.10", Port: 40123},
+	}); err != nil {
+		t.Fatalf("SetEndpoints() setup error = %v", err)
+	}
+
+	status, err := provider.GetPodStatus(ctx, "default", "serve")
+	if err != nil {
+		t.Fatalf("GetPodStatus() error = %v", err)
+	}
+	if status.PodIP != "203.0.113.10" {
+		t.Fatalf("pod IP = %q, want first IP endpoint 203.0.113.10", status.PodIP)
+	}
 }

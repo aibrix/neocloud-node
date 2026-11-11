@@ -52,21 +52,25 @@ Stop the watch with Ctrl-C. `Running` / `Ready` currently reflects provider
 status, not model readiness. Image pull and model initialization may take several
 minutes. Check the HTTP API below before sending inference requests.
 
-Find the remote instance ID:
+Once RunPod assigns a public address, the controller sets the Pod IP and
+writes every published port to the `cloud.aibrix.ai/endpoints` annotation.
+RunPod publishes container port **8000** on a different public port, so read
+the mapped port instead of assuming 8000:
+
+```bash
+kubectl -n aibrix-system get pod "$POD" \
+  -o jsonpath='{.metadata.annotations.cloud\.aibrix\.ai/endpoints}{"\n"}'
+# [{"containerPort":8000,"protocol":"TCP","host":"<public-ip>","port":<mapped-port>}]
+
+BASE_URL=http://<public-ip>:<mapped-port>
+curl --fail --max-time 15 "$BASE_URL/v1/models"
+```
+
+The same list is in the binding status. Both samples request Secure Cloud.
 
 ```bash
 kubectl -n aibrix-system get cloudpodbindings \
-  -l "cloud.aibrix.ai/pod-name=$POD" \
-  -o jsonpath='{range .items[*]}{.status.remoteID}{"\n"}{end}'
-```
-
-Open that instance in the RunPod console and locate its public TCP mapping for
-container port **8000**. Use the public IP and the **mapped external port**;
-the external port need not be 8000. Both samples request Secure Cloud.
-
-```bash
-BASE_URL=http://<public-ip>:<mapped-port>
-curl --fail --max-time 15 "$BASE_URL/v1/models"
+  -l "cloud.aibrix.ai/pod-name=$POD" -o jsonpath='{.items[0].status.endpoints}'
 ```
 
 A successful response listing `Qwen/Qwen2.5-1.5B-Instruct` indicates that the API
@@ -91,8 +95,10 @@ Check that the response contains `choices[0].message.content` with the answer
 `4`. For a second request, try `请用中文用一句话解释什么是 GPU。`.
 
 This path uses the provider's public TCP endpoint. The current adapter does not
-support `kubectl logs`, `exec`, or `port-forward`, and these samples do not claim
-Kubernetes Service connectivity or probe-based readiness. Inspect startup logs
+support `kubectl logs`, `exec`, or `port-forward`. A Kubernetes Service does
+not work for these Pods: it would send traffic to the Pod IP on port 8000, but
+RunPod publishes 8000 on another port. These samples also do not claim
+probe-based readiness. Inspect startup logs
 in RunPod if `/v1/models` never becomes reachable.
 
 ## Clean up before trying the other engine

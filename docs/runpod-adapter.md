@@ -53,6 +53,15 @@ callback that reports exit code 0, which RunPod Pods do not have yet.
 The exited RunPod Pod is not deleted automatically. It no longer bills GPU time,
 but it keeps its disk until the Kubernetes Pod is deleted.
 
+## Endpoints
+
+`publicIp` and `portMappings` from `GET /pods/{podId}` become
+`RemoteResource.Endpoints`. A mapping such as `{"8000": 40123}` means container
+port 8000 is reachable at `<publicIp>:40123`. RunPod reports the address only
+after the Pod has started, so endpoints usually appear after the binding is
+already `Running`. Only TCP ports receive a public mapping; `Ports` are always
+requested as TCP.
+
 ## Delete Semantics
 
 `DELETE /pods/{podId}` treats both `204 No Content` and `404 Not Found` as successful cleanup. If delete returns a transient/timeout error, the adapter reads `GET /pods/{podId}` once; if the pod is already gone, cleanup is treated as successful. This matches the lifecycle invariant that remote not found during deletion means there is no paid resource left to clean up.

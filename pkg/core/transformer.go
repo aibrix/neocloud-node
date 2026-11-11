@@ -13,6 +13,10 @@ const (
 	AnnotationMarketType = "cloud.aibrix.ai/market-type"
 	AnnotationRegion     = "cloud.aibrix.ai/region"
 
+	// AnnotationEndpoints is written by the controller on remote Pods. It holds
+	// a JSON list of published container ports with their public host and port.
+	AnnotationEndpoints = "cloud.aibrix.ai/endpoints"
+
 	AnnotationRunPodCloudType          = "cloud.aibrix.ai/runpod-cloud-type"
 	AnnotationRunPodTemplateID         = "cloud.aibrix.ai/runpod-template-id"
 	AnnotationRunPodDataCenterIDs      = "cloud.aibrix.ai/runpod-datacenter-ids"

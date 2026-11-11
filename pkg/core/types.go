@@ -42,6 +42,15 @@ type Port struct {
 	Protocol      string
 }
 
+// Endpoint is where one container port of a remote workload can be reached.
+// Providers usually publish a container port on a different public port.
+type Endpoint struct {
+	ContainerPort int
+	Protocol      string
+	Host          string
+	Port          int
+}
+
 type Placement struct {
 	Provider string
 	Region   string
@@ -121,6 +130,7 @@ type Binding struct {
 	Cost        CostStatus
 	Attempts    []Attempt
 	Conditions  []BindingCondition
+	Endpoints   []Endpoint
 	Deleting    bool
 	LastError   string
 }
