@@ -41,6 +41,48 @@ helm upgrade --install neocloud ./charts/neocloud-node \
 Drain and delete existing remote workloads before switching providers or node
 names. Real provider workloads create paid cloud resources.
 
+## User-managed provider Secrets
+
+The chart does not create provider Secrets. Users create them in the same namespace
+as the release and configure only the Secret name and key in values:
+
+```yaml
+provider: runpod
+credentials:
+  runpod:
+    secretName: neocloud-runpod
+    key: apiKey
+  lambda:
+    secretName: neocloud-lambda
+    key: apiKey
+```
+
+All provider Secret references are optional. With the updated controller image,
+`GPU_BURST_ALLOW_MISSING_CREDENTIALS=true` (the chart default) keeps the controller
+running when a Secret, its key, or its non-empty value is missing. The unconfigured
+primary provider advertises zero GPUs and logs an actionable message. It does not
+send unauthenticated requests or silently switch to the fake provider. A workload
+explicitly bound to the node receives a `MissingCredentials` authentication error.
+Missing credentials never count as proof that a remote allocation was deleted.
+
+Create/update the Secret independently, then restart the controller to reload its
+environment variables:
+
+```bash
+kubectl -n aibrix-system rollout restart deployment/neocloud-neocloud-node
+kubectl -n aibrix-system rollout status deployment/neocloud-neocloud-node
+```
+
+Secret contents are not watched or hot-reloaded. An optional missing Secret does
+not populate an already-running container when it is later created. Set
+`env.GPU_BURST_ALLOW_MISSING_CREDENTIALS=false` for strict startup validation; the
+standalone CLI remains strict by default. Images from release 0.1.0 do not support
+the tolerant-startup option; use the updated image with this chart.
+
+Maintain one release (`neocloud`) in `aibrix-system` and upgrade it in place.
+Delete test workloads and verify remote GPU cleanup after each run; keep this
+shared release and user-managed Secrets unless explicitly uninstalling them.
+
 ## Smoke validation and DOKS
 
 ```bash

@@ -56,6 +56,7 @@ const (
 )
 
 type Options struct {
+	AllowMissingCredentials  bool
 	NodeName                 string
 	Provider                 string
 	FallbackProviders        string
@@ -111,8 +112,9 @@ func ParseOptions(args []string, getenv func(string) string) (Options, error) {
 	}
 
 	options := Options{
-		NodeName: envOr(getenv, "GPU_BURST_NODE_NAME", DefaultNodeName),
-		Provider: envOr(getenv, "GPU_BURST_PROVIDER", ProviderFake),
+		AllowMissingCredentials: boolEnv(getenv, "GPU_BURST_ALLOW_MISSING_CREDENTIALS", false),
+		NodeName:                envOr(getenv, "GPU_BURST_NODE_NAME", DefaultNodeName),
+		Provider:                envOr(getenv, "GPU_BURST_PROVIDER", ProviderFake),
 		FallbackProviders: envOr(getenv,
 			"GPU_BURST_FALLBACK_PROVIDERS", ""),
 		BindingStore: envOr(getenv, "GPU_BURST_BINDING_STORE", BindingStoreKubernetes),
@@ -162,6 +164,7 @@ func ParseOptions(args []string, getenv func(string) string) (Options, error) {
 
 	fs := flag.NewFlagSet("neocloud-node", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
+	fs.BoolVar(&options.AllowMissingCredentials, "allow-missing-credentials", options.AllowMissingCredentials, "start without provider credentials; disable GPU capacity until credentials are configured and the controller restarts")
 	fs.StringVar(&options.NodeName, "node-name", options.NodeName, "virtual node name")
 	fs.StringVar(&options.Provider, "provider", options.Provider, "provider adapter: fake, runpod, lambda or vast")
 	fs.StringVar(&options.FallbackProviders, "fallback-providers", options.FallbackProviders, "comma-separated provider adapters to try after the primary provider fails with a fallback-safe error")
@@ -652,6 +655,10 @@ func parsePlacementCapabilities(raw string) (map[burstresource.Capability]bool, 
 }
 
 func providerAdapterFor(options Options, provider string) (core.ProviderAdapter, error) {
+	if options.AllowMissingCredentials && missingCredential(options, provider) {
+		log.Printf("neocloud-node provider %s is unconfigured: create the referenced Secret and restart the controller", provider)
+		return unconfiguredProvider{provider: provider}, nil
+	}
 	switch provider {
 	case ProviderFake:
 		return core.NewFakeProvider(ProviderFake), nil
@@ -877,15 +884,15 @@ func validateOptions(options Options) error {
 	switch options.Provider {
 	case ProviderFake:
 	case ProviderRunPod:
-		if strings.TrimSpace(options.RunPodAPIKey) == "" {
+		if !options.AllowMissingCredentials && strings.TrimSpace(options.RunPodAPIKey) == "" {
 			return errors.New("runpod provider requires --runpod-api-key or RUNPOD_API_KEY")
 		}
 	case ProviderLambda:
-		if strings.TrimSpace(options.LambdaAPIKey) == "" {
+		if !options.AllowMissingCredentials && strings.TrimSpace(options.LambdaAPIKey) == "" {
 			return errors.New("lambda provider requires --lambda-api-key or LAMBDA_API_KEY")
 		}
 	case ProviderVast:
-		if strings.TrimSpace(options.VastAPIKey) == "" {
+		if !options.AllowMissingCredentials && strings.TrimSpace(options.VastAPIKey) == "" {
 			return errors.New("vast provider requires --vast-api-key or VAST_API_KEY")
 		}
 	default:
@@ -942,17 +949,17 @@ func validateProviderConfigured(options Options, provider string) error {
 	case ProviderFake:
 		return nil
 	case ProviderRunPod:
-		if strings.TrimSpace(options.RunPodAPIKey) == "" {
+		if !options.AllowMissingCredentials && strings.TrimSpace(options.RunPodAPIKey) == "" {
 			return errors.New("runpod fallback provider requires --runpod-api-key or RUNPOD_API_KEY")
 		}
 		return nil
 	case ProviderLambda:
-		if strings.TrimSpace(options.LambdaAPIKey) == "" {
+		if !options.AllowMissingCredentials && strings.TrimSpace(options.LambdaAPIKey) == "" {
 			return errors.New("lambda fallback provider requires --lambda-api-key or LAMBDA_API_KEY")
 		}
 		return nil
 	case ProviderVast:
-		if strings.TrimSpace(options.VastAPIKey) == "" {
+		if !options.AllowMissingCredentials && strings.TrimSpace(options.VastAPIKey) == "" {
 			return errors.New("vast fallback provider requires --vast-api-key or VAST_API_KEY")
 		}
 		return nil
@@ -996,7 +1003,11 @@ func configureNodeSpec(config *nodeutil.NodeConfig, options Options) error {
 	if err != nil {
 		return fmt.Errorf("invalid advertised memory %q: %w", options.AdvertiseMemory, err)
 	}
-	gpu := kresource.MustParse(strconv.Itoa(options.AdvertiseGPUCount))
+	gpuCount := options.AdvertiseGPUCount
+	if options.AllowMissingCredentials && missingCredential(options, options.Provider) {
+		gpuCount = 0
+	}
+	gpu := kresource.MustParse(strconv.Itoa(gpuCount))
 	pods := kresource.MustParse(strconv.Itoa(options.AdvertisePodCapacity))
 
 	capacity := corev1.ResourceList{
