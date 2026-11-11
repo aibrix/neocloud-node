@@ -819,6 +819,86 @@ func TestLifecycleServiceRecordsRemoteDeletedOnSync(t *testing.T) {
 	}
 }
 
+func TestLifecycleServiceRecordsRemoteFailureReasonOnSync(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		reason      string
+		message     string
+		wantReason  string
+		wantMessage string
+	}{
+		{
+			name:        "provider reason",
+			reason:      "RemoteExited",
+			message:     "remote exited without an exit code",
+			wantReason:  "RemoteExited",
+			wantMessage: "remote exited without an exit code",
+		},
+		{
+			name:        "generic failure",
+			wantReason:  "RemoteFailed",
+			wantMessage: "remote workload failed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx := context.Background()
+			store := NewMemoryBindingStore()
+			provider := NewFakeProvider("runpod")
+			service := NewLifecycleService(store, provider)
+
+			binding, err := service.EnsureCreated(ctx, Binding{
+				Namespace:   "default",
+				Name:        "serve",
+				WorkloadUID: "pod-failed",
+				Request: WorkloadRequest{
+					Image:    "example.com/serve:latest",
+					GPUCount: 1,
+					Provider: "runpod",
+				},
+			})
+			if err != nil {
+				t.Fatalf("EnsureCreated() error = %v", err)
+			}
+			if err := provider.SetStatus(binding.RemoteID, RemoteFailed, tt.reason, tt.message); err != nil {
+				t.Fatalf("SetStatus() setup error = %v", err)
+			}
+
+			synced, err := service.SyncStatus(ctx, "default", "pod-failed")
+			if err != nil {
+				t.Fatalf("SyncStatus() error = %v", err)
+			}
+			if synced.Phase != BindingFailed {
+				t.Fatalf("phase = %s, want Failed", synced.Phase)
+			}
+			if synced.LastError != tt.wantMessage {
+				t.Fatalf("last error = %q, want %q", synced.LastError, tt.wantMessage)
+			}
+			providerError := FindCondition(synced.Conditions, ConditionProviderError)
+			if providerError == nil || providerError.Status != ConditionTrue || providerError.Reason != tt.wantReason {
+				t.Fatalf("provider error condition = %#v, want true %s", providerError, tt.wantReason)
+			}
+			ready := FindCondition(synced.Conditions, ConditionReady)
+			if ready == nil || ready.Status != ConditionFalse || ready.Reason != tt.wantReason {
+				t.Fatalf("ready condition = %#v, want false %s", ready, tt.wantReason)
+			}
+
+			stored, err := store.GetByWorkloadUID(ctx, "default", "pod-failed")
+			if err != nil {
+				t.Fatalf("GetByWorkloadUID() error = %v", err)
+			}
+			if stored.Phase != BindingFailed || stored.LastError != tt.wantMessage {
+				t.Fatalf("stored binding = %s/%q, want Failed/%q", stored.Phase, stored.LastError, tt.wantMessage)
+			}
+		})
+	}
+}
+
 func TestLifecycleServiceRecordsDeleteFailure(t *testing.T) {
 	t.Parallel()
 

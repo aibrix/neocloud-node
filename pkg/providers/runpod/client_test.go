@@ -250,9 +250,10 @@ func TestClientGetMapsDesiredStatus(t *testing.T) {
 		name          string
 		desiredStatus string
 		wantPhase     core.RemotePhase
+		wantReason    string
 	}{
 		{name: "running", desiredStatus: "RUNNING", wantPhase: core.RemoteRunning},
-		{name: "exited", desiredStatus: "EXITED", wantPhase: core.RemoteSucceeded},
+		{name: "exited without exit code", desiredStatus: "EXITED", wantPhase: core.RemoteFailed, wantReason: ReasonRemoteExited},
 		{name: "terminated", desiredStatus: "TERMINATED", wantPhase: core.RemoteDeleted},
 		{name: "unknown", desiredStatus: "STARTING", wantPhase: core.RemotePending},
 	}
@@ -288,6 +289,12 @@ func TestClientGetMapsDesiredStatus(t *testing.T) {
 			}
 			if remote.Phase != tt.wantPhase {
 				t.Fatalf("remote phase = %q, want %q", remote.Phase, tt.wantPhase)
+			}
+			if remote.StatusReason != tt.wantReason {
+				t.Fatalf("remote status reason = %q, want %q", remote.StatusReason, tt.wantReason)
+			}
+			if tt.wantReason != "" && remote.StatusMessage == "" {
+				t.Fatal("remote status message is empty, want an explanation")
 			}
 			if remote.HourlyCost != 0.69 || remote.CostSource != "runpod.adjustedCostPerHr" {
 				t.Fatalf("cost = %.2f/%q, want 0.69 adjusted source", remote.HourlyCost, remote.CostSource)

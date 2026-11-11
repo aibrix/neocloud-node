@@ -333,6 +333,7 @@ type PodFilter struct {
 
 func remoteFromPod(pod podResponse, idempotencyKey string, request core.WorkloadRequest) core.RemoteResource {
 	request = requestWithPodShape(request, pod)
+	reason, message := statusDetailFromDesiredStatus(pod.DesiredStatus)
 	return core.RemoteResource{
 		ID:             pod.ID,
 		IdempotencyKey: idempotencyKey,
@@ -342,6 +343,8 @@ func remoteFromPod(pod podResponse, idempotencyKey string, request core.Workload
 		Request:        request,
 		HourlyCost:     hourlyCost(pod),
 		CostSource:     costSource(pod),
+		StatusReason:   reason,
+		StatusMessage:  message,
 	}
 }
 
@@ -383,17 +386,30 @@ func requestWithPodShape(request core.WorkloadRequest, pod podResponse) core.Wor
 	return request
 }
 
+// ReasonRemoteExited marks a RunPod pod that stopped without a known exit code.
+const ReasonRemoteExited = "RemoteExited"
+
+// phaseFromDesiredStatus maps RunPod status to a remote phase. RunPod does not
+// report the container exit code, so EXITED cannot be told apart from a crash
+// or a reclaimed host and is reported as failed rather than succeeded.
 func phaseFromDesiredStatus(status string) core.RemotePhase {
 	switch status {
 	case "RUNNING":
 		return core.RemoteRunning
 	case "EXITED":
-		return core.RemoteSucceeded
+		return core.RemoteFailed
 	case "TERMINATED":
 		return core.RemoteDeleted
 	default:
 		return core.RemotePending
 	}
+}
+
+func statusDetailFromDesiredStatus(status string) (string, string) {
+	if status == "EXITED" {
+		return ReasonRemoteExited, "RunPod reported EXITED; the container exit code is not available"
+	}
+	return "", ""
 }
 
 func hourlyCost(pod podResponse) float64 {

@@ -188,11 +188,35 @@ func (s *LifecycleService) SyncStatus(ctx context.Context, namespace string, wor
 	}
 
 	binding.Phase = bindingPhaseFromRemote(remote.Phase)
+	recordRemoteFailure(&binding, remote)
 	recordRemoteCost(&binding, remote)
 	if err := s.store.Update(ctx, binding); err != nil {
 		return Binding{}, err
 	}
 	return binding, nil
+}
+
+// recordRemoteFailure explains a failed remote workload on the binding so the
+// Pod reports the provider's reason instead of a generic failure.
+func recordRemoteFailure(binding *Binding, remote RemoteResource) {
+	if binding == nil || remote.Phase != RemoteFailed {
+		return
+	}
+	reason := defaultString(remote.StatusReason, "RemoteFailed")
+	message := defaultString(remote.StatusMessage, "remote workload failed")
+	binding.LastError = message
+	SetCondition(binding, BindingCondition{
+		Type:    ConditionReady,
+		Status:  ConditionFalse,
+		Reason:  reason,
+		Message: message,
+	})
+	SetCondition(binding, BindingCondition{
+		Type:    ConditionProviderError,
+		Status:  ConditionTrue,
+		Reason:  reason,
+		Message: message,
+	})
 }
 
 func (s *LifecycleService) EnsureDeleted(ctx context.Context, namespace string, workloadUID string) error {

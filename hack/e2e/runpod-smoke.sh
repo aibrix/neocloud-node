@@ -249,6 +249,11 @@ pod_reason() {
   "$KUBECTL" -n "$NAMESPACE" get pod "$1" -o jsonpath='{.status.reason}' 2>/dev/null || true
 }
 
+pod_terminated_reason() {
+  "$KUBECTL" -n "$NAMESPACE" get pod "$1" \
+    -o jsonpath='{.status.containerStatuses[0].state.terminated.reason}' 2>/dev/null || true
+}
+
 binding_remote_id_for_pod() {
   "$KUBECTL" -n "$NAMESPACE" get cloudpodbindings.cloud.aibrix.ai \
     -l "cloud.aibrix.ai/pod-name=${1}" \
@@ -291,7 +296,9 @@ wait_for_started_remote() {
   fail "timed out waiting for ${pod_name} to start with remoteID"
 }
 
-wait_for_succeeded() {
+# RunPod does not report exit codes, so a container that exits is reported as
+# Failed with reason RemoteExited. Any other failure reason fails the smoke.
+wait_for_remote_exit() {
   local pod_name="$1"
   local timeout="$2"
   local deadline=$((SECONDS + timeout))
@@ -299,23 +306,23 @@ wait_for_succeeded() {
 
   while (( SECONDS < deadline )); do
     phase="$(pod_phase "$pod_name")"
-    reason="$(pod_reason "$pod_name")"
+    reason="$(pod_terminated_reason "$pod_name")"
     log "pod=${pod_name} phase=${phase:-unknown} reason=${reason:-none}"
-    if [[ "$phase" == "Succeeded" ]]; then
+    if [[ "$phase" == "Failed" && "$reason" == "RemoteExited" ]]; then
       return 0
     fi
-    if [[ "$phase" == "Failed" ]]; then
+    if [[ "$phase" == "Failed" || "$phase" == "Succeeded" ]]; then
       "$KUBECTL" -n "$NAMESPACE" describe pod "$pod_name" >&2 || true
       "$KUBECTL" -n "$NAMESPACE" get cloudpodbindings.cloud.aibrix.ai \
         -l "cloud.aibrix.ai/pod-name=${pod_name}" -o yaml >&2 || true
-      fail "${pod_name} failed while waiting for completion"
+      fail "${pod_name} ended with phase=${phase} reason=${reason:-none}, want Failed/RemoteExited"
     fi
     sleep 5
   done
   "$KUBECTL" -n "$NAMESPACE" describe pod "$pod_name" >&2 || true
   "$KUBECTL" -n "$NAMESPACE" get cloudpodbindings.cloud.aibrix.ai \
     -l "cloud.aibrix.ai/pod-name=${pod_name}" -o yaml >&2 || true
-  fail "timed out waiting for ${pod_name} to Succeed"
+  fail "timed out waiting for ${pod_name} to exit"
 }
 
 wait_for_failed_class() {
@@ -374,8 +381,8 @@ run_success_smoke() {
   remote_id="$(wait_for_started_remote "$SUCCESS_POD" "$SUCCESS_TIMEOUT_SECONDS")"
   log "created RunPod pod remoteID=${remote_id}"
   if [[ "$WAIT_FOR_COMPLETION" == "1" ]]; then
-    log "waiting for RunPod completion; this requires provider status or runner callback support"
-    wait_for_succeeded "$SUCCESS_POD" "$COMPLETION_TIMEOUT_SECONDS"
+    log "waiting for the RunPod container to exit"
+    wait_for_remote_exit "$SUCCESS_POD" "$COMPLETION_TIMEOUT_SECONDS"
   fi
   delete_pod_and_verify_cleanup "$SUCCESS_POD" "$remote_id"
 }

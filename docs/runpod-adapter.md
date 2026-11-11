@@ -36,12 +36,22 @@ Official API references:
 
 ## Status Mapping
 
-| RunPod `desiredStatus` | `core.RemotePhase` |
-| --- | --- |
-| `RUNNING` | `RemoteRunning` |
-| `EXITED` | `RemoteSucceeded` |
-| `TERMINATED` | `RemoteDeleted` |
-| unknown / empty | `RemotePending` |
+| RunPod `desiredStatus` | `core.RemotePhase` | Pod result |
+| --- | --- | --- |
+| `RUNNING` | `RemoteRunning` | `Running` |
+| `EXITED` | `RemoteFailed` | `Failed`, reason `RemoteExited` |
+| `TERMINATED` | `RemoteDeleted` | `Succeeded`, reason `RemoteWorkloadDeleted` |
+| unknown / empty | `RemotePending` | `Pending` |
+
+RunPod does not report the container exit code. `EXITED` therefore cannot be
+told apart from a crash, an out-of-memory kill, or a reclaimed host, so it is
+reported as `Failed` with reason `RemoteExited` instead of `Succeeded`. A Job
+retries such a Pod according to its `backoffLimit`, including a run that
+actually exited with code 0. A Pod reaches `Succeeded` only through a runner
+callback that reports exit code 0, which RunPod Pods do not have yet.
+
+The exited RunPod Pod is not deleted automatically. It no longer bills GPU time,
+but it keeps its disk until the Kubernetes Pod is deleted.
 
 ## Delete Semantics
 
