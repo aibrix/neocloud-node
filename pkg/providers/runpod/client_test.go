@@ -200,6 +200,77 @@ func TestClientCreateRecoversDecodeFailureByExternalName(t *testing.T) {
 	}
 }
 
+func TestClientCreateMapsCommandAndArgs(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		command        []string
+		args           []string
+		wantEntrypoint []string
+		wantStartCmd   []string
+	}{
+		{name: "image defaults"},
+		{name: "args only", args: []string{"--port", "8000"}, wantStartCmd: []string{"--port", "8000"}},
+		{
+			name:           "command and args",
+			command:        []string{"python3", "-m", "server"},
+			args:           []string{"--port", "8000"},
+			wantEntrypoint: []string{"python3", "-m", "server"},
+			wantStartCmd:   []string{"--port", "8000"},
+		},
+		{
+			name:           "command only replaces the image CMD",
+			command:        []string{"sh", "-c", "echo ready; sleep 60"},
+			wantEntrypoint: []string{"sh"},
+			wantStartCmd:   []string{"-c", "echo ready; sleep 60"},
+		},
+		{name: "single-element command", command: []string{"/start.sh"}, wantEntrypoint: []string{"/start.sh"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var payload map[string]any
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					t.Errorf("decode request body: %v", err)
+				}
+				w.WriteHeader(http.StatusCreated)
+				_, _ = w.Write([]byte(`{"id":"runpod-1","desiredStatus":"RUNNING"}`))
+			}))
+			defer server.Close()
+
+			client := NewClient(Config{BaseURL: server.URL, APIKey: "test-token"})
+			if _, err := client.Create(context.Background(), "default/pod-1", core.WorkloadRequest{
+				Image:    "example.com/serve:latest",
+				Command:  tt.command,
+				Args:     tt.args,
+				GPUCount: 1,
+			}); err != nil {
+				t.Fatalf("Create returned error: %v", err)
+			}
+			assertOptionalStringSlice(t, payload, "dockerEntrypoint", tt.wantEntrypoint)
+			assertOptionalStringSlice(t, payload, "dockerStartCmd", tt.wantStartCmd)
+		})
+	}
+}
+
+// assertOptionalStringSlice expects the key to be absent when want is empty,
+// because RunPod rejects null.
+func assertOptionalStringSlice(t *testing.T, payload map[string]any, key string, want []string) {
+	t.Helper()
+
+	if len(want) == 0 {
+		if value, ok := payload[key]; ok {
+			t.Fatalf("%s = %#v, want field omitted", key, value)
+		}
+		return
+	}
+	assertPayloadStringSlice(t, payload, key, want)
+}
+
 func TestClientClassifiesProviderErrors(t *testing.T) {
 	t.Parallel()
 
@@ -216,6 +287,12 @@ func TestClientClassifiesProviderErrors(t *testing.T) {
 		{name: "not found", statusCode: http.StatusNotFound, body: `{"error":"not found"}`, wantClass: core.ErrorClassRemoteNotFound, wantIsNotFound: true},
 		{name: "rate limited", statusCode: http.StatusTooManyRequests, body: `{"error":"rate limited"}`, wantClass: core.ErrorClassRateLimited},
 		{name: "server error", statusCode: http.StatusBadGateway, body: `{"error":"upstream failed"}`, wantClass: core.ErrorClassTransient},
+		{
+			name:       "invalid request",
+			statusCode: http.StatusBadRequest,
+			body:       `[{"error":"does not meet the schema requirements","problems":["At /pods/properties/dockerStartCmd/type: got null, want array"]}]`,
+			wantClass:  core.ErrorClassUnsupportedSpec,
+		},
 	}
 
 	for _, tt := range tests {
