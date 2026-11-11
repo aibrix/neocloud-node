@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 )
 
@@ -979,4 +980,57 @@ func (p staticCreateCandidatePlanner) CreateCandidates(ctx context.Context, bind
 		return nil, p.err
 	}
 	return append([]CreateCandidate(nil), p.candidates...), nil
+}
+
+func TestLifecycleServiceKeepsPublishedEndpoints(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := NewMemoryBindingStore()
+	provider := NewFakeProvider("runpod")
+	service := NewLifecycleService(store, provider)
+
+	binding, err := service.EnsureCreated(ctx, Binding{
+		Namespace:   "default",
+		Name:        "serve",
+		WorkloadUID: "pod-endpoints",
+		Request: WorkloadRequest{
+			Image:    "example.com/serve:latest",
+			GPUCount: 1,
+			Provider: "runpod",
+		},
+	})
+	if err != nil {
+		t.Fatalf("EnsureCreated() error = %v", err)
+	}
+	if len(binding.Endpoints) != 0 {
+		t.Fatalf("endpoints after create = %#v, want none", binding.Endpoints)
+	}
+
+	published := []Endpoint{
+		{ContainerPort: 9090, Protocol: "TCP", Host: "203.0.113.10", Port: 40500},
+		{ContainerPort: 8000, Protocol: "TCP", Host: "203.0.113.10", Port: 40123},
+	}
+	if err := provider.SetEndpoints(binding.RemoteID, published); err != nil {
+		t.Fatalf("SetEndpoints() setup error = %v", err)
+	}
+	synced, err := service.SyncStatus(ctx, "default", "pod-endpoints")
+	if err != nil {
+		t.Fatalf("SyncStatus() error = %v", err)
+	}
+	want := []Endpoint{published[1], published[0]}
+	if !reflect.DeepEqual(synced.Endpoints, want) {
+		t.Fatalf("endpoints = %#v, want sorted %#v", synced.Endpoints, want)
+	}
+
+	if err := provider.SetEndpoints(binding.RemoteID, nil); err != nil {
+		t.Fatalf("SetEndpoints() setup error = %v", err)
+	}
+	synced, err = service.SyncStatus(ctx, "default", "pod-endpoints")
+	if err != nil {
+		t.Fatalf("SyncStatus() error = %v", err)
+	}
+	if !reflect.DeepEqual(synced.Endpoints, want) {
+		t.Fatalf("endpoints after empty observation = %#v, want kept %#v", synced.Endpoints, want)
+	}
 }

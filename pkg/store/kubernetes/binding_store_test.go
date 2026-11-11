@@ -3,6 +3,7 @@ package kubernetes
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -120,6 +121,9 @@ func TestUpdatePersistsRemoteStatus(t *testing.T) {
 			Message: "runpod had no capacity in US-TX-3",
 		},
 	}
+	binding.Endpoints = []core.Endpoint{
+		{ContainerPort: 8000, Protocol: "TCP", Host: "203.0.113.10", Port: 40123},
+	}
 	if err := store.Update(ctx, binding); err != nil {
 		t.Fatalf("Update() error = %v", err)
 	}
@@ -143,6 +147,9 @@ func TestUpdatePersistsRemoteStatus(t *testing.T) {
 	condition := core.FindCondition(got.Conditions, core.ConditionCapacity)
 	if condition == nil || condition.Status != core.ConditionTrue {
 		t.Fatalf("conditions = %#v, want capacity condition", got.Conditions)
+	}
+	if !reflect.DeepEqual(got.Endpoints, binding.Endpoints) {
+		t.Fatalf("endpoints = %#v, want %#v", got.Endpoints, binding.Endpoints)
 	}
 }
 

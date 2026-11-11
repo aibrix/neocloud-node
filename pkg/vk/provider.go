@@ -2,9 +2,11 @@ package vk
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"sort"
 	"sync"
 	"time"
@@ -17,6 +19,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	stats "k8s.io/kubelet/pkg/apis/stats/v1alpha1"
 
 	"github.com/aibrix/neocloud-node/pkg/core"
@@ -43,6 +47,8 @@ type Config struct {
 	LaunchGuard      *core.LaunchGuard
 	NodeName         string
 	EventRecorder    EventRecorder
+	// PodClient publishes remote endpoints as a Pod annotation. Optional.
+	PodClient corev1client.PodsGetter
 
 	StatusSyncContext  context.Context
 	StatusSyncInterval time.Duration
@@ -54,6 +60,7 @@ type Provider struct {
 	store       core.BindingStore
 	nodeName    string
 	recorder    EventRecorder
+	podClient   corev1client.PodsGetter
 
 	mu       sync.RWMutex
 	pods     map[string]*corev1.Pod
@@ -94,6 +101,7 @@ func NewProvider(config Config) (*Provider, error) {
 		store:       config.Store,
 		nodeName:    config.NodeName,
 		recorder:    config.EventRecorder,
+		podClient:   config.PodClient,
 		pods:        make(map[string]*corev1.Pod),
 	}
 	if config.StatusSyncInterval > 0 {
@@ -336,6 +344,7 @@ func (p *Provider) upsertPod(ctx context.Context, pod *corev1.Pod) error {
 	}
 
 	cached := podWithBindingStatus(pod, binding)
+	p.publishEndpoints(ctx, cached, binding)
 	p.mu.Lock()
 	p.pods[podKey(cached.Namespace, cached.Name)] = cached.DeepCopy()
 	p.mu.Unlock()
@@ -369,6 +378,7 @@ func (p *Provider) syncPodStatus(ctx context.Context, pod *corev1.Pod) (*corev1.
 	}
 
 	synced := podWithBindingStatus(pod, binding)
+	p.publishEndpoints(ctx, synced, binding)
 	p.mu.Lock()
 	key := podKey(synced.Namespace, synced.Name)
 	if current, ok := p.pods[key]; ok && current.UID == synced.UID {
@@ -376,10 +386,80 @@ func (p *Provider) syncPodStatus(ctx context.Context, pod *corev1.Pod) (*corev1.
 	}
 	p.mu.Unlock()
 
-	if pod.Status.Phase != synced.Status.Phase {
+	if podStatusChanged(pod.Status, synced.Status) {
 		p.notify(synced)
 	}
 	return synced, nil
+}
+
+// publishEndpoints writes the binding endpoints to the Pod annotation so that
+// callers can find remapped public ports without reading CloudPodBindings.
+// Failures are reported as events and retried on the next status sync.
+func (p *Provider) publishEndpoints(ctx context.Context, pod *corev1.Pod, binding core.Binding) {
+	if p.podClient == nil || pod == nil || len(binding.Endpoints) == 0 {
+		return
+	}
+	value, err := endpointsAnnotation(binding.Endpoints)
+	if err != nil || pod.Annotations[core.AnnotationEndpoints] == value {
+		return
+	}
+	patch, err := json.Marshal(map[string]interface{}{
+		"metadata": map[string]interface{}{
+			"annotations": map[string]string{core.AnnotationEndpoints: value},
+		},
+	})
+	if err != nil {
+		return
+	}
+	_, err = p.podClient.Pods(pod.Namespace).Patch(ctx, pod.Name, types.MergePatchType, patch, metav1.PatchOptions{})
+	if err != nil {
+		p.recordPodEvent(pod, corev1.EventTypeWarning, "EndpointPublishFailed", err.Error())
+		return
+	}
+	if pod.Annotations == nil {
+		pod.Annotations = map[string]string{}
+	}
+	pod.Annotations[core.AnnotationEndpoints] = value
+}
+
+type endpointAnnotation struct {
+	ContainerPort int    `json:"containerPort"`
+	Protocol      string `json:"protocol"`
+	Host          string `json:"host"`
+	Port          int    `json:"port"`
+}
+
+func endpointsAnnotation(endpoints []core.Endpoint) (string, error) {
+	values := make([]endpointAnnotation, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		values = append(values, endpointAnnotation{
+			ContainerPort: endpoint.ContainerPort,
+			Protocol:      endpoint.Protocol,
+			Host:          endpoint.Host,
+			Port:          endpoint.Port,
+		})
+	}
+	data, err := json.Marshal(values)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func podStatusChanged(before corev1.PodStatus, after corev1.PodStatus) bool {
+	if before.Phase != after.Phase || before.PodIP != after.PodIP {
+		return true
+	}
+	return podReady(before.Conditions) != podReady(after.Conditions)
+}
+
+func podReady(conditions []corev1.PodCondition) corev1.ConditionStatus {
+	for _, condition := range conditions {
+		if condition.Type == corev1.PodReady {
+			return condition.Status
+		}
+	}
+	return ""
 }
 
 func (p *Provider) notify(pod *corev1.Pod) {
@@ -411,7 +491,26 @@ func podWithBindingStatus(pod *corev1.Pod, binding core.Binding) *corev1.Pod {
 	out.Status.StartTime = startTime(out, now)
 	out.Status.Conditions = podConditions(phase, reason, message)
 	out.Status.ContainerStatuses = containerStatuses(out.Spec.Containers, phase, now, reason, message)
+	applyEndpointAddress(&out.Status, binding.Endpoints)
 	return out
+}
+
+// applyEndpointAddress reports the remote public IP as the Pod IP. The address
+// is set once and never changed, matching kubelet behavior. Published ports can
+// differ from container ports; see the cloud.aibrix.ai/endpoints annotation.
+func applyEndpointAddress(status *corev1.PodStatus, endpoints []core.Endpoint) {
+	if status == nil || status.PodIP != "" {
+		return
+	}
+	for _, endpoint := range endpoints {
+		ip := net.ParseIP(endpoint.Host)
+		if ip == nil {
+			continue
+		}
+		status.PodIP = ip.String()
+		status.PodIPs = []corev1.PodIP{{IP: status.PodIP}}
+		return
+	}
 }
 
 func podWithTerminalStatus(pod *corev1.Pod) *corev1.Pod {

@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"errors"
+	"sort"
 	"strconv"
 	"time"
 )
@@ -108,6 +109,7 @@ func (s *LifecycleService) EnsureCreated(ctx context.Context, desired Binding) (
 	recordCreateSuccess(&binding)
 	recordCandidateCost(&binding, candidate)
 	recordRemoteCost(&binding, remote)
+	recordRemoteEndpoints(&binding, remote)
 	if err := s.store.Update(ctx, binding); err != nil {
 		return Binding{}, err
 	}
@@ -190,6 +192,7 @@ func (s *LifecycleService) SyncStatus(ctx context.Context, namespace string, wor
 	binding.Phase = bindingPhaseFromRemote(remote.Phase)
 	recordRemoteFailure(&binding, remote)
 	recordRemoteCost(&binding, remote)
+	recordRemoteEndpoints(&binding, remote)
 	if err := s.store.Update(ctx, binding); err != nil {
 		return Binding{}, err
 	}
@@ -481,6 +484,23 @@ func recordRemoteCost(binding *Binding, remote RemoteResource) {
 		Source:     remote.CostSource,
 		ObservedAt: time.Now().UTC(),
 	}
+}
+
+// recordRemoteEndpoints keeps the last published endpoints. Providers often
+// report an address only after the workload starts, so an empty observation
+// does not clear endpoints that were already published.
+func recordRemoteEndpoints(binding *Binding, remote RemoteResource) {
+	if binding == nil || len(remote.Endpoints) == 0 {
+		return
+	}
+	endpoints := append([]Endpoint(nil), remote.Endpoints...)
+	sort.SliceStable(endpoints, func(i, j int) bool {
+		if endpoints[i].ContainerPort != endpoints[j].ContainerPort {
+			return endpoints[i].ContainerPort < endpoints[j].ContainerPort
+		}
+		return endpoints[i].Protocol < endpoints[j].Protocol
+	})
+	binding.Endpoints = endpoints
 }
 
 func recordCandidateCost(binding *Binding, candidate CreateCandidate) {

@@ -237,6 +237,7 @@ func statusFromBinding(binding core.Binding) map[string]interface{} {
 		"cost":        costToMap(binding.Cost),
 		"attempts":    attemptsToSlice(binding.Attempts),
 		"conditions":  conditionsToSlice(binding.Conditions),
+		"endpoints":   endpointsToSlice(binding.Endpoints),
 		"deleting":    binding.Deleting,
 		"lastError":   binding.LastError,
 	}
@@ -267,6 +268,7 @@ func bindingFromObject(object *unstructured.Unstructured) (core.Binding, error) 
 		Cost:        costFromMap(asMap(status["cost"])),
 		Attempts:    attemptsFromSlice(asSlice(status["attempts"])),
 		Conditions:  conditionsFromSlice(asSlice(status["conditions"])),
+		Endpoints:   endpointsFromSlice(asSlice(status["endpoints"])),
 		Deleting:    boolValue(status["deleting"]),
 		LastError:   stringValue(status["lastError"]),
 	}, nil
@@ -468,6 +470,39 @@ func conditionsFromSlice(values []interface{}) []core.BindingCondition {
 		})
 	}
 	return out
+}
+
+func endpointsToSlice(endpoints []core.Endpoint) []interface{} {
+	if len(endpoints) == 0 {
+		return nil
+	}
+	values := make([]interface{}, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		values = append(values, map[string]interface{}{
+			"containerPort": int64(endpoint.ContainerPort),
+			"protocol":      endpoint.Protocol,
+			"host":          endpoint.Host,
+			"port":          int64(endpoint.Port),
+		})
+	}
+	return values
+}
+
+func endpointsFromSlice(values []interface{}) []core.Endpoint {
+	if len(values) == 0 {
+		return nil
+	}
+	endpoints := make([]core.Endpoint, 0, len(values))
+	for _, value := range values {
+		item := asMap(value)
+		endpoints = append(endpoints, core.Endpoint{
+			ContainerPort: intValue(item["containerPort"]),
+			Protocol:      stringValue(item["protocol"]),
+			Host:          stringValue(item["host"]),
+			Port:          intValue(item["port"]),
+		})
+	}
+	return endpoints
 }
 
 func portsToSlice(ports []core.Port) []interface{} {

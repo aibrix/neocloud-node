@@ -278,6 +278,7 @@ func NewNode(ctx context.Context, options Options, kubeClient kubernetes.Interfa
 		NodeName:         options.NodeName,
 		EventRecorder: newEventRecorder(kubeClient,
 			"neocloud-node/"+options.Provider),
+		PodClient:          kubeClient.CoreV1(),
 		StatusSyncContext:  ctx,
 		StatusSyncInterval: options.StatusSyncInterval,
 	}

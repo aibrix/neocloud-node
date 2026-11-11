@@ -7,6 +7,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 
 	"github.com/aibrix/neocloud-node/pkg/core"
@@ -298,6 +299,56 @@ func TestClientGetMapsDesiredStatus(t *testing.T) {
 			}
 			if remote.HourlyCost != 0.69 || remote.CostSource != "runpod.adjustedCostPerHr" {
 				t.Fatalf("cost = %.2f/%q, want 0.69 adjusted source", remote.HourlyCost, remote.CostSource)
+			}
+		})
+	}
+}
+
+func TestClientGetMapsPublicEndpoints(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		body string
+		want []core.Endpoint
+	}{
+		{
+			name: "remapped ports",
+			body: `{"id":"runpod-1","desiredStatus":"RUNNING","publicIp":"203.0.113.10",` +
+				`"portMappings":{"8000":40123,"22":40001,"9090/tcp":40500}}`,
+			want: []core.Endpoint{
+				{ContainerPort: 22, Protocol: "TCP", Host: "203.0.113.10", Port: 40001},
+				{ContainerPort: 8000, Protocol: "TCP", Host: "203.0.113.10", Port: 40123},
+				{ContainerPort: 9090, Protocol: "TCP", Host: "203.0.113.10", Port: 40500},
+			},
+		},
+		{
+			name: "address not assigned yet",
+			body: `{"id":"runpod-1","desiredStatus":"RUNNING","publicIp":"","portMappings":null}`,
+		},
+		{
+			name: "invalid mappings ignored",
+			body: `{"id":"runpod-1","desiredStatus":"RUNNING","publicIp":"203.0.113.10",` +
+				`"portMappings":{"http":40123,"8000":0}}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer server.Close()
+
+			client := NewClient(Config{BaseURL: server.URL, APIKey: "test-token"})
+			remote, err := client.Get(context.Background(), "runpod-1")
+			if err != nil {
+				t.Fatalf("Get returned error: %v", err)
+			}
+			if !reflect.DeepEqual(remote.Endpoints, tt.want) {
+				t.Fatalf("endpoints = %#v, want %#v", remote.Endpoints, tt.want)
 			}
 		})
 	}

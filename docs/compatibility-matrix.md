@@ -25,7 +25,7 @@ Unsupported fields must fail with a stable `UnsupportedSpecError` code and field
 | `spec.containers[0].command` | `WorkloadRequest.Command` | Preserved as-is. |
 | `spec.containers[0].args` | `WorkloadRequest.Args` | Preserved as-is. |
 | `spec.containers[0].env` | `WorkloadRequest.Env` | Phase 1 supports literal key/value env only in core. |
-| `spec.containers[0].ports` | `WorkloadRequest.Ports` | Port metadata is preserved; provider-specific exposure is later. |
+| `spec.containers[0].ports` | `WorkloadRequest.Ports` | Published by the provider. See [Remote endpoints](#remote-endpoints). |
 | `spec.containers[0].resources.requests/limits[nvidia.com/gpu]` | `WorkloadRequest.GPUCount` | Must be greater than zero. |
 
 ## Rejected In Phase 1
@@ -62,6 +62,32 @@ Pod is deleted only together with the Pod. An exited RunPod Pod no longer bills
 GPU time but keeps its disk. Delete `Failed` Pods to release that storage until
 terminal cleanup is implemented
 ([#52](https://github.com/aibrix/neocloud-node/issues/52)).
+
+## Remote Endpoints
+
+When the provider assigns a public address, the controller records every
+published container port in `CloudPodBinding.status.endpoints` and in the Pod
+annotation `cloud.aibrix.ai/endpoints`, for example:
+
+```json
+[{"containerPort":8000,"protocol":"TCP","host":"203.0.113.10","port":40123}]
+```
+
+The first endpoint with an IP address becomes `status.podIP`. It is set once
+and not changed afterwards. Providers usually publish a container port on a
+different public port, so `podIP:containerPort` is reachable only when the
+published port equals the container port. Callers that need the remapped port
+read the annotation. Selector-based Services and kube-proxy forward to
+`podIP:targetPort` and therefore do not work with remapped ports.
+
+Published ports are reachable from the internet. Protect them in the workload,
+for example with an API key, or with provider firewalls where they exist.
+
+| Provider | Endpoints |
+| --- | --- |
+| RunPod | `publicIp` and `portMappings` of TCP ports. |
+| Vast.ai | Not reported yet. |
+| Lambda Cloud | Not reported. The VM runner does not publish container ports yet. |
 
 ## Non-Goals For Phase 1
 

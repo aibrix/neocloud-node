@@ -104,6 +104,20 @@ spec:
                 type: object
               deleting:
                 type: boolean
+              endpoints:
+                description: Public addresses of published container ports.
+                items:
+                  properties:
+                    containerPort:
+                      type: integer
+                    host:
+                      type: string
+                    port:
+                      type: integer
+                    protocol:
+                      type: string
+                  type: object
+                type: array
               lastError:
                 type: string
               phase:

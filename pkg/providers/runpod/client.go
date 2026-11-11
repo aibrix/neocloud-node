@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -341,6 +342,7 @@ func remoteFromPod(pod podResponse, idempotencyKey string, request core.Workload
 		Provider:       providerName,
 		Phase:          phaseFromDesiredStatus(pod.DesiredStatus),
 		Request:        request,
+		Endpoints:      endpointsFromPod(pod),
 		HourlyCost:     hourlyCost(pod),
 		CostSource:     costSource(pod),
 		StatusReason:   reason,
@@ -588,4 +590,34 @@ func cloneStringMap(in map[string]string) map[string]string {
 		out[key] = value
 	}
 	return out
+}
+
+// endpointsFromPod maps RunPod's public TCP port mappings. RunPod usually
+// publishes a container port on a different public port, for example
+// {"8000": 40123}, so callers must not assume the container port.
+func endpointsFromPod(pod podResponse) []core.Endpoint {
+	host := strings.TrimSpace(pod.PublicIP)
+	if host == "" || len(pod.PortMappings) == 0 {
+		return nil
+	}
+	endpoints := make([]core.Endpoint, 0, len(pod.PortMappings))
+	for key, publicPort := range pod.PortMappings {
+		containerPort, err := strconv.Atoi(strings.TrimSpace(strings.SplitN(key, "/", 2)[0]))
+		if err != nil || containerPort <= 0 || publicPort <= 0 {
+			continue
+		}
+		endpoints = append(endpoints, core.Endpoint{
+			ContainerPort: containerPort,
+			Protocol:      "TCP",
+			Host:          host,
+			Port:          publicPort,
+		})
+	}
+	sort.Slice(endpoints, func(i, j int) bool {
+		return endpoints[i].ContainerPort < endpoints[j].ContainerPort
+	})
+	if len(endpoints) == 0 {
+		return nil
+	}
+	return endpoints
 }
