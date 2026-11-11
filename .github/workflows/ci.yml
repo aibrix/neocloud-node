@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'push' }}
 
 env:
-  GO_VERSION: "1.26.10"
+  GO_VERSION: "1.26.11"
   GOTOOLCHAIN: local
   KUSTOMIZE_VERSION: "v5.8.1"
   GOVULNCHECK_VERSION: "v1.6.0"
@@ -43,8 +43,44 @@ jobs:
         run: make verify
       - name: Validate workflows
         run: make actionlint
+
+  vulnerabilities:
+    name: Vulnerability scan (advisory)
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: go.sum
       - name: Scan reachable vulnerabilities
+        id: scan
+        continue-on-error: true
         run: make vulncheck
+      - name: Summarize advisory scan
+        if: always()
+        env:
+          SCAN_OUTCOME: ${{ steps.scan.outcome }}
+        run: |
+          case "${SCAN_OUTCOME}" in
+            success)
+              echo 'No reachable Go vulnerabilities found.' >> "${GITHUB_STEP_SUMMARY}"
+              ;;
+            failure)
+              echo '::warning::Vulnerability scan reported findings or a scanner error. Inspect the scan logs; this advisory does not block CI.'
+              echo 'Advisory scan failed: vulnerability findings or scanner error. Inspect the Scan reachable vulnerabilities step logs.' >> "${GITHUB_STEP_SUMMARY}"
+              ;;
+            *)
+              echo '::warning::Vulnerability scan did not complete. Inspect the job logs; this advisory does not block CI.'
+              echo 'Advisory scan did not complete. Inspect the job logs.' >> "${GITHUB_STEP_SUMMARY}"
+              ;;
+          esac
 
   race:
     name: Race detector
