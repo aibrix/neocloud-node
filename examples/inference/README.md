@@ -48,9 +48,15 @@ kubectl apply -f "$SAMPLE"
 kubectl -n aibrix-system get pod "$POD" -w
 ```
 
-Stop the watch with Ctrl-C. `Running` / `Ready` currently reflects provider
-status, not model readiness. Image pull and model initialization may take several
-minutes. Check the HTTP API below before sending inference requests.
+Stop the watch with Ctrl-C. `Running` means RunPod started the instance. Image
+pull and model initialization take several minutes after that. Both samples
+declare a `/health` readiness probe, which the controller runs against the
+published port, so the Pod becomes `Ready` (`1/1`) only when the model server
+answers.
+
+```bash
+kubectl -n aibrix-system wait --for=condition=Ready "pod/$POD" --timeout=15m
+```
 
 Once RunPod assigns a public address, the controller sets the Pod IP and
 writes every published port to the `cloud.aibrix.ai/endpoints` annotation.
@@ -73,8 +79,7 @@ kubectl -n aibrix-system get cloudpodbindings \
   -l "cloud.aibrix.ai/pod-name=$POD" -o jsonpath='{.items[0].status.endpoints}'
 ```
 
-A successful response listing `Qwen/Qwen2.5-1.5B-Instruct` indicates that the API
-is ready. Retry after a short delay if the connection is not ready yet.
+A successful response lists `Qwen/Qwen2.5-1.5B-Instruct`.
 
 ## Send a request
 
@@ -97,9 +102,8 @@ Check that the response contains `choices[0].message.content` with the answer
 This path uses the provider's public TCP endpoint. The current adapter does not
 support `kubectl logs`, `exec`, or `port-forward`. A Kubernetes Service does
 not work for these Pods: it would send traffic to the Pod IP on port 8000, but
-RunPod publishes 8000 on another port. These samples also do not claim
-probe-based readiness. Inspect startup logs
-in RunPod if `/v1/models` never becomes reachable.
+RunPod publishes 8000 on another port. Inspect startup logs in RunPod if the
+Pod never becomes `Ready`.
 
 ## Clean up before trying the other engine
 

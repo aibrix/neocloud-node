@@ -68,6 +68,22 @@ type ContainerSpec struct {
 	Ports               []PortSpec
 	Resources           ResourceSpec
 	SecurityContext     SecurityContext
+	ReadinessProbe      *ProbeSpec
+}
+
+// Probe handlers that the controller can run against a published port.
+const (
+	ProbeHandlerHTTPGet   = "httpGet"
+	ProbeHandlerTCPSocket = "tcpSocket"
+	ProbeHandlerExec      = "exec"
+	ProbeHandlerGRPC      = "grpc"
+)
+
+// ProbeSpec is the part of a probe needed to validate it. Port is the resolved
+// container port, or 0 when a named port does not match a container port.
+type ProbeSpec struct {
+	Handler string
+	Port    int
 }
 
 type RestartPolicy string
@@ -164,6 +180,9 @@ func (DefaultTransformer) Transform(pod PodSpec) (WorkloadRequest, error) {
 			Message: "environment envFrom sources are not supported in Phase 1; use literal values",
 		}
 	}
+	if err := validateReadinessProbe(container); err != nil {
+		return WorkloadRequest{}, err
+	}
 	if strings.TrimSpace(container.Image) == "" {
 		return WorkloadRequest{}, &UnsupportedSpecError{
 			Code:    "MissingImage",
@@ -196,6 +215,39 @@ func (DefaultTransformer) Transform(pod PodSpec) (WorkloadRequest, error) {
 		Ports:            portsFromSpecs(container.Ports),
 		ProviderHints:    providerHints(pod.Annotations),
 	}, nil
+}
+
+// validateReadinessProbe accepts probes that the controller can run from
+// outside the remote host: httpGet and tcpSocket against a declared container
+// port, which the provider publishes.
+func validateReadinessProbe(container ContainerSpec) error {
+	probe := container.ReadinessProbe
+	if probe == nil {
+		return nil
+	}
+	switch probe.Handler {
+	case ProbeHandlerHTTPGet, ProbeHandlerTCPSocket:
+	default:
+		handler := probe.Handler
+		if handler == "" {
+			handler = "unknown"
+		}
+		return &UnsupportedSpecError{
+			Code:    "UnsupportedReadinessProbe",
+			Field:   "spec.containers[0].readinessProbe",
+			Message: fmt.Sprintf("%s readiness probes are not supported; use httpGet or tcpSocket", handler),
+		}
+	}
+	for _, port := range container.Ports {
+		if probe.Port > 0 && port.ContainerPort == probe.Port {
+			return nil
+		}
+	}
+	return &UnsupportedSpecError{
+		Code:    "UnsupportedReadinessProbe",
+		Field:   fmt.Sprintf("spec.containers[0].readinessProbe.%s.port", probe.Handler),
+		Message: "readiness probe port must be a declared container port so that the provider publishes it",
+	}
 }
 
 func cloneStringMap(in map[string]string) map[string]string {

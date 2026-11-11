@@ -358,3 +358,72 @@ func TestTransformerRejectsEnvironmentSources(t *testing.T) {
 		})
 	}
 }
+
+func TestTransformerValidatesReadinessProbe(t *testing.T) {
+	t.Parallel()
+
+	httpPort := []PortSpec{{Name: "http", ContainerPort: 8000, Protocol: "TCP"}}
+	tests := []struct {
+		name      string
+		ports     []PortSpec
+		probe     *ProbeSpec
+		wantField string
+	}{
+		{name: "no probe"},
+		{name: "http probe on declared port", ports: httpPort, probe: &ProbeSpec{Handler: ProbeHandlerHTTPGet, Port: 8000}},
+		{name: "tcp probe on declared port", ports: httpPort, probe: &ProbeSpec{Handler: ProbeHandlerTCPSocket, Port: 8000}},
+		{
+			name:      "exec probe",
+			ports:     httpPort,
+			probe:     &ProbeSpec{Handler: ProbeHandlerExec},
+			wantField: "spec.containers[0].readinessProbe",
+		},
+		{
+			name:      "grpc probe",
+			ports:     httpPort,
+			probe:     &ProbeSpec{Handler: ProbeHandlerGRPC, Port: 8000},
+			wantField: "spec.containers[0].readinessProbe",
+		},
+		{
+			name:      "port not declared",
+			ports:     httpPort,
+			probe:     &ProbeSpec{Handler: ProbeHandlerHTTPGet, Port: 9000},
+			wantField: "spec.containers[0].readinessProbe.httpGet.port",
+		},
+		{
+			name:      "unresolved named port",
+			ports:     httpPort,
+			probe:     &ProbeSpec{Handler: ProbeHandlerTCPSocket},
+			wantField: "spec.containers[0].readinessProbe.tcpSocket.port",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := (DefaultTransformer{}).Transform(PodSpec{
+				Containers: []ContainerSpec{{
+					Name:           "main",
+					Image:          "example.com/serve:latest",
+					Ports:          tt.ports,
+					Resources:      ResourceSpec{GPUCount: 1},
+					ReadinessProbe: tt.probe,
+				}},
+			})
+			if tt.wantField == "" {
+				if err != nil {
+					t.Fatalf("Transform() error = %v, want nil", err)
+				}
+				return
+			}
+			var unsupported *UnsupportedSpecError
+			if !errors.As(err, &unsupported) {
+				t.Fatalf("Transform() error = %v, want UnsupportedSpecError", err)
+			}
+			if unsupported.Code != "UnsupportedReadinessProbe" || unsupported.Field != tt.wantField {
+				t.Fatalf("error = %s/%s, want UnsupportedReadinessProbe/%s", unsupported.Code, unsupported.Field, tt.wantField)
+			}
+		})
+	}
+}

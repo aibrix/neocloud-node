@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"github.com/aibrix/neocloud-node/pkg/core"
 )
@@ -89,6 +90,7 @@ func containersFromCoreV1(containers []corev1.Container) []core.ContainerSpec {
 			Ports:               portsFromCoreV1(container.Ports),
 			Resources:           resourcesFromCoreV1(container.Resources),
 			SecurityContext:     securityContextFromCoreV1(container.SecurityContext),
+			ReadinessProbe:      probeFromCoreV1(container, container.ReadinessProbe),
 		})
 	}
 	return out
@@ -123,6 +125,45 @@ func portsFromCoreV1(ports []corev1.ContainerPort) []core.PortSpec {
 		})
 	}
 	return out
+}
+
+func probeFromCoreV1(container corev1.Container, probe *corev1.Probe) *core.ProbeSpec {
+	if probe == nil {
+		return nil
+	}
+	switch {
+	case probe.HTTPGet != nil:
+		return &core.ProbeSpec{
+			Handler: core.ProbeHandlerHTTPGet,
+			Port:    ResolveContainerPort(container, probe.HTTPGet.Port),
+		}
+	case probe.TCPSocket != nil:
+		return &core.ProbeSpec{
+			Handler: core.ProbeHandlerTCPSocket,
+			Port:    ResolveContainerPort(container, probe.TCPSocket.Port),
+		}
+	case probe.Exec != nil:
+		return &core.ProbeSpec{Handler: core.ProbeHandlerExec}
+	case probe.GRPC != nil:
+		return &core.ProbeSpec{Handler: core.ProbeHandlerGRPC, Port: int(probe.GRPC.Port)}
+	default:
+		return &core.ProbeSpec{}
+	}
+}
+
+// ResolveContainerPort returns the numeric container port for a probe port,
+// resolving a named port against the container's ports. It returns 0 when a
+// named port does not exist.
+func ResolveContainerPort(container corev1.Container, port intstr.IntOrString) int {
+	if port.Type == intstr.Int {
+		return port.IntValue()
+	}
+	for _, containerPort := range container.Ports {
+		if containerPort.Name != "" && containerPort.Name == port.StrVal {
+			return int(containerPort.ContainerPort)
+		}
+	}
+	return 0
 }
 
 func resourcesFromCoreV1(resources corev1.ResourceRequirements) core.ResourceSpec {
