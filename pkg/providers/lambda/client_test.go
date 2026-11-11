@@ -7,6 +7,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/aibrix/neocloud-node/pkg/core"
@@ -87,6 +88,60 @@ func TestClientCreateLaunchesLambdaInstance(t *testing.T) {
 	}
 	if len(gotPayload["firewall_rulesets"].([]any)) != 2 {
 		t.Fatalf("firewall_rulesets = %#v, want two rulesets", gotPayload["firewall_rulesets"])
+	}
+}
+
+func TestClientCreateRespectsHostnameLimit(t *testing.T) {
+	t.Parallel()
+
+	const workloadID = "aibrix-system/ef07c572-965c-4a3b-86cf-7e5a9939415d"
+	var gotPayload struct {
+		Name     string `json:"name"`
+		Hostname string `json:"hostname"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotPayload); err != nil {
+			t.Errorf("decode launch request: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if len(gotPayload.Hostname) > 63 {
+			http.Error(w, "hostname must have at most 63 characters", http.StatusBadRequest)
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":{"instance_ids":["lambda-1"]}}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{
+		BaseURL:             server.URL,
+		DefaultRegion:       "us-west-1",
+		DefaultInstanceType: "gpu_1x_a10",
+		DefaultSSHKeyNames:  []string{"test-key"},
+	})
+	_, err := client.Create(context.Background(), workloadID, core.WorkloadRequest{
+		Image:    "ubuntu:22.04",
+		GPUCount: 1,
+	})
+	if err != nil {
+		t.Fatalf("Create() = %v, want a valid Lambda launch request", err)
+	}
+	if gotPayload.Name != gotPayload.Hostname {
+		t.Fatalf("name = %q, hostname = %q, want the same idempotent name", gotPayload.Name, gotPayload.Hostname)
+	}
+}
+
+func TestExternalNameKeepsLongNamespaceWorkloadsDistinct(t *testing.T) {
+	t.Parallel()
+
+	namespace := strings.Repeat("a", 55)
+	first := externalName(namespace + "/11111111-1111-1111-1111-111111111111")
+	second := externalName(namespace + "/22222222-2222-2222-2222-222222222222")
+	if len(first) > 63 || len(second) > 63 {
+		t.Fatalf("external names exceed Lambda hostname limit: %q and %q", first, second)
+	}
+	if first == second {
+		t.Fatalf("different Pod UIDs produced the same Lambda name %q", first)
 	}
 }
 
