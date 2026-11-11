@@ -59,6 +59,7 @@ spec:
                 secretKeyRef:
                   name: {{ $secret.secretName | quote }}
                   key: {{ $secret.key | quote }}
+                  optional: true
             {{- end }}
             {{- end }}
           resources:

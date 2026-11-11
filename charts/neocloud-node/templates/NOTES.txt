@@ -7,3 +7,7 @@ kubectl get node {{ .Values.nodeName }}
 Helm readiness confirms the controller Pod, not remote GPU availability.
 Delete remote workloads and confirm provider cleanup before uninstalling.
 CRDs and virtual Nodes are not automatically removed by Helm.
+
+Provider Secrets are user-managed and optional. Missing credentials disable GPU
+capacity without stopping the controller. After creating or rotating a Secret:
+kubectl -n {{ .Release.Namespace }} rollout restart deployment/{{ include "neocloud.name" . }}
