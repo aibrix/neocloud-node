@@ -22,7 +22,7 @@ func (Transformer) TransformPod(pod *corev1.Pod) (core.Binding, error)
 | `metadata.name` | `Binding.Name` |
 | `metadata.uid` | `Binding.WorkloadUID` |
 | `metadata.annotations` | provider hints |
-| `spec.restartPolicy` | `WorkloadRequest.RestartPolicy` |
+| `spec.restartPolicy` (`Never`, `OnFailure`, `Always`) | `WorkloadRequest.RestartPolicy` |
 | `spec.imagePullSecrets[*].name` | `WorkloadRequest.ImagePullSecrets` |
 | `spec.containers[0].image` | `WorkloadRequest.Image` |
 | `spec.containers[0].command` | `WorkloadRequest.Command` |

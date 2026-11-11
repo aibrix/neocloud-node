@@ -109,13 +109,6 @@ func (e *UnsupportedSpecError) Error() string {
 type DefaultTransformer struct{}
 
 func (DefaultTransformer) Transform(pod PodSpec) (WorkloadRequest, error) {
-	if pod.RestartPolicy == RestartPolicyAlways {
-		return WorkloadRequest{}, &UnsupportedSpecError{
-			Code:    "UnsupportedRestartPolicy",
-			Field:   "spec.restartPolicy",
-			Message: "restartPolicy Always is not supported for remote GPU workloads",
-		}
-	}
 	if len(pod.InitContainers) > 0 {
 		return WorkloadRequest{}, &UnsupportedSpecError{
 			Code:    "UnsupportedInitContainers",
