@@ -3,6 +3,7 @@ package lambda
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -522,9 +523,13 @@ func classifyHTTPStatus(statusCode int, body string) core.ErrorClass {
 }
 
 func externalName(idempotencyKey string) string {
+	const maxHostnameLength = 63
 	name := core.ManagedExternalName(idempotencyKey)
-	if len(name) > 64 {
-		return name[:64]
+	if len(name) > maxHostnameLength {
+		// Preserve identity when a long namespace would otherwise truncate the Pod UID.
+		digest := sha256.Sum256([]byte(idempotencyKey))
+		suffix := fmt.Sprintf("-%x", digest[:12])
+		return strings.TrimRight(name[:maxHostnameLength-len(suffix)], "-") + suffix
 	}
 	return name
 }
