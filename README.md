@@ -105,6 +105,12 @@ Pods can narrow placement with `cloud.aibrix.ai/vast-verified`,
 `cloud.aibrix.ai/vast-offer-id`. The generic `cloud.aibrix.ai/max-price`
 annotation is enforced during offer search and again before rental.
 
+## Inference Examples
+
+Use the [vLLM and SGLang examples](examples/inference/README.md) to run a small
+Qwen model on one RunPod A40 through an existing Helm installation. The guide
+includes version-pinned Pod YAML, HTTP requests, and remote-resource cleanup.
+
 ## RunPod E2E Smoke Test
 
 The real RunPod smoke test is gated so it never creates cloud resources by
