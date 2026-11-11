@@ -27,6 +27,7 @@ Unsupported fields must fail with a stable `UnsupportedSpecError` code and field
 | `spec.containers[0].env` | `WorkloadRequest.Env` | Phase 1 supports literal key/value env only in core. |
 | `spec.containers[0].ports` | `WorkloadRequest.Ports` | Published by the provider. See [Remote endpoints](#remote-endpoints). |
 | `spec.containers[0].resources.requests/limits[nvidia.com/gpu]` | `WorkloadRequest.GPUCount` | Must be greater than zero. |
+| `spec.containers[0].readinessProbe` (`httpGet`, `tcpSocket`) | Pod `Ready` condition | See [Readiness](#readiness). |
 
 ## Rejected In Phase 1
 
@@ -40,6 +41,8 @@ Unsupported fields must fail with a stable `UnsupportedSpecError` code and field
 | `spec.initContainers` | `UnsupportedInitContainers` | `spec.initContainers` |
 | `spec.volumes` | `UnsupportedVolumes` | `spec.volumes` |
 | `spec.hostNetwork: true` | `UnsupportedHostNetwork` | `spec.hostNetwork` |
+| `exec` or `grpc` readiness probe | `UnsupportedReadinessProbe` | `spec.containers[0].readinessProbe` |
+| readiness probe port that is not a declared container port | `UnsupportedReadinessProbe` | `spec.containers[0].readinessProbe.<handler>.port` |
 | `spec.containers[0].securityContext.privileged: true` | `UnsupportedPrivilegedContainer` | `spec.containers[0].securityContext.privileged` |
 
 ## Restart Semantics
@@ -88,6 +91,25 @@ for example with an API key, or with provider firewalls where they exist.
 | RunPod | `publicIp` and `portMappings` of TCP ports. |
 | Vast.ai | Not reported yet. |
 | Lambda Cloud | Not reported. The VM runner does not publish container ports yet. |
+
+## Readiness
+
+Without a readiness probe, a Pod is `Ready` as soon as the provider reports the
+remote workload as running. For serving Pods that is too early: the image is
+still being pulled and the model is still loading.
+
+With an `httpGet` or `tcpSocket` readiness probe, the controller runs the probe
+itself against the published endpoint of the probe port (see
+[Remote endpoints](#remote-endpoints)). The Pod stays `Running` but not `Ready`
+until the provider publishes that port and the probe passes. The controller
+honors `initialDelaySeconds`, `periodSeconds`, `timeoutSeconds`,
+`successThreshold` and `failureThreshold`, like kubelet. The probe travels from
+the controller to the provider's public address, so allow for that latency in
+`timeoutSeconds`. HTTPS probes do not verify the certificate, as in kubelet.
+
+`exec` and `grpc` readiness probes cannot run from outside the remote host and
+are rejected. The probe port must be declared in `ports`, otherwise the provider
+does not publish it. Liveness and startup probes are not run.
 
 ## Non-Goals For Phase 1
 

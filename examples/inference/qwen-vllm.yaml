@@ -47,6 +47,16 @@ spec:
         - name: http
           containerPort: 8000
           protocol: TCP
+      # The controller runs this probe against the RunPod public endpoint for
+      # port 8000. The Pod becomes Ready only after the model server answers.
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: http
+        initialDelaySeconds: 30
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 3
       resources:
         limits:
           nvidia.com/gpu: '1'

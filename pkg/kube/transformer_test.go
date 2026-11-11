@@ -8,6 +8,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"github.com/aibrix/neocloud-node/pkg/core"
 )
@@ -159,6 +160,78 @@ func TestTransformerAcceptsDeploymentManagedPod(t *testing.T) {
 	}
 	if binding.Request.RestartPolicy != string(core.RestartPolicyAlways) {
 		t.Fatalf("restart policy = %q, want Always", binding.Request.RestartPolicy)
+	}
+}
+
+func TestTransformerResolvesReadinessProbePort(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		probe    *corev1.Probe
+		wantCode string
+	}{
+		{
+			name: "named http port",
+			probe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
+				HTTPGet: &corev1.HTTPGetAction{Path: "/health", Port: intstr.FromString("http")},
+			}},
+		},
+		{
+			name: "numeric tcp port",
+			probe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
+				TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(8000)},
+			}},
+		},
+		{
+			name: "unknown named port",
+			probe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
+				HTTPGet: &corev1.HTTPGetAction{Path: "/health", Port: intstr.FromString("metrics")},
+			}},
+			wantCode: "UnsupportedReadinessProbe",
+		},
+		{
+			name: "exec",
+			probe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
+				Exec: &corev1.ExecAction{Command: []string{"true"}},
+			}},
+			wantCode: "UnsupportedReadinessProbe",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "serve", UID: types.UID("pod-serve")},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:           "vllm",
+						Image:          "vllm/vllm-openai:v0.32.0",
+						Ports:          []corev1.ContainerPort{{Name: "http", ContainerPort: 8000}},
+						ReadinessProbe: tt.probe,
+						Resources: corev1.ResourceRequirements{
+							Limits: corev1.ResourceList{
+								corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("1"),
+							},
+						},
+					}},
+				},
+			}
+
+			_, err := (Transformer{}).TransformPod(pod)
+			if tt.wantCode == "" {
+				if err != nil {
+					t.Fatalf("TransformPod() error = %v", err)
+				}
+				return
+			}
+			var unsupported *core.UnsupportedSpecError
+			if !errors.As(err, &unsupported) || unsupported.Code != tt.wantCode {
+				t.Fatalf("TransformPod() error = %v, want %s", err, tt.wantCode)
+			}
+		})
 	}
 }
 

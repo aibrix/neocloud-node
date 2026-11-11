@@ -61,6 +61,7 @@ type Provider struct {
 	nodeName    string
 	recorder    EventRecorder
 	podClient   corev1client.PodsGetter
+	readiness   *readinessManager
 
 	mu       sync.RWMutex
 	pods     map[string]*corev1.Pod
@@ -104,6 +105,7 @@ func NewProvider(config Config) (*Provider, error) {
 		podClient:   config.PodClient,
 		pods:        make(map[string]*corev1.Pod),
 	}
+	provider.readiness = newReadinessManager(config.StatusSyncContext, provider.onReadinessChange)
 	if config.StatusSyncInterval > 0 {
 		syncContext := config.StatusSyncContext
 		if syncContext == nil {
@@ -159,6 +161,7 @@ func (p *Provider) DeletePod(ctx context.Context, pod *corev1.Pod) error {
 	p.mu.Lock()
 	delete(p.pods, key)
 	p.mu.Unlock()
+	p.readiness.stop(key)
 
 	if cached != nil {
 		terminal := podWithTerminalStatus(cached)
@@ -343,7 +346,7 @@ func (p *Provider) upsertPod(ctx context.Context, pod *corev1.Pod) error {
 		return normalizeProviderError(err)
 	}
 
-	cached := podWithBindingStatus(pod, binding)
+	cached := p.podWithStatus(pod, binding)
 	p.publishEndpoints(ctx, cached, binding)
 	p.mu.Lock()
 	p.pods[podKey(cached.Namespace, cached.Name)] = cached.DeepCopy()
@@ -377,7 +380,7 @@ func (p *Provider) syncPodStatus(ctx context.Context, pod *corev1.Pod) (*corev1.
 		return nil, normalizeProviderError(err)
 	}
 
-	synced := podWithBindingStatus(pod, binding)
+	synced := p.podWithStatus(pod, binding)
 	p.publishEndpoints(ctx, synced, binding)
 	p.mu.Lock()
 	key := podKey(synced.Namespace, synced.Name)
@@ -390,6 +393,48 @@ func (p *Provider) syncPodStatus(ctx context.Context, pod *corev1.Pod) (*corev1.
 		p.notify(synced)
 	}
 	return synced, nil
+}
+
+// podWithStatus builds the Pod status from the binding. For a running Pod with
+// a readiness probe, Ready follows the probe instead of the remote phase.
+func (p *Provider) podWithStatus(pod *corev1.Pod, binding core.Binding) *corev1.Pod {
+	out := podWithBindingStatus(pod, binding)
+	seedReady := podReady(pod.Status.Conditions) == corev1.ConditionTrue
+	key := podKey(out.Namespace, out.Name)
+	if applies, ready, message := p.readiness.observe(key, out, binding.Endpoints, seedReady); applies {
+		setPodReadiness(out, ready, message)
+	}
+	return out
+}
+
+// onReadinessChange publishes a readiness probe transition without waiting
+// for the next remote status sync.
+func (p *Provider) onReadinessChange(key string) {
+	p.mu.RLock()
+	cached, ok := p.pods[key]
+	if ok {
+		cached = cached.DeepCopy()
+	}
+	p.mu.RUnlock()
+	if !ok || cached.Status.Phase != corev1.PodRunning {
+		return
+	}
+	ready, message, found := p.readiness.result(key, cached.UID)
+	if !found {
+		return
+	}
+	before := podReady(cached.Status.Conditions)
+	setPodReadiness(cached, ready, message)
+	if before == podReady(cached.Status.Conditions) {
+		return
+	}
+
+	p.mu.Lock()
+	if current, ok := p.pods[key]; ok && current.UID == cached.UID {
+		p.pods[key] = cached.DeepCopy()
+	}
+	p.mu.Unlock()
+	p.notify(cached)
 }
 
 // publishEndpoints writes the binding endpoints to the Pod annotation so that
