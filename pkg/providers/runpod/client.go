@@ -50,13 +50,14 @@ func NewClient(config Config) *Client {
 
 func (c *Client) Create(ctx context.Context, idempotencyKey string, request core.WorkloadRequest) (core.RemoteResource, error) {
 	name := externalName(idempotencyKey)
+	entrypoint, startCmd := startCommand(request.Command, request.Args)
 	payload := createPodRequest{
 		Name:             name,
 		CloudType:        providerHint(request, core.AnnotationRunPodCloudType),
 		ComputeType:      "GPU",
 		ImageName:        request.Image,
-		DockerEntrypoint: append([]string(nil), request.Command...),
-		DockerStartCmd:   append([]string(nil), request.Args...),
+		DockerEntrypoint: entrypoint,
+		DockerStartCmd:   startCmd,
 		Env:              cloneStringMap(request.Env),
 		GPUCount:         request.GPUCount,
 		GPUTypeIDs:       gpuTypeIDs(request.GPUType),
@@ -246,8 +247,8 @@ type createPodRequest struct {
 	CloudType               string            `json:"cloudType,omitempty"`
 	ComputeType             string            `json:"computeType"`
 	ImageName               string            `json:"imageName"`
-	DockerEntrypoint        []string          `json:"dockerEntrypoint"`
-	DockerStartCmd          []string          `json:"dockerStartCmd"`
+	DockerEntrypoint        []string          `json:"dockerEntrypoint,omitempty"`
+	DockerStartCmd          []string          `json:"dockerStartCmd,omitempty"`
 	Env                     map[string]string `json:"env,omitempty"`
 	GPUCount                int               `json:"gpuCount"`
 	GPUTypeIDs              []string          `json:"gpuTypeIds,omitempty"`
@@ -442,6 +443,32 @@ func externalName(idempotencyKey string) string {
 	return name
 }
 
+// startCommand maps Kubernetes command and args onto RunPod's ENTRYPOINT and
+// CMD overrides. RunPod rejects null and treats an omitted or empty field as
+// "use the image default", so empty values are left out of the request.
+//
+// Kubernetes ignores the image CMD when only command is set, but RunPod v1
+// cannot clear CMD. The command is therefore split into ENTRYPOINT and CMD so
+// that the image CMD is replaced as well. A single-element command without
+// args still gets the image CMD appended.
+func startCommand(command []string, args []string) ([]string, []string) {
+	switch {
+	case len(command) == 0:
+		return nil, cloneStrings(args)
+	case len(args) > 0:
+		return cloneStrings(command), cloneStrings(args)
+	default:
+		return cloneStrings(command[:1]), cloneStrings(command[1:])
+	}
+}
+
+func cloneStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	return append([]string(nil), values...)
+}
+
 func gpuTypeIDs(gpuType string) []string {
 	if gpuType == "" {
 		return nil
@@ -574,6 +601,9 @@ func classifyHTTPStatus(statusCode int, body string) core.ErrorClass {
 		return core.ErrorClassCapacity
 	case strings.Contains(lowerBody, "quota") || strings.Contains(lowerBody, "limit"):
 		return core.ErrorClassQuota
+	case statusCode == http.StatusBadRequest || statusCode == http.StatusUnprocessableEntity:
+		// RunPod rejected the request itself, for example a schema error.
+		return core.ErrorClassUnsupportedSpec
 	case statusCode >= 500:
 		return core.ErrorClassTransient
 	default:

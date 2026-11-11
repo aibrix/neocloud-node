@@ -18,8 +18,7 @@ Official API references:
 | --- | --- | --- |
 | idempotency key | `name` | Sanitized as `neocloud-node-<namespace>-<uid>`. Transient create failures are recovered by listing this external name before retrying. |
 | `Image` | `imageName` | Required by transformer. |
-| `Command` | `dockerEntrypoint` | Preserved as array. |
-| `Args` | `dockerStartCmd` | Preserved as array. |
+| `Command`, `Args` | `dockerEntrypoint`, `dockerStartCmd` | See [Command and args](#command-and-args). |
 | `Env` | `env` | Literal env map only. |
 | `GPUCount` | `gpuCount` | Required to be greater than zero by transformer. |
 | `GPUType` | `gpuTypeIds` | Single-item list when set. |
@@ -33,6 +32,23 @@ Official API references:
 | provider hint `runpod-registry-auth-id` | `containerRegistryAuthId` | Uses an existing RunPod registry auth object. |
 | provider hint `runpod-volume-mount-path` | `volumeMountPath` | Mount path for pod/network volume. |
 | constant | `computeType: GPU` | Phase 2 only targets GPU pods. |
+
+## Command and Args
+
+RunPod rejects `null` for `dockerEntrypoint` and `dockerStartCmd`, and treats an
+omitted or empty field as "use the image default". Empty fields are therefore
+omitted.
+
+| Pod `command` | Pod `args` | `dockerEntrypoint` | `dockerStartCmd` |
+| --- | --- | --- | --- |
+| empty | empty | omitted (image ENTRYPOINT) | omitted (image CMD) |
+| empty | set | omitted (image ENTRYPOINT) | `args` |
+| set | set | `command` | `args` |
+| set | empty | `command[0]` | `command[1:]` |
+
+Kubernetes ignores the image CMD when only `command` is set. RunPod v1 cannot
+clear CMD, so the command is split across ENTRYPOINT and CMD to replace both.
+A single-element `command` without `args` still gets the image CMD appended.
 
 ## Status Mapping
 
@@ -73,6 +89,7 @@ RunPod HTTP errors are converted to `core.ProviderError`:
 | HTTP/result | Error class | Runtime behavior |
 | --- | --- | --- |
 | 401/403 | `Auth` | Terminal by default; no cross-provider fallback unless policy explicitly allows. |
+| 400/422 without a capacity or quota message | `UnsupportedSpec` | Terminal; RunPod rejected the request itself. |
 | 404 | `RemoteNotFound` | Used for remote manually deleted and idempotent cleanup. |
 | 409 | `Conflict` | Retryable. |
 | 429 | `RateLimited` | Retryable and fallback-eligible. |
