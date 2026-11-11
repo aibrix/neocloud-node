@@ -3,8 +3,10 @@ kind: ClusterRole
 metadata:
   name: {{ include "neocloud.clusterName" . }}
 rules:
-  # Virtual Kubelet constructs shared informers for these resources. Downward
-  # API resolution remains disabled, but list/watch is required by nodeutil.
+  # Virtual Kubelet constructs shared informers for these resources, which
+  # needs list/watch. The controller also reads Secrets and ConfigMaps that
+  # remote Pods reference in env and envFrom when it creates the remote
+  # workload; the values are sent to the provider.
   - apiGroups: [""]
     resources: ["configmaps", "secrets", "services"]
     verbs: ["get", "list", "watch"]

@@ -2,6 +2,7 @@ package kube
 
 import (
 	"errors"
+	"reflect"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -290,27 +291,23 @@ func TestTransformerIgnoresDefaultServiceAccountProjectedVolume(t *testing.T) {
 	}
 }
 
-func TestTransformerRejectsEnvironmentSources(t *testing.T) {
+func TestTransformerRejectsUnresolvableEnvironmentSources(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
 		name      string
 		valueFrom *corev1.EnvVarSource
-		envFrom   []corev1.EnvFromSource
-		code      string
-		field     string
 	}{
-		{"secret key", &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{}}, nil, "UnsupportedEnvValueFrom", "spec.containers[0].env[1].valueFrom"},
-		{"config map key", &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{}}, nil, "UnsupportedEnvValueFrom", "spec.containers[0].env[1].valueFrom"},
-		{"field", &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{}}, nil, "UnsupportedEnvValueFrom", "spec.containers[0].env[1].valueFrom"},
-		{"resource field", &corev1.EnvVarSource{ResourceFieldRef: &corev1.ResourceFieldSelector{}}, nil, "UnsupportedEnvValueFrom", "spec.containers[0].env[1].valueFrom"},
-		{"secret envFrom", nil, []corev1.EnvFromSource{{SecretRef: &corev1.SecretEnvSource{}}}, "UnsupportedEnvFrom", "spec.containers[0].envFrom"},
-		{"config map envFrom", nil, []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{}}}, "UnsupportedEnvFrom", "spec.containers[0].envFrom"},
+		{"resource field", &corev1.EnvVarSource{ResourceFieldRef: &corev1.ResourceFieldSelector{Resource: "limits.cpu"}}},
+		{"pod IP", &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.podIP"}}},
+		{"host IP", &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.hostIP"}}},
+		{"file key", &corev1.EnvVarSource{FileKeyRef: &corev1.FileKeySelector{VolumeName: "env", Path: "a.env", Key: "A"}}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			pod := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{
 				Image:     "example.com/train:latest",
 				Env:       []corev1.EnvVar{{Name: "LITERAL", Value: "kept"}, {Name: "SOURCE", ValueFrom: tt.valueFrom}},
-				EnvFrom:   tt.envFrom,
 				Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("1")}},
 			}}}}
 			_, err := (Transformer{}).TransformPod(pod)
@@ -318,9 +315,88 @@ func TestTransformerRejectsEnvironmentSources(t *testing.T) {
 			if !errors.As(err, &unsupported) {
 				t.Fatalf("TransformPod error = %v, want UnsupportedSpecError", err)
 			}
-			if unsupported.Code != tt.code || unsupported.Field != tt.field {
-				t.Fatalf("unsupported error = %#v, want %s at %s", unsupported, tt.code, tt.field)
+			if unsupported.Code != "UnsupportedEnvValueFrom" || unsupported.Field != "spec.containers[0].env[1].valueFrom" {
+				t.Fatalf("unsupported error = %#v, want UnsupportedEnvValueFrom at env[1]", unsupported)
 			}
 		})
 	}
+}
+
+func TestTransformerMapsEnvironmentSources(t *testing.T) {
+	t.Parallel()
+
+	optional := true
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:   "ml",
+			Name:        "serve",
+			UID:         types.UID("pod-serve"),
+			Labels:      map[string]string{"app": "qwen"},
+			Annotations: map[string]string{"team": "inference"},
+		},
+		Spec: corev1.PodSpec{
+			NodeName:           "neocloud-node",
+			ServiceAccountName: "serving",
+			Containers: []corev1.Container{{
+				Image: "vllm/vllm-openai:v0.32.0",
+				EnvFrom: []corev1.EnvFromSource{
+					{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "settings"}}},
+					{Prefix: "HF_", SecretRef: &corev1.SecretEnvSource{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "hf"}, Optional: &optional,
+					}},
+				},
+				Env: []corev1.EnvVar{
+					{Name: "TOKEN", Value: "literal-first"},
+					{Name: "TOKEN", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "hf"}, Key: "token",
+					}}},
+					{Name: "MODE", ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "settings"}, Key: "mode", Optional: &optional,
+					}}},
+					{Name: "MODE", Value: "literal-last"},
+					{Name: "POD_NAME", ValueFrom: fieldRef("metadata.name")},
+					{Name: "POD_NAMESPACE", ValueFrom: fieldRef("metadata.namespace")},
+					{Name: "POD_UID", ValueFrom: fieldRef("metadata.uid")},
+					{Name: "APP", ValueFrom: fieldRef("metadata.labels['app']")},
+					{Name: "TEAM", ValueFrom: fieldRef("metadata.annotations['team']")},
+					{Name: "NODE", ValueFrom: fieldRef("spec.nodeName")},
+					{Name: "SA", ValueFrom: fieldRef("spec.serviceAccountName")},
+				},
+				Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("1")}},
+			}},
+		},
+	}
+
+	binding, err := (Transformer{}).TransformPod(pod)
+	if err != nil {
+		t.Fatalf("TransformPod() error = %v", err)
+	}
+	wantEnv := map[string]string{
+		"MODE":          "literal-last",
+		"POD_NAME":      "serve",
+		"POD_NAMESPACE": "ml",
+		"POD_UID":       "pod-serve",
+		"APP":           "qwen",
+		"TEAM":          "inference",
+		"NODE":          "neocloud-node",
+		"SA":            "serving",
+	}
+	if !reflect.DeepEqual(binding.Request.Env, wantEnv) {
+		t.Fatalf("env = %#v, want %#v", binding.Request.Env, wantEnv)
+	}
+	wantRefs := []core.EnvRef{{Name: "TOKEN", SecretKeyRef: &core.EnvKeyRef{Name: "hf", Key: "token"}}}
+	if !reflect.DeepEqual(binding.Request.EnvRefs, wantRefs) {
+		t.Fatalf("env refs = %#v, want %#v", binding.Request.EnvRefs, wantRefs)
+	}
+	wantEnvFrom := []core.EnvFromRef{
+		{ConfigMapName: "settings"},
+		{Prefix: "HF_", SecretName: "hf", Optional: true},
+	}
+	if !reflect.DeepEqual(binding.Request.EnvFrom, wantEnvFrom) {
+		t.Fatalf("envFrom = %#v, want %#v", binding.Request.EnvFrom, wantEnvFrom)
+	}
+}
+
+func fieldRef(path string) *corev1.EnvVarSource {
+	return &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: path}}
 }

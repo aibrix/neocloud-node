@@ -27,7 +27,9 @@ func (Transformer) TransformPod(pod *corev1.Pod) (core.Binding, error)
 | `spec.containers[0].image` | `WorkloadRequest.Image` |
 | `spec.containers[0].command` | `WorkloadRequest.Command` |
 | `spec.containers[0].args` | `WorkloadRequest.Args` |
-| literal `spec.containers[0].env` | `WorkloadRequest.Env` |
+| literal `spec.containers[0].env` and resolved `fieldRef` | `WorkloadRequest.Env` |
+| `spec.containers[0].env[*].valueFrom` Secret/ConfigMap keys | `WorkloadRequest.EnvRefs` |
+| `spec.containers[0].envFrom` | `WorkloadRequest.EnvFrom` |
 | `spec.containers[0].ports` | `WorkloadRequest.Ports` |
 | `nvidia.com/gpu` limit or request | `WorkloadRequest.GPUCount` |
 | `spec.hostNetwork` | compatibility validation |
@@ -37,6 +39,6 @@ func (Transformer) TransformPod(pod *corev1.Pod) (core.Binding, error)
 
 ## Current Limits
 
-- Only literal env vars are mapped. `ValueFrom` refs need an explicit Secret/ConfigMap projection model later.
+- Secret and ConfigMap env values are read when the remote workload is created and sent to the provider; bindings store only the references. See the [compatibility matrix](compatibility-matrix.md#environment-sources).
 - The adapter does not watch Kubernetes. It is a transformer layer only.
 - The Virtual Kubelet provider wrapper still needs to call this adapter from `CreatePod`.

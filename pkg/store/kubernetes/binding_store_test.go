@@ -56,6 +56,11 @@ func TestCreateOrGetCreatesCloudPodBinding(t *testing.T) {
 	if roundTrip.Request.Image != binding.Request.Image || roundTrip.Request.GPUCount != binding.Request.GPUCount {
 		t.Fatalf("round trip request = %#v, want %#v", roundTrip.Request, binding.Request)
 	}
+	if !reflect.DeepEqual(roundTrip.Request.EnvRefs, binding.Request.EnvRefs) ||
+		!reflect.DeepEqual(roundTrip.Request.EnvFrom, binding.Request.EnvFrom) {
+		t.Fatalf("round trip env references = %#v/%#v, want %#v/%#v",
+			roundTrip.Request.EnvRefs, roundTrip.Request.EnvFrom, binding.Request.EnvRefs, binding.Request.EnvFrom)
+	}
 }
 
 func TestCreateOrGetReturnsExistingBindingWithoutOverwritingRemoteState(t *testing.T) {
@@ -220,10 +225,18 @@ func testBinding() core.Binding {
 		WorkloadUID: "11111111-2222-3333-4444-555555555555",
 		Phase:       core.BindingPending,
 		Request: core.WorkloadRequest{
-			Image:         "ghcr.io/example/train:latest",
-			Command:       []string{"python"},
-			Args:          []string{"train.py"},
-			Env:           map[string]string{"MODEL": "llama"},
+			Image:   "ghcr.io/example/train:latest",
+			Command: []string{"python"},
+			Args:    []string{"train.py"},
+			Env:     map[string]string{"MODEL": "llama"},
+			EnvRefs: []core.EnvRef{
+				{Name: "HF_TOKEN", SecretKeyRef: &core.EnvKeyRef{Name: "hf", Key: "token"}},
+				{Name: "MODE", ConfigMapKeyRef: &core.EnvKeyRef{Name: "settings", Key: "mode", Optional: true}},
+			},
+			EnvFrom: []core.EnvFromRef{
+				{Prefix: "APP_", ConfigMapName: "settings", Optional: true},
+				{SecretName: "creds"},
+			},
 			GPUCount:      1,
 			GPUType:       "NVIDIA A100",
 			GPUMemory:     "80Gi",

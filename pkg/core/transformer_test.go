@@ -2,6 +2,7 @@ package core
 
 import (
 	"errors"
+	"reflect"
 	"testing"
 )
 
@@ -331,31 +332,40 @@ func TestTransformerRejectsPhase1UnsupportedSpecs(t *testing.T) {
 	}
 }
 
-func TestTransformerRejectsEnvironmentSources(t *testing.T) {
+func TestTransformerRejectsUnsupportedEnvironmentSources(t *testing.T) {
 	t.Parallel()
-	for _, tt := range []struct {
-		name       string
-		indices    []int
-		hasEnvFrom bool
-		code       string
-		field      string
-	}{
-		{"valueFrom", []int{0, 2}, false, "UnsupportedEnvValueFrom", "spec.containers[0].env[0].valueFrom"},
-		{"envFrom", nil, true, "UnsupportedEnvFrom", "spec.containers[0].envFrom"},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := (DefaultTransformer{}).Transform(PodSpec{Containers: []ContainerSpec{{
-				Image: "example.com/train:latest", Resources: ResourceSpec{GPUCount: 1},
-				EnvValueFromIndices: tt.indices, HasEnvFrom: tt.hasEnvFrom,
-			}}})
-			var unsupported *UnsupportedSpecError
-			if !errors.As(err, &unsupported) {
-				t.Fatalf("Transform error = %v, want UnsupportedSpecError", err)
-			}
-			if unsupported.Code != tt.code || unsupported.Field != tt.field {
-				t.Fatalf("unsupported error = %#v, want %s at %s", unsupported, tt.code, tt.field)
-			}
-		})
+
+	_, err := (DefaultTransformer{}).Transform(PodSpec{Containers: []ContainerSpec{{
+		Image: "example.com/train:latest", Resources: ResourceSpec{GPUCount: 1},
+		EnvValueFromIndices: []int{0, 2},
+	}}})
+	var unsupported *UnsupportedSpecError
+	if !errors.As(err, &unsupported) {
+		t.Fatalf("Transform error = %v, want UnsupportedSpecError", err)
+	}
+	if unsupported.Code != "UnsupportedEnvValueFrom" || unsupported.Field != "spec.containers[0].env[0].valueFrom" {
+		t.Fatalf("unsupported error = %#v, want UnsupportedEnvValueFrom at env[0]", unsupported)
+	}
+}
+
+func TestTransformerKeepsEnvironmentReferences(t *testing.T) {
+	t.Parallel()
+
+	refs := []EnvRef{{Name: "HF_TOKEN", SecretKeyRef: &EnvKeyRef{Name: "hf", Key: "token"}}}
+	envFrom := []EnvFromRef{{Prefix: "APP_", ConfigMapName: "settings", Optional: true}}
+	request, err := (DefaultTransformer{}).Transform(PodSpec{Containers: []ContainerSpec{{
+		Image: "example.com/serve:latest", Resources: ResourceSpec{GPUCount: 1},
+		Env: map[string]string{"MODEL": "qwen"}, EnvRefs: refs, EnvFrom: envFrom,
+	}}})
+	if err != nil {
+		t.Fatalf("Transform() error = %v", err)
+	}
+	if !reflect.DeepEqual(request.EnvRefs, refs) || !reflect.DeepEqual(request.EnvFrom, envFrom) {
+		t.Fatalf("references = %#v/%#v, want %#v/%#v", request.EnvRefs, request.EnvFrom, refs, envFrom)
+	}
+	request.EnvRefs[0].SecretKeyRef.Key = "changed"
+	if refs[0].SecretKeyRef.Key != "token" {
+		t.Fatal("request shares EnvKeyRef with the Pod spec, want a copy")
 	}
 }
 

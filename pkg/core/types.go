@@ -23,6 +23,8 @@ type WorkloadRequest struct {
 	Command          []string
 	Args             []string
 	Env              map[string]string
+	EnvRefs          []EnvRef
+	EnvFrom          []EnvFromRef
 	GPUCount         int
 	GPUType          string
 	GPUMemory        string
