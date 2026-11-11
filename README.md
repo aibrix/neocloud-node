@@ -90,8 +90,7 @@ race tests, and the container build pass, publishes a Linux amd64/arm64 image:
 Use the resulting commit on `main`, which may differ from the PR branch's SHA
 after squash or merge. The image reference and digest appear in the CI run's
 job summary. Each main commit has its own run, so newer merges do not cancel
-earlier publications. PR runs do not publish images. Manual CI runs publish a commit-tagged image only
-when explicitly dispatched with `publish_image=true`, after all checks pass.
+earlier publications. PR and manual CI runs do not publish images.
 The `latest` tag continues to track formal releases.
 
 For RunPod, set Helm values `provider=runpod` and
