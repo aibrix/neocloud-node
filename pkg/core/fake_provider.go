@@ -28,6 +28,10 @@ type RemoteResource struct {
 	Request        WorkloadRequest
 	HourlyCost     float64
 	CostSource     string
+	// StatusReason and StatusMessage explain the phase when the provider
+	// reports more than a phase, for example why a remote workload failed.
+	StatusReason  string
+	StatusMessage string
 }
 
 type ProviderAdapter interface {
@@ -109,6 +113,23 @@ func (p *FakeProvider) Delete(ctx context.Context, remoteID string) error {
 	}
 	delete(p.byID, remoteID)
 	delete(p.byKey, remote.IdempotencyKey)
+	return nil
+}
+
+// SetStatus changes the observed status of an existing fake remote resource.
+func (p *FakeProvider) SetStatus(remoteID string, phase RemotePhase, reason string, message string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	remote, ok := p.byID[remoteID]
+	if !ok {
+		return ErrRemoteNotFound
+	}
+	remote.Phase = phase
+	remote.StatusReason = reason
+	remote.StatusMessage = message
+	p.byID[remoteID] = remote
+	p.byKey[remote.IdempotencyKey] = remote
 	return nil
 }
 

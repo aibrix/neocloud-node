@@ -482,6 +482,44 @@ func TestGetPodStatusSurfacesRemoteDeletedCondition(t *testing.T) {
 	}
 }
 
+func TestGetPodStatusReportsRemoteExitAsFailed(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	adapter := core.NewFakeProvider("runpod")
+	provider := newTestProvider(t, adapter)
+	pod := gpuPod("remote-exited", "uid-remote-exited")
+
+	if err := provider.CreatePod(ctx, pod); err != nil {
+		t.Fatalf("CreatePod() error = %v", err)
+	}
+	binding, err := provider.lifecycle.SyncStatus(ctx, "default", "uid-remote-exited")
+	if err != nil {
+		t.Fatalf("SyncStatus() setup error = %v", err)
+	}
+	if err := adapter.SetStatus(binding.RemoteID, core.RemoteFailed, "RemoteExited", "exit code unavailable"); err != nil {
+		t.Fatalf("SetStatus() setup error = %v", err)
+	}
+
+	status, err := provider.GetPodStatus(ctx, "default", "remote-exited")
+	if err != nil {
+		t.Fatalf("GetPodStatus() error = %v", err)
+	}
+	if status.Phase != corev1.PodFailed {
+		t.Fatalf("phase = %s, want Failed", status.Phase)
+	}
+	if len(status.ContainerStatuses) != 1 || status.ContainerStatuses[0].State.Terminated == nil {
+		t.Fatalf("container statuses = %#v, want terminated", status.ContainerStatuses)
+	}
+	terminated := status.ContainerStatuses[0].State.Terminated
+	if terminated.Reason != "RemoteExited" || terminated.Message != "exit code unavailable" {
+		t.Fatalf("terminated = %q/%q, want RemoteExited/exit code unavailable", terminated.Reason, terminated.Message)
+	}
+	if ready := podReadyCondition(status.Conditions); ready.Status != corev1.ConditionFalse {
+		t.Fatalf("PodReady = %s, want False", ready.Status)
+	}
+}
+
 func TestNewProviderFuncBuildsNodeutilProvider(t *testing.T) {
 	ctx := context.Background()
 	factory := NewProviderFunc(Config{
