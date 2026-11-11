@@ -15,6 +15,7 @@ type LifecycleService struct {
 	fallbackOrder    []string
 	guard            *LaunchGuard
 	candidatePlanner CreateCandidatePlanner
+	envReader        EnvSourceReader
 }
 
 type LifecycleOption func(*LifecycleService)
@@ -59,6 +60,14 @@ func WithFallbackProviders(providers map[string]ProviderAdapter, fallbackOrder [
 			}
 		}
 		service.fallbackOrder = append([]string(nil), fallbackOrder...)
+	}
+}
+
+// WithEnvSourceReader resolves Secret and ConfigMap environment references when
+// the remote workload is created.
+func WithEnvSourceReader(reader EnvSourceReader) LifecycleOption {
+	return func(service *LifecycleService) {
+		service.envReader = reader
 	}
 }
 
@@ -123,6 +132,13 @@ func (s *LifecycleService) createWithFallback(ctx context.Context, binding *Bind
 		recordProviderFailure(binding, binding.Request.Provider, binding.Request.RegionHint, "PlacementFailed", err)
 		return RemoteResource{}, CreateCandidate{Provider: binding.Request.Provider, Request: binding.Request}, err
 	}
+	// Resolved values are passed to the provider only; the binding keeps the
+	// references so that Secret values are never stored in its status.
+	env, err := ResolveEnv(ctx, s.envReader, binding.Namespace, binding.Request)
+	if err != nil {
+		recordProviderFailure(binding, binding.Request.Provider, binding.Request.RegionHint, "EnvResolutionFailed", err)
+		return RemoteResource{}, CreateCandidate{Provider: binding.Request.Provider, Request: binding.Request}, err
+	}
 	for index, candidate := range candidates {
 		adapter := s.providerFor(candidate.Provider)
 		if adapter == nil {
@@ -135,7 +151,7 @@ func (s *LifecycleService) createWithFallback(ctx context.Context, binding *Bind
 			recordProviderFailure(binding, candidate.Provider, candidate.Request.RegionHint, "CreateFailed", lastErr)
 			return RemoteResource{}, candidate, lastErr
 		}
-		remote, err := adapter.Create(ctx, idempotencyKey(*binding), candidate.Request)
+		remote, err := adapter.Create(ctx, idempotencyKey(*binding), requestWithEnv(candidate.Request, env))
 		if err == nil {
 			return remote, candidate, nil
 		}
@@ -149,6 +165,13 @@ func (s *LifecycleService) createWithFallback(ctx context.Context, binding *Bind
 		lastErr = errors.New("no provider candidate configured")
 	}
 	return RemoteResource{}, CreateCandidate{Provider: binding.Request.Provider, Request: binding.Request}, lastErr
+}
+
+func requestWithEnv(request WorkloadRequest, env map[string]string) WorkloadRequest {
+	request.Env = env
+	request.EnvRefs = nil
+	request.EnvFrom = nil
+	return request
 }
 
 func (s *LifecycleService) SyncStatus(ctx context.Context, namespace string, workloadUID string) (Binding, error) {

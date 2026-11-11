@@ -30,6 +30,7 @@ import (
 	"k8s.io/client-go/tools/record"
 
 	"github.com/aibrix/neocloud-node/pkg/core"
+	"github.com/aibrix/neocloud-node/pkg/kube"
 	lambdacloud "github.com/aibrix/neocloud-node/pkg/providers/lambda"
 	"github.com/aibrix/neocloud-node/pkg/providers/runpod"
 	"github.com/aibrix/neocloud-node/pkg/providers/vast"
@@ -274,6 +275,7 @@ func NewNode(ctx context.Context, options Options, kubeClient kubernetes.Interfa
 		FallbackAdapters: fallbackAdapters,
 		FallbackOrder:    fallbackOrder,
 		CandidatePlanner: placementSetup.Planner,
+		EnvSourceReader:  kube.NewEnvSourceReader(kubeClient.CoreV1()),
 		LaunchGuard:      launchGuard(options),
 		NodeName:         options.NodeName,
 		EventRecorder: newEventRecorder(kubeClient,

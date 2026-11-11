@@ -2,6 +2,7 @@ package kube
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -27,11 +28,11 @@ func (t Transformer) TransformPod(pod *corev1.Pod) (core.Binding, error) {
 		WorkloadUID:      string(pod.UID),
 		RestartPolicy:    restartPolicyFromCoreV1(pod.Spec.RestartPolicy),
 		ImagePullSecrets: imagePullSecretNames(pod.Spec.ImagePullSecrets),
-		InitContainers:   containersFromCoreV1(pod.Spec.InitContainers),
+		InitContainers:   containersFromCoreV1(pod, pod.Spec.InitContainers),
 		Volumes:          volumesFromCoreV1(pod.Spec.Volumes),
 		HostNetwork:      pod.Spec.HostNetwork,
 		Annotations:      cloneStringMap(pod.Annotations),
-		Containers:       containersFromCoreV1(pod.Spec.Containers),
+		Containers:       containersFromCoreV1(pod, pod.Spec.Containers),
 	}
 
 	transformer := t.Core
@@ -72,21 +73,22 @@ func imagePullSecretNames(refs []corev1.LocalObjectReference) []string {
 	return names
 }
 
-func containersFromCoreV1(containers []corev1.Container) []core.ContainerSpec {
+func containersFromCoreV1(pod *corev1.Pod, containers []corev1.Container) []core.ContainerSpec {
 	if len(containers) == 0 {
 		return nil
 	}
 	out := make([]core.ContainerSpec, 0, len(containers))
 	for _, container := range containers {
-		env, valueFromIndices := envFromCoreV1(container.Env)
+		env, refs, unsupportedIndices := envFromCoreV1(pod, container.Env)
 		out = append(out, core.ContainerSpec{
 			Name:                container.Name,
 			Image:               container.Image,
 			Command:             append([]string(nil), container.Command...),
 			Args:                append([]string(nil), container.Args...),
 			Env:                 env,
-			EnvValueFromIndices: valueFromIndices,
-			HasEnvFrom:          len(container.EnvFrom) > 0,
+			EnvRefs:             refs,
+			EnvFrom:             envFromSourcesFromCoreV1(container.EnvFrom),
+			EnvValueFromIndices: unsupportedIndices,
 			Ports:               portsFromCoreV1(container.Ports),
 			Resources:           resourcesFromCoreV1(container.Resources),
 			SecurityContext:     securityContextFromCoreV1(container.SecurityContext),
@@ -96,20 +98,120 @@ func containersFromCoreV1(containers []corev1.Container) []core.ContainerSpec {
 	return out
 }
 
-func envFromCoreV1(env []corev1.EnvVar) (map[string]string, []int) {
+// envFromCoreV1 splits env entries into literal values and Secret/ConfigMap
+// references. fieldRef values are resolved from the Pod here. Entries are
+// processed in order, so a later entry with the same name replaces an earlier
+// one, as in kubelet. It also returns the indices of unsupported sources.
+func envFromCoreV1(pod *corev1.Pod, env []corev1.EnvVar) (map[string]string, []core.EnvRef, []int) {
 	if len(env) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
-	out := make(map[string]string, len(env))
-	var valueFromIndices []int
+	literal := make(map[string]string, len(env))
+	var refs []core.EnvRef
+	var unsupported []int
 	for index, item := range env {
-		if item.ValueFrom == nil {
-			out[item.Name] = item.Value
-		} else {
-			valueFromIndices = append(valueFromIndices, index)
+		source := item.ValueFrom
+		switch {
+		case source == nil:
+			literal[item.Name] = item.Value
+			refs = removeEnvRef(refs, item.Name)
+		case source.SecretKeyRef != nil:
+			delete(literal, item.Name)
+			refs = append(removeEnvRef(refs, item.Name), core.EnvRef{
+				Name:         item.Name,
+				SecretKeyRef: keyRef(source.SecretKeyRef.Name, source.SecretKeyRef.Key, source.SecretKeyRef.Optional),
+			})
+		case source.ConfigMapKeyRef != nil:
+			delete(literal, item.Name)
+			refs = append(removeEnvRef(refs, item.Name), core.EnvRef{
+				Name: item.Name,
+				ConfigMapKeyRef: keyRef(source.ConfigMapKeyRef.Name, source.ConfigMapKeyRef.Key,
+					source.ConfigMapKeyRef.Optional),
+			})
+		case source.FieldRef != nil:
+			value, ok := fieldRefValue(pod, source.FieldRef.FieldPath)
+			if !ok {
+				unsupported = append(unsupported, index)
+				continue
+			}
+			literal[item.Name] = value
+			refs = removeEnvRef(refs, item.Name)
+		default:
+			unsupported = append(unsupported, index)
 		}
 	}
-	return out, valueFromIndices
+	if len(literal) == 0 {
+		literal = nil
+	}
+	return literal, refs, unsupported
+}
+
+func keyRef(name string, key string, optional *bool) *core.EnvKeyRef {
+	return &core.EnvKeyRef{Name: name, Key: key, Optional: optional != nil && *optional}
+}
+
+func removeEnvRef(refs []core.EnvRef, name string) []core.EnvRef {
+	out := refs[:0]
+	for _, ref := range refs {
+		if ref.Name != name {
+			out = append(out, ref)
+		}
+	}
+	return out
+}
+
+var metadataFieldPath = regexp.MustCompile(`^metadata\.(labels|annotations)\['(.+)'\]$`)
+
+// fieldRefValue resolves the downward API fields that are known before the
+// remote workload starts. status.podIP and status.hostIP are not known then.
+func fieldRefValue(pod *corev1.Pod, fieldPath string) (string, bool) {
+	if pod == nil {
+		return "", false
+	}
+	switch fieldPath {
+	case "metadata.name":
+		return pod.Name, true
+	case "metadata.namespace":
+		return pod.Namespace, true
+	case "metadata.uid":
+		return string(pod.UID), true
+	case "spec.nodeName":
+		return pod.Spec.NodeName, true
+	case "spec.serviceAccountName":
+		return pod.Spec.ServiceAccountName, true
+	}
+	match := metadataFieldPath.FindStringSubmatch(fieldPath)
+	if match == nil {
+		return "", false
+	}
+	if match[1] == "labels" {
+		return pod.Labels[match[2]], true
+	}
+	return pod.Annotations[match[2]], true
+}
+
+func envFromSourcesFromCoreV1(sources []corev1.EnvFromSource) []core.EnvFromRef {
+	if len(sources) == 0 {
+		return nil
+	}
+	out := make([]core.EnvFromRef, 0, len(sources))
+	for _, source := range sources {
+		switch {
+		case source.SecretRef != nil:
+			out = append(out, core.EnvFromRef{
+				Prefix:     source.Prefix,
+				SecretName: source.SecretRef.Name,
+				Optional:   source.SecretRef.Optional != nil && *source.SecretRef.Optional,
+			})
+		case source.ConfigMapRef != nil:
+			out = append(out, core.EnvFromRef{
+				Prefix:        source.Prefix,
+				ConfigMapName: source.ConfigMapRef.Name,
+				Optional:      source.ConfigMapRef.Optional != nil && *source.ConfigMapRef.Optional,
+			})
+		}
+	}
+	return out
 }
 
 func portsFromCoreV1(ports []corev1.ContainerPort) []core.PortSpec {

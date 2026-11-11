@@ -315,6 +315,8 @@ func requestToMap(request core.WorkloadRequest) map[string]interface{} {
 		"command":          stringSliceToInterface(request.Command),
 		"args":             stringSliceToInterface(request.Args),
 		"env":              stringMapToInterface(request.Env),
+		"envRefs":          envRefsToSlice(request.EnvRefs),
+		"envFrom":          envFromToSlice(request.EnvFrom),
 		"gpuCount":         int64(request.GPUCount),
 		"gpuType":          request.GPUType,
 		"gpuMemory":        request.GPUMemory,
@@ -335,6 +337,8 @@ func requestFromMap(values map[string]interface{}) core.WorkloadRequest {
 		Command:          stringSliceFromInterface(asSlice(values["command"])),
 		Args:             stringSliceFromInterface(asSlice(values["args"])),
 		Env:              stringMapFromInterface(asMap(values["env"])),
+		EnvRefs:          envRefsFromSlice(asSlice(values["envRefs"])),
+		EnvFrom:          envFromFromSlice(asSlice(values["envFrom"])),
 		GPUCount:         intValue(values["gpuCount"]),
 		GPUType:          stringValue(values["gpuType"]),
 		GPUMemory:        stringValue(values["gpuMemory"]),
@@ -347,6 +351,95 @@ func requestFromMap(values map[string]interface{}) core.WorkloadRequest {
 		Ports:            portsFromSlice(asSlice(values["ports"])),
 		ProviderHints:    stringMapFromInterface(asMap(values["providerHints"])),
 	}
+}
+
+// envRefsToSlice stores only Secret and ConfigMap references, never values.
+func envRefsToSlice(refs []core.EnvRef) []interface{} {
+	if len(refs) == 0 {
+		return nil
+	}
+	out := make([]interface{}, 0, len(refs))
+	for _, ref := range refs {
+		item := map[string]interface{}{"name": ref.Name}
+		if ref.SecretKeyRef != nil {
+			item["secretKeyRef"] = envKeyRefToMap(*ref.SecretKeyRef)
+		}
+		if ref.ConfigMapKeyRef != nil {
+			item["configMapKeyRef"] = envKeyRefToMap(*ref.ConfigMapKeyRef)
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func envRefsFromSlice(values []interface{}) []core.EnvRef {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]core.EnvRef, 0, len(values))
+	for _, value := range values {
+		item := asMap(value)
+		ref := core.EnvRef{Name: stringValue(item["name"])}
+		if keyRef := asMap(item["secretKeyRef"]); len(keyRef) > 0 {
+			parsed := envKeyRefFromMap(keyRef)
+			ref.SecretKeyRef = &parsed
+		}
+		if keyRef := asMap(item["configMapKeyRef"]); len(keyRef) > 0 {
+			parsed := envKeyRefFromMap(keyRef)
+			ref.ConfigMapKeyRef = &parsed
+		}
+		out = append(out, ref)
+	}
+	return out
+}
+
+func envKeyRefToMap(ref core.EnvKeyRef) map[string]interface{} {
+	return map[string]interface{}{
+		"name":     ref.Name,
+		"key":      ref.Key,
+		"optional": ref.Optional,
+	}
+}
+
+func envKeyRefFromMap(values map[string]interface{}) core.EnvKeyRef {
+	return core.EnvKeyRef{
+		Name:     stringValue(values["name"]),
+		Key:      stringValue(values["key"]),
+		Optional: boolValue(values["optional"]),
+	}
+}
+
+func envFromToSlice(sources []core.EnvFromRef) []interface{} {
+	if len(sources) == 0 {
+		return nil
+	}
+	out := make([]interface{}, 0, len(sources))
+	for _, source := range sources {
+		out = append(out, map[string]interface{}{
+			"prefix":        source.Prefix,
+			"secretName":    source.SecretName,
+			"configMapName": source.ConfigMapName,
+			"optional":      source.Optional,
+		})
+	}
+	return out
+}
+
+func envFromFromSlice(values []interface{}) []core.EnvFromRef {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]core.EnvFromRef, 0, len(values))
+	for _, value := range values {
+		item := asMap(value)
+		out = append(out, core.EnvFromRef{
+			Prefix:        stringValue(item["prefix"]),
+			SecretName:    stringValue(item["secretName"]),
+			ConfigMapName: stringValue(item["configMapName"]),
+			Optional:      boolValue(item["optional"]),
+		})
+	}
+	return out
 }
 
 func placementToMap(placement core.Placement) map[string]interface{} {

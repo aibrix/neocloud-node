@@ -20,6 +20,9 @@ const (
 	ErrorClassConflict        ErrorClass = "Conflict"
 	ErrorClassRemoteNotFound  ErrorClass = "RemoteNotFound"
 	ErrorClassDeleteFailure   ErrorClass = "DeleteFailure"
+	// ErrorClassConfig marks a workload whose configuration cannot be built,
+	// such as a missing Secret referenced by an environment variable.
+	ErrorClassConfig ErrorClass = "CreateContainerConfigError"
 )
 
 type ProviderError struct {

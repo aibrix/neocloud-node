@@ -43,6 +43,7 @@ type Config struct {
 	FallbackAdapters map[string]core.ProviderAdapter
 	FallbackOrder    []string
 	CandidatePlanner core.CreateCandidatePlanner
+	EnvSourceReader  core.EnvSourceReader
 	Transformer      PodTransformer
 	LaunchGuard      *core.LaunchGuard
 	NodeName         string
@@ -94,6 +95,9 @@ func NewProvider(config Config) (*Provider, error) {
 	}
 	if config.CandidatePlanner != nil {
 		options = append(options, core.WithCreateCandidatePlanner(config.CandidatePlanner))
+	}
+	if config.EnvSourceReader != nil {
+		options = append(options, core.WithEnvSourceReader(config.EnvSourceReader))
 	}
 
 	provider := &Provider{

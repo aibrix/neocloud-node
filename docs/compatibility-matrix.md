@@ -24,7 +24,10 @@ Unsupported fields must fail with a stable `UnsupportedSpecError` code and field
 | `spec.containers[0].image` | `WorkloadRequest.Image` | Required. |
 | `spec.containers[0].command` | `WorkloadRequest.Command` | Preserved as-is. |
 | `spec.containers[0].args` | `WorkloadRequest.Args` | Preserved as-is. |
-| `spec.containers[0].env` | `WorkloadRequest.Env` | Phase 1 supports literal key/value env only in core. |
+| `spec.containers[0].env[*].value` | `WorkloadRequest.Env` | Literal values. |
+| `spec.containers[0].env[*].valueFrom.secretKeyRef`, `configMapKeyRef` | `WorkloadRequest.EnvRefs` | See [Environment sources](#environment-sources). |
+| `spec.containers[0].env[*].valueFrom.fieldRef` | `WorkloadRequest.Env` | `metadata.name`, `metadata.namespace`, `metadata.uid`, `metadata.labels['<key>']`, `metadata.annotations['<key>']`, `spec.nodeName`, `spec.serviceAccountName`. Resolved from the Pod. |
+| `spec.containers[0].envFrom` (`secretRef`, `configMapRef`) | `WorkloadRequest.EnvFrom` | See [Environment sources](#environment-sources). |
 | `spec.containers[0].ports` | `WorkloadRequest.Ports` | Published by the provider. See [Remote endpoints](#remote-endpoints). |
 | `spec.containers[0].resources.requests/limits[nvidia.com/gpu]` | `WorkloadRequest.GPUCount` | Must be greater than zero. |
 | `spec.containers[0].readinessProbe` (`httpGet`, `tcpSocket`) | Pod `Ready` condition | See [Readiness](#readiness). |
@@ -36,8 +39,7 @@ Unsupported fields must fail with a stable `UnsupportedSpecError` code and field
 | more than one main container | `UnsupportedContainerCount` | `spec.containers` |
 | `spec.containers[0].image` missing | `MissingImage` | `spec.containers[0].image` |
 | GPU request missing or zero | `MissingGPURequest` | `spec.containers[0].resources.limits[nvidia.com/gpu]` |
-| `spec.containers[0].env[*].valueFrom` | `UnsupportedEnvValueFrom` | `spec.containers[0].env[i].valueFrom` (first source index) |
-| `spec.containers[0].envFrom` | `UnsupportedEnvFrom` | `spec.containers[0].envFrom` |
+| `env[*].valueFrom.resourceFieldRef`, `fileKeyRef`, or a `fieldRef` on `status.*` | `UnsupportedEnvValueFrom` | `spec.containers[0].env[i].valueFrom` (first source index) |
 | `spec.initContainers` | `UnsupportedInitContainers` | `spec.initContainers` |
 | `spec.volumes` | `UnsupportedVolumes` | `spec.volumes` |
 | `spec.hostNetwork: true` | `UnsupportedHostNetwork` | `spec.hostNetwork` |
@@ -110,6 +112,31 @@ the controller to the provider's public address, so allow for that latency in
 `exec` and `grpc` readiness probes cannot run from outside the remote host and
 are rejected. The probe port must be declared in `ports`, otherwise the provider
 does not publish it. Liveness and startup probes are not run.
+
+## Environment Sources
+
+The controller reads Secrets and ConfigMaps referenced by `env[*].valueFrom`
+and `envFrom` from the Pod namespace when it creates the remote workload, and
+merges them like kubelet: `envFrom` sources in order, then `env` entries, with
+later entries winning. `envFrom` keys that are not valid variable names are
+skipped. `optional` references to missing Secrets, ConfigMaps or keys are
+skipped.
+
+- **Values are sent to the provider.** The provider receives them as plain
+  container environment variables, and anyone with access to the provider
+  account can read them, for example in the provider console.
+- **Values are not stored in Kubernetes objects.** `CloudPodBinding` keeps only
+  the Secret and ConfigMap names and keys.
+- **Values are read once.** Changing a Secret later does not update a running
+  remote workload, as with kubelet. A replacement Pod reads the new value.
+- **A missing required reference fails the Pod** with reason
+  `CreateContainerConfigError` and no remote workload is created. Create the
+  Secret or ConfigMap before the Pod. A Deployment replaces the failed Pod and
+  tries again.
+
+The controller's ClusterRole allows it to read Secrets in all namespaces.
+
+`$(VAR)` references in `env`, `command` and `args` are not expanded.
 
 ## Non-Goals For Phase 1
 

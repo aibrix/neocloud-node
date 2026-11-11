@@ -62,9 +62,11 @@ type ContainerSpec struct {
 	Command []string
 	Args    []string
 	Env     map[string]string
-	// EnvValueFromIndices preserves source positions for unsupported-field errors.
+	EnvRefs []EnvRef
+	EnvFrom []EnvFromRef
+	// EnvValueFromIndices lists env entries whose valueFrom source cannot be
+	// resolved, preserving source positions for unsupported-field errors.
 	EnvValueFromIndices []int
-	HasEnvFrom          bool
 	Ports               []PortSpec
 	Resources           ResourceSpec
 	SecurityContext     SecurityContext
@@ -170,14 +172,7 @@ func (DefaultTransformer) Transform(pod PodSpec) (WorkloadRequest, error) {
 		return WorkloadRequest{}, &UnsupportedSpecError{
 			Code:    "UnsupportedEnvValueFrom",
 			Field:   fmt.Sprintf("spec.containers[0].env[%d].valueFrom", container.EnvValueFromIndices[0]),
-			Message: "environment valueFrom sources are not supported in Phase 1; use literal values",
-		}
-	}
-	if container.HasEnvFrom {
-		return WorkloadRequest{}, &UnsupportedSpecError{
-			Code:    "UnsupportedEnvFrom",
-			Field:   "spec.containers[0].envFrom",
-			Message: "environment envFrom sources are not supported in Phase 1; use literal values",
+			Message: "only secretKeyRef, configMapKeyRef and metadata or spec fieldRef environment sources are supported",
 		}
 	}
 	if err := validateReadinessProbe(container); err != nil {
@@ -203,6 +198,8 @@ func (DefaultTransformer) Transform(pod PodSpec) (WorkloadRequest, error) {
 		Command:          append([]string(nil), container.Command...),
 		Args:             append([]string(nil), container.Args...),
 		Env:              cloneStringMap(container.Env),
+		EnvRefs:          cloneEnvRefs(container.EnvRefs),
+		EnvFrom:          append([]EnvFromRef(nil), container.EnvFrom...),
 		GPUCount:         container.Resources.GPUCount,
 		GPUType:          pod.Annotations[AnnotationGPUType],
 		GPUMemory:        pod.Annotations[AnnotationGPUMemory],
@@ -257,6 +254,26 @@ func cloneStringMap(in map[string]string) map[string]string {
 	out := make(map[string]string, len(in))
 	for key, value := range in {
 		out[key] = value
+	}
+	return out
+}
+
+func cloneEnvRefs(refs []EnvRef) []EnvRef {
+	if len(refs) == 0 {
+		return nil
+	}
+	out := make([]EnvRef, 0, len(refs))
+	for _, ref := range refs {
+		clone := EnvRef{Name: ref.Name}
+		if ref.SecretKeyRef != nil {
+			keyRef := *ref.SecretKeyRef
+			clone.SecretKeyRef = &keyRef
+		}
+		if ref.ConfigMapKeyRef != nil {
+			keyRef := *ref.ConfigMapKeyRef
+			clone.ConfigMapKeyRef = &keyRef
+		}
+		out = append(out, clone)
 	}
 	return out
 }
