@@ -148,8 +148,8 @@ func TestCreatePodRejectsUnsupportedSpecBeforeLaunchingRemoteWorkload(t *testing
 	adapter := core.NewFakeProvider("runpod")
 	recorder := record.NewFakeRecorder(10)
 	provider := newTestProviderWithConfig(t, Config{Adapter: adapter, EventRecorder: recorder})
-	pod := gpuPod("service", "uid-service")
-	pod.Spec.RestartPolicy = corev1.RestartPolicyAlways
+	pod := gpuPod("host-network", "uid-host-network")
+	pod.Spec.HostNetwork = true
 	var notified []*corev1.Pod
 	provider.NotifyPods(ctx, func(pod *corev1.Pod) {
 		notified = append(notified, pod.DeepCopy())
@@ -165,7 +165,7 @@ func TestCreatePodRejectsUnsupportedSpecBeforeLaunchingRemoteWorkload(t *testing
 	if got := adapter.CreateCount(); got != 0 {
 		t.Fatalf("remote Create count = %d, want 0", got)
 	}
-	cached, err := provider.GetPod(ctx, "default", "service")
+	cached, err := provider.GetPod(ctx, "default", "host-network")
 	if err != nil {
 		t.Fatalf("GetPod() error = %v, want cached failed pod", err)
 	}
@@ -517,6 +517,57 @@ func TestGetPodStatusReportsRemoteExitAsFailed(t *testing.T) {
 	}
 	if ready := podReadyCondition(status.Conditions); ready.Status != corev1.ConditionFalse {
 		t.Fatalf("PodReady = %s, want False", ready.Status)
+	}
+}
+
+func TestRestartPolicyAlwaysPodFailsWhenRemoteExits(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	adapter := core.NewFakeProvider("runpod")
+	provider := newTestProvider(t, adapter)
+	pod := gpuPod("serve", "uid-serve")
+	pod.Spec.RestartPolicy = corev1.RestartPolicyAlways
+
+	if err := provider.CreatePod(ctx, pod); err != nil {
+		t.Fatalf("CreatePod() error = %v", err)
+	}
+	if got := adapter.CreateCount(); got != 1 {
+		t.Fatalf("remote Create count = %d, want 1", got)
+	}
+	running, err := provider.GetPodStatus(ctx, "default", "serve")
+	if err != nil {
+		t.Fatalf("GetPodStatus() error = %v", err)
+	}
+	if running.Phase != corev1.PodRunning {
+		t.Fatalf("phase = %s, want Running", running.Phase)
+	}
+
+	binding, err := provider.lifecycle.SyncStatus(ctx, "default", "uid-serve")
+	if err != nil {
+		t.Fatalf("SyncStatus() setup error = %v", err)
+	}
+	if binding.Request.RestartPolicy != string(core.RestartPolicyAlways) {
+		t.Fatalf("binding restart policy = %q, want Always", binding.Request.RestartPolicy)
+	}
+	if err := adapter.SetStatus(binding.RemoteID, core.RemoteFailed, "RemoteExited", "exit code unavailable"); err != nil {
+		t.Fatalf("SetStatus() setup error = %v", err)
+	}
+
+	// The remote container is never restarted in place. The Pod fails so that
+	// its ReplicaSet replaces it with a new Pod and a new remote workload.
+	exited, err := provider.GetPodStatus(ctx, "default", "serve")
+	if err != nil {
+		t.Fatalf("GetPodStatus() error = %v", err)
+	}
+	if exited.Phase != corev1.PodFailed {
+		t.Fatalf("phase = %s, want Failed", exited.Phase)
+	}
+	if got := exited.ContainerStatuses[0].State.Terminated.Reason; got != "RemoteExited" {
+		t.Fatalf("terminated reason = %q, want RemoteExited", got)
+	}
+	if got := adapter.CreateCount(); got != 1 {
+		t.Fatalf("remote Create count after exit = %d, want 1", got)
 	}
 }
 

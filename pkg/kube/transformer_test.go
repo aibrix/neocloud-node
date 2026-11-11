@@ -98,7 +98,7 @@ func TestTransformerPreservesUnsupportedCoreV1PodErrors(t *testing.T) {
 			UID:       types.UID("pod-123"),
 		},
 		Spec: corev1.PodSpec{
-			RestartPolicy: corev1.RestartPolicyAlways,
+			HostNetwork: true,
 			Containers: []corev1.Container{
 				{
 					Name:  "main",
@@ -118,8 +118,47 @@ func TestTransformerPreservesUnsupportedCoreV1PodErrors(t *testing.T) {
 	if !errors.As(err, &unsupported) {
 		t.Fatalf("TransformPod error = %v, want UnsupportedSpecError", err)
 	}
-	if unsupported.Code != "UnsupportedRestartPolicy" {
-		t.Fatalf("unsupported code = %q, want UnsupportedRestartPolicy", unsupported.Code)
+	if unsupported.Code != "UnsupportedHostNetwork" {
+		t.Fatalf("unsupported code = %q, want UnsupportedHostNetwork", unsupported.Code)
+	}
+}
+
+func TestTransformerAcceptsDeploymentManagedPod(t *testing.T) {
+	t.Parallel()
+
+	controller := true
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "qwen-7d9f8-abcde",
+			UID:       types.UID("pod-serve"),
+			OwnerReferences: []metav1.OwnerReference{
+				{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "qwen-7d9f8", UID: "rs-uid", Controller: &controller},
+			},
+		},
+		Spec: corev1.PodSpec{
+			RestartPolicy: corev1.RestartPolicyAlways,
+			Containers: []corev1.Container{
+				{
+					Name:  "vllm",
+					Image: "vllm/vllm-openai:v0.32.0",
+					Ports: []corev1.ContainerPort{{Name: "http", ContainerPort: 8000, Protocol: corev1.ProtocolTCP}},
+					Resources: corev1.ResourceRequirements{
+						Limits: corev1.ResourceList{
+							corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("1"),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	binding, err := (Transformer{}).TransformPod(pod)
+	if err != nil {
+		t.Fatalf("TransformPod() error = %v", err)
+	}
+	if binding.Request.RestartPolicy != string(core.RestartPolicyAlways) {
+		t.Fatalf("restart policy = %q, want Always", binding.Request.RestartPolicy)
 	}
 }
 

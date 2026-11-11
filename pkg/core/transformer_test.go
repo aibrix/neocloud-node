@@ -130,6 +130,40 @@ func TestTransformerRejectsUnsupportedSpecs(t *testing.T) {
 	}
 }
 
+func TestTransformerAcceptsRestartPolicies(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		policy RestartPolicy
+		want   RestartPolicy
+	}{
+		{name: "default", want: RestartPolicyNever},
+		{name: "never", policy: RestartPolicyNever, want: RestartPolicyNever},
+		{name: "on failure", policy: RestartPolicyOnFailure, want: RestartPolicyOnFailure},
+		{name: "always", policy: RestartPolicyAlways, want: RestartPolicyAlways},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			request, err := (DefaultTransformer{}).Transform(PodSpec{
+				RestartPolicy: tt.policy,
+				Containers: []ContainerSpec{
+					{Name: "main", Image: "example.com/serve:latest", Resources: ResourceSpec{GPUCount: 1}},
+				},
+			})
+			if err != nil {
+				t.Fatalf("Transform() error = %v", err)
+			}
+			if request.RestartPolicy != string(tt.want) {
+				t.Fatalf("restart policy = %q, want %q", request.RestartPolicy, tt.want)
+			}
+		})
+	}
+}
+
 func TestTransformerMapsSupportedCompatibilityFields(t *testing.T) {
 	t.Parallel()
 
@@ -223,17 +257,6 @@ func TestTransformerRejectsPhase1UnsupportedSpecs(t *testing.T) {
 		code  string
 		field string
 	}{
-		{
-			name: "restart policy always",
-			pod: PodSpec{
-				RestartPolicy: RestartPolicyAlways,
-				Containers: []ContainerSpec{
-					{Name: "main", Image: "example.com/train:latest", Resources: ResourceSpec{GPUCount: 1}},
-				},
-			},
-			code:  "UnsupportedRestartPolicy",
-			field: "spec.restartPolicy",
-		},
 		{
 			name: "init containers",
 			pod: PodSpec{
