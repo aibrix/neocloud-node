@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/aibrix/neocloud-node/pkg/core"
 )
@@ -426,6 +427,100 @@ func TestClientGetMapsPublicEndpoints(t *testing.T) {
 			}
 			if !reflect.DeepEqual(remote.Endpoints, tt.want) {
 				t.Fatalf("endpoints = %#v, want %#v", remote.Endpoints, tt.want)
+			}
+		})
+	}
+}
+
+func TestClientGetReadsContainerUptimeFromV2(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		v2Status int
+		v2Body   string
+		want     time.Duration
+	}{
+		{name: "running", v2Status: http.StatusOK, v2Body: `{"status":"RUNNING","runtime":{"uptime":90}}`, want: 90 * time.Second},
+		{name: "starting", v2Status: http.StatusOK, v2Body: `{"status":"STARTING","runtime":null}`},
+		{name: "no runtime", v2Status: http.StatusOK, v2Body: `{"status":"RUNNING","runtime":null}`},
+		{name: "zero uptime", v2Status: http.StatusOK, v2Body: `{"status":"RUNNING","runtime":{"uptime":0}}`},
+		{name: "v2 error is ignored", v2Status: http.StatusBadGateway, v2Body: `{"title":"Bad Gateway"}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/v1/pods/runpod-1":
+					_, _ = w.Write([]byte(`{"id":"runpod-1","desiredStatus":"RUNNING"}`))
+				case "/v2/pods/runpod-1":
+					if r.Header.Get("Authorization") != "Bearer test-token" {
+						t.Errorf("v2 authorization header = %q", r.Header.Get("Authorization"))
+					}
+					w.WriteHeader(tt.v2Status)
+					_, _ = w.Write([]byte(tt.v2Body))
+				default:
+					t.Errorf("unexpected path %s", r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+
+			client := NewClient(Config{BaseURL: server.URL + "/v1", V2BaseURL: server.URL + "/v2", APIKey: "test-token"})
+			remote, err := client.Get(context.Background(), "runpod-1")
+			if err != nil {
+				t.Fatalf("Get returned error: %v", err)
+			}
+			if remote.ContainerUptime != tt.want {
+				t.Fatalf("container uptime = %s, want %s", remote.ContainerUptime, tt.want)
+			}
+		})
+	}
+}
+
+func TestClientV2BaseURLDefaults(t *testing.T) {
+	t.Parallel()
+
+	if got := NewClient(Config{}).v2BaseURL; got != defaultV2BaseURL {
+		t.Fatalf("default v2 base URL = %q, want %q", got, defaultV2BaseURL)
+	}
+	if got := NewClient(Config{BaseURL: "http://127.0.0.1:1/v1"}).v2BaseURL; got != "" {
+		t.Fatalf("v2 base URL with a custom v1 URL = %q, want disabled", got)
+	}
+}
+
+func TestClientStop(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		status  int
+		wantErr bool
+	}{
+		{name: "stopped", status: http.StatusOK},
+		{name: "already gone", status: http.StatusNotFound},
+		{name: "server error", status: http.StatusBadGateway, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/pods/runpod-1/stop" {
+					t.Errorf("request = %s %s, want POST /pods/runpod-1/stop", r.Method, r.URL.Path)
+				}
+				w.WriteHeader(tt.status)
+				_, _ = w.Write([]byte(`{"id":"runpod-1","desiredStatus":"EXITED"}`))
+			}))
+			defer server.Close()
+
+			err := NewClient(Config{BaseURL: server.URL, APIKey: "test-token"}).Stop(context.Background(), "runpod-1")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Stop() error = %v, wantErr %t", err, tt.wantErr)
 			}
 		})
 	}

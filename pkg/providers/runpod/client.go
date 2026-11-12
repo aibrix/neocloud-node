@@ -18,14 +18,24 @@ import (
 
 const providerName = "runpod"
 
+const (
+	defaultBaseURL   = "https://rest.runpod.io/v1"
+	defaultV2BaseURL = "https://api.runpod.io/v2"
+)
+
 type Config struct {
-	BaseURL    string
+	BaseURL string
+	// V2BaseURL is used to read container runtime information that the v1 API
+	// does not report. It defaults to the public v2 API when BaseURL is the
+	// default, and is disabled otherwise unless set explicitly.
+	V2BaseURL  string
 	APIKey     string
 	HTTPClient *http.Client
 }
 
 type Client struct {
 	baseURL    string
+	v2BaseURL  string
 	apiKey     string
 	httpClient *http.Client
 }
@@ -33,7 +43,11 @@ type Client struct {
 func NewClient(config Config) *Client {
 	baseURL := strings.TrimRight(config.BaseURL, "/")
 	if baseURL == "" {
-		baseURL = "https://rest.runpod.io/v1"
+		baseURL = defaultBaseURL
+	}
+	v2BaseURL := strings.TrimRight(config.V2BaseURL, "/")
+	if v2BaseURL == "" && baseURL == defaultBaseURL {
+		v2BaseURL = defaultV2BaseURL
 	}
 
 	httpClient := config.HTTPClient
@@ -43,6 +57,7 @@ func NewClient(config Config) *Client {
 
 	return &Client{
 		baseURL:    baseURL,
+		v2BaseURL:  v2BaseURL,
 		apiKey:     config.APIKey,
 		httpClient: httpClient,
 	}
@@ -109,7 +124,57 @@ func (c *Client) Get(ctx context.Context, remoteID string) (core.RemoteResource,
 	if err := c.doJSON(httpReq, http.StatusOK, &pod); err != nil {
 		return core.RemoteResource{}, err
 	}
-	return remoteFromPod(pod, "", core.WorkloadRequest{}), nil
+	remote := remoteFromPod(pod, "", core.WorkloadRequest{})
+	if remote.Phase == core.RemoteRunning {
+		remote.ContainerUptime = c.containerUptime(ctx, remoteID)
+	}
+	return remote, nil
+}
+
+// containerUptime reads the container uptime from the v2 API. RunPod
+// restarts an exited container in place and keeps reporting RUNNING, so a
+// lower uptime is the only signal that the container exited. RunPod refreshes
+// the uptime about every 30 seconds and reports the same value in between.
+// Failures are ignored: the uptime is optional and is read again on the next
+// sync.
+func (c *Client) containerUptime(ctx context.Context, remoteID string) time.Duration {
+	if c.v2BaseURL == "" {
+		return 0
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, c.v2BaseURL+"/pods/"+remoteID, nil)
+	if err != nil {
+		return 0
+	}
+	c.setHeaders(httpReq)
+	var pod struct {
+		Status  string `json:"status"`
+		Runtime *struct {
+			Uptime int64 `json:"uptime"`
+		} `json:"runtime"`
+	}
+	if err := c.doJSON(httpReq, http.StatusOK, &pod); err != nil {
+		return 0
+	}
+	if pod.Status != "RUNNING" || pod.Runtime == nil || pod.Runtime.Uptime <= 0 {
+		return 0
+	}
+	return time.Duration(pod.Runtime.Uptime) * time.Second
+}
+
+// Stop stops a pod, which releases its GPU and keeps its disk.
+func (c *Client) Stop(ctx context.Context, remoteID string) error {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/pods/"+remoteID+"/stop", nil)
+	if err != nil {
+		return err
+	}
+	c.setHeaders(httpReq)
+	if err := c.doJSON(httpReq, http.StatusOK, nil); err != nil {
+		if errors.Is(err, core.ErrRemoteNotFound) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 func (c *Client) List(ctx context.Context, filter PodFilter) ([]core.RemoteResource, error) {

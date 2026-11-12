@@ -572,6 +572,70 @@ func TestRestartPolicyAlwaysPodFailsWhenRemoteExits(t *testing.T) {
 	}
 }
 
+func TestContainerRestartIsReportedOnPod(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		policy     corev1.RestartPolicy
+		wantPhase  corev1.PodPhase
+		wantStops  int
+		wantReason string
+	}{
+		{name: "always restarts in place", policy: corev1.RestartPolicyAlways, wantPhase: corev1.PodRunning},
+		{name: "never fails", policy: corev1.RestartPolicyNever, wantPhase: corev1.PodFailed, wantStops: 1, wantReason: core.ReasonContainerExited},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx := context.Background()
+			adapter := core.NewFakeProvider("runpod")
+			recorder := record.NewFakeRecorder(20)
+			provider := newTestProviderWithConfig(t, Config{Adapter: adapter, EventRecorder: recorder})
+			pod := gpuPod("restart", "uid-restart")
+			pod.Spec.RestartPolicy = tt.policy
+			if err := provider.CreatePod(ctx, pod); err != nil {
+				t.Fatalf("CreatePod() error = %v", err)
+			}
+			binding, err := provider.lifecycle.SyncStatus(ctx, "default", "uid-restart")
+			if err != nil {
+				t.Fatalf("SyncStatus() setup error = %v", err)
+			}
+			if err := adapter.SetContainerUptime(binding.RemoteID, time.Minute); err != nil {
+				t.Fatalf("SetContainerUptime() error = %v", err)
+			}
+			if _, err := provider.GetPodStatus(ctx, "default", "restart"); err != nil {
+				t.Fatalf("GetPodStatus() baseline error = %v", err)
+			}
+			if err := adapter.SetContainerUptime(binding.RemoteID, 5*time.Second); err != nil {
+				t.Fatalf("SetContainerUptime() error = %v", err)
+			}
+
+			status, err := provider.GetPodStatus(ctx, "default", "restart")
+			if err != nil {
+				t.Fatalf("GetPodStatus() error = %v", err)
+			}
+			if status.Phase != tt.wantPhase {
+				t.Fatalf("phase = %s, want %s", status.Phase, tt.wantPhase)
+			}
+			if got := status.ContainerStatuses[0].RestartCount; got != 1 {
+				t.Fatalf("restart count = %d, want 1", got)
+			}
+			if tt.wantReason != "" {
+				if got := status.ContainerStatuses[0].State.Terminated.Reason; got != tt.wantReason {
+					t.Fatalf("terminated reason = %q, want %q", got, tt.wantReason)
+				}
+			}
+			if got := adapter.StopCount(); got != tt.wantStops {
+				t.Fatalf("stop count = %d, want %d", got, tt.wantStops)
+			}
+			assertEventContains(t, recorder, corev1.EventTypeWarning, "ContainerRestarted")
+		})
+	}
+}
+
 func TestNewProviderFuncBuildsNodeutilProvider(t *testing.T) {
 	ctx := context.Background()
 	factory := NewProviderFunc(Config{

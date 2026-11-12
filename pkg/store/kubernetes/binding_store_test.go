@@ -126,6 +126,8 @@ func TestUpdatePersistsRemoteStatus(t *testing.T) {
 			Message: "runpod had no capacity in US-TX-3",
 		},
 	}
+	binding.ContainerUptime = 90 * time.Second
+	binding.RestartCount = 2
 	binding.Endpoints = []core.Endpoint{
 		{ContainerPort: 8000, Protocol: "TCP", Host: "203.0.113.10", Port: 40123},
 	}
@@ -152,6 +154,9 @@ func TestUpdatePersistsRemoteStatus(t *testing.T) {
 	condition := core.FindCondition(got.Conditions, core.ConditionCapacity)
 	if condition == nil || condition.Status != core.ConditionTrue {
 		t.Fatalf("conditions = %#v, want capacity condition", got.Conditions)
+	}
+	if got.ContainerUptime != binding.ContainerUptime || got.RestartCount != 2 {
+		t.Fatalf("container restart state = %s/%d, want %s/2", got.ContainerUptime, got.RestartCount, binding.ContainerUptime)
 	}
 	if !reflect.DeepEqual(got.Endpoints, binding.Endpoints) {
 		t.Fatalf("endpoints = %#v, want %#v", got.Endpoints, binding.Endpoints)

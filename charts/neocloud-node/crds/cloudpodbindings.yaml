@@ -123,6 +123,12 @@ spec:
                       lastTransitionTime:
                         type: string
                         format: date-time
+                containerUptimeSeconds:
+                  description: Container uptime the provider last reported, in seconds.
+                  type: integer
+                restartCount:
+                  description: Container restarts performed in place by the provider.
+                  type: integer
                 endpoints:
                   description: Public addresses of published container ports.
                   type: array

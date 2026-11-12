@@ -49,10 +49,29 @@ Unsupported fields must fail with a stable `UnsupportedSpecError` code and field
 
 ## Restart Semantics
 
-NeoCloud Node never restarts a remote container in place, whatever the
-`restartPolicy`. When the remote workload exits or fails, the Pod is reported
-as `Failed` instead of entering `CrashLoopBackOff`, and its restart count stays
-at zero.
+The controller never recreates a remote workload in place. What happens when
+the container exits depends on the provider and on `restartPolicy`.
+
+RunPod restarts an exited container in place and keeps reporting the Pod as
+running; it does not report the exit code. The controller notices the restart
+from the container uptime, and:
+
+- with `Always`, keeps the Pod `Running` and increments the container's
+  `restartCount`, as kubelet would, and records a `ContainerRestarted` event;
+- with `Never` or `OnFailure`, stops the remote workload so that the command
+  does not run again, and reports the Pod as `Failed` with reason
+  `ContainerExited`. Because the exit code is unknown, a Pod whose command
+  succeeded is reported as `Failed` too.
+
+RunPod refreshes the uptime about every 30 seconds, so the restart is noticed
+up to that long plus one status sync interval after it happens. The command may
+run again during that time before it is stopped, so batch commands should
+tolerate a partial second run. When a provider cannot report restarts,
+an exited container is reported only if the provider reports the workload as
+stopped or failed.
+
+When the remote workload itself stops or fails, for example RunPod `EXITED`,
+the Pod is reported as `Failed`:
 
 - A Deployment's ReplicaSet treats the `Failed` Pod as inactive and creates a
   replacement Pod. The replacement gets a new remote workload, so it pulls the
@@ -63,7 +82,7 @@ at zero.
   workload is deleted when its Pod is deleted.
 
 ReplicaSets do not delete `Failed` Pods, and the remote workload of a `Failed`
-Pod is deleted only together with the Pod. An exited RunPod Pod no longer bills
+Pod is deleted only together with the Pod. A stopped RunPod Pod no longer bills
 GPU time but keeps its disk. Delete `Failed` Pods to release that storage until
 terminal cleanup is implemented
 ([#52](https://github.com/aibrix/neocloud-node/issues/52)).
