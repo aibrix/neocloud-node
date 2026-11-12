@@ -2,7 +2,7 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: qwen-sglang
-  namespace: aibrix-system
+  namespace: default
   annotations:
     cloud.aibrix.ai/provider: runpod
     cloud.aibrix.ai/gpu-type: NVIDIA A40

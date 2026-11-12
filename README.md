@@ -38,7 +38,7 @@ kubectl -n aibrix-system create secret generic neocloud-runpod \
 
 helm install neocloud ./charts/neocloud-node \
   --namespace aibrix-system --wait --timeout 3m \
-  --set-string image.tag=0.1.0 \
+  --set-string image.tag=1b59e5db2e21cfa9bcf7357dbf3ab4f4900b0e8a \
   --set provider=runpod \
   --set credentials.runpod.secretName=neocloud-runpod \
   --set-string env.GPU_BURST_ADVERTISE_GPU_COUNT=1
@@ -56,26 +56,26 @@ Run Qwen2.5-1.5B-Instruct with vLLM on one RunPod A40 in the `default`
 namespace. Applying the sample creates a paid GPU instance:
 
 ```bash
-kubectl apply -f config/samples/runpod-pod.yaml
+kubectl apply -f examples/inference/qwen-vllm.yaml
 kubectl get pod qwen-vllm -w
 ```
 
-Once the Pod is `Running`, stop the watch with Ctrl-C. Model loading can take
-several more minutes; check the vLLM startup logs in the RunPod console.
-`Running` confirms the instance has started, not that the model is ready.
-View its binding with:
+Once the Pod is `Ready` (`1/1`), stop the watch with Ctrl-C. The readiness
+probe checks the model server; image pull and model loading can take several
+minutes. View its binding with:
 
 ```bash
 kubectl get cloudpodbindings
 ```
 
-On DigitalOcean Kubernetes, the Pod may need an additional platform toleration;
-see the [chart guide](charts/neocloud-node/README.md#smoke-validation-and-doks).
+See the [inference guide](examples/inference/README.md) to find the public
+endpoint and send a request. The example exposes an unauthenticated API for a
+short trial. Remove its DOKS-specific toleration on other clusters.
 
 ### Clean up
 
 ```bash
-kubectl delete -f config/samples/runpod-pod.yaml --wait=true --timeout=120s
+kubectl delete -f examples/inference/qwen-vllm.yaml --wait=true --timeout=120s
 kubectl get cloudpodbindings \
   -l cloud.aibrix.ai/pod-name=qwen-vllm
 ```
