@@ -1,7 +1,7 @@
 # Development
 
-This guide covers local checks, container images, and the paid end-to-end
-smoke tests. For contribution rules, see [CONTRIBUTING.md](../CONTRIBUTING.md).
+This guide covers local checks, the fake provider, container images, and paid
+end-to-end smoke tests. For contribution rules, see [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ## Prerequisites
 
@@ -25,6 +25,45 @@ CI runs both. Other useful targets:
 | `make docker-build` | Build the controller image. |
 | `make manifests` | Regenerate `deploy/neocloud-node.yaml` from `config/`. Commit the result whenever a Kustomize base changes. |
 | `make help` | List all targets. |
+
+## Fake Provider
+
+Use the fake provider to develop and check the Kubernetes reconciliation flow
+without credentials or cloud charges. It simulates the remote lifecycle; it
+does not run containers or serve inference requests. Requires Helm 3,
+`kubectl`, and a cluster with permission to install CRDs and cluster-scoped RBAC.
+
+From the repository root, install a separate development release and virtual
+node so it does not change an existing real-provider installation:
+
+```bash
+helm upgrade --install neocloud-dev ./charts/neocloud-node \
+  --namespace neocloud-dev --create-namespace --wait --timeout 3m \
+  --set provider=fake --set nodeName=neocloud-node-fake
+kubectl get node neocloud-node-fake
+kubectl -n neocloud-dev apply -f config/samples/fake-pod.yaml
+kubectl -n neocloud-dev get pod neocloud-node-fake-smoke
+kubectl -n neocloud-dev get cloudpodbindings
+```
+
+The sample selects nodes labeled `cloud.aibrix.ai/provider=fake` and tolerates
+that provider's taint. On DigitalOcean Kubernetes it may also need a temporary
+platform toleration; see the
+[chart guide](../charts/neocloud-node/README.md#smoke-validation-and-doks).
+
+To exercise changes beyond the chart's default release image, add
+`--set image.tag=<published-main-commit-sha>` to the install command; see
+[Container Images](#container-images).
+
+Clean up the sample before removing the development release:
+
+```bash
+kubectl -n neocloud-dev delete -f config/samples/fake-pod.yaml --wait=true
+helm uninstall neocloud-dev -n neocloud-dev
+kubectl delete node neocloud-node-fake
+```
+
+Keep the shared CRD if any other release still uses it.
 
 ## Container Images
 

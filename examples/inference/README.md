@@ -1,7 +1,9 @@
 # Run Qwen with vLLM or SGLang on RunPod
 
 These examples run `Qwen/Qwen2.5-1.5B-Instruct` on one NVIDIA A40 using an
-existing neocloud Helm installation. They use explicit engine image versions:
+existing neocloud Helm installation. Workload Pods run in the `default`
+namespace; the controller and its credential Secret remain in `aibrix-system`.
+They use explicit engine image versions:
 
 | Example | Image | API port |
 | --- | --- | --- |
@@ -45,7 +47,7 @@ POD=qwen-vllm
 # POD=qwen-sglang
 
 kubectl apply -f "$SAMPLE"
-kubectl -n aibrix-system get pod "$POD" -w
+kubectl get pod "$POD" -w
 ```
 
 Stop the watch with Ctrl-C. `Running` means RunPod started the instance. Image
@@ -55,7 +57,7 @@ published port, so the Pod becomes `Ready` (`1/1`) only when the model server
 answers.
 
 ```bash
-kubectl -n aibrix-system wait --for=condition=Ready "pod/$POD" --timeout=15m
+kubectl wait --for=condition=Ready "pod/$POD" --timeout=15m
 ```
 
 Once RunPod assigns a public address, the controller sets the Pod IP and
@@ -64,18 +66,18 @@ RunPod publishes container port **8000** on a different public port, so read
 the mapped port instead of assuming 8000:
 
 ```bash
-kubectl -n aibrix-system get pod "$POD" \
+kubectl get pod "$POD" \
   -o jsonpath='{.metadata.annotations.cloud\.aibrix\.ai/endpoints}{"\n"}'
 # [{"containerPort":8000,"protocol":"TCP","host":"<public-ip>","port":<mapped-port>}]
 
-BASE_URL=http://<public-ip>:<mapped-port>
+BASE_URL="http://<public-ip>:<mapped-port>"
 curl --fail --max-time 15 "$BASE_URL/v1/models"
 ```
 
 The same list is in the binding status. Both samples request Secure Cloud.
 
 ```bash
-kubectl -n aibrix-system get cloudpodbindings \
+kubectl get cloudpodbindings \
   -l "cloud.aibrix.ai/pod-name=$POD" -o jsonpath='{.items[0].status.endpoints}'
 ```
 
@@ -109,7 +111,7 @@ Pod never becomes `Ready`.
 
 ```bash
 kubectl delete -f "$SAMPLE" --wait=true --timeout=120s
-kubectl -n aibrix-system get cloudpodbindings \
+kubectl get cloudpodbindings \
   -l "cloud.aibrix.ai/pod-name=$POD"
 ```
 
