@@ -9,22 +9,22 @@
   "gpu_counts": [1, 2, 4, 8],
   "max_active_gpus_per_provider": 2,
   "provider_budgets_usd": {
-    "runpod": 130.0
+    "vast": 130.0
   },
   "total_budget_usd": 130.0,
   "canary_cohorts": [
     {
-      "name": "runpod-stability",
+      "name": "vast-stability",
       "max_pairs": 32,
       "selection_seed": 20260823,
       "replacement_delay_seconds": 60,
       "min_remaining_seconds": 300,
       "cells": [
         {
-          "provider": "runpod",
-          "sku": "NVIDIA A40",
-          "gpu_type": "A40",
-          "resource_class": "secure",
+          "provider": "vast",
+          "sku": "RTX 4090",
+          "gpu_type": "RTX 4090",
+          "resource_class": "verified",
           "market": "on-demand",
           "gpu_count": 1,
           "image": "python:3.12-slim",

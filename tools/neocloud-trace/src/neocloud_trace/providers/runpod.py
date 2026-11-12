@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import dataclasses
 import json
 import os
 import threading
@@ -26,7 +27,7 @@ from .common import (
 )
 
 
-RUNPOD_REST_URL = "https://rest.runpod.io/v1"
+RUNPOD_REST_URL = "https://api.runpod.io/v2"
 RUNPOD_GRAPHQL_URL = "https://api.runpod.io/graphql"
 
 
@@ -59,6 +60,8 @@ class RunPodResearchClient:
     ) -> None:
         self.api_key = api_key if api_key is not None else os.environ.get("RUNPOD_API_KEY", "")
         self.rest_url = (rest_url or os.environ.get("RUNPOD_BASE_URL") or RUNPOD_REST_URL).rstrip("/")
+        if self.rest_url.endswith("/v1"):
+            raise ValueError("RunPod REST v2 base URL is required; remove the old /v1 override")
         self.graphql_url = (graphql_url or os.environ.get("RUNPOD_GRAPHQL_URL") or RUNPOD_GRAPHQL_URL).rstrip("/")
         self.transport = transport
         self.timeout = timeout
@@ -147,7 +150,6 @@ class RunPodResearchClient:
             query = urllib.parse.urlencode(
                 {
                     "bucketSize": bucket_size,
-                    "grouping": "podId",
                     "podId": resource_id,
                     "startTime": start_time,
                 }
@@ -162,21 +164,21 @@ class RunPodResearchClient:
                     "RunPod billing history request failed: "
                     f"status={response.status}"
                 )
-            payload = response.payload or []
-            if isinstance(payload, dict):
-                payload = payload.get("data") or []
+            payload = response.payload or {}
+            if not isinstance(payload, dict) or not isinstance(payload.get("records"), list):
+                raise RuntimeError("RunPod billing history response has no records list")
+            payload = payload["records"]
             for item in payload:
                 pod_id = item.get("podId") or resource_id
-                period_start = str(item.get("time") or "")
-                amount = _float_or_none(item.get("amount"))
+                period_start = str(item.get("startTime") or "")
+                amount = _float_or_none(item.get("totalAmount"))
                 if not period_start or amount is None:
                     continue
                 identity = json.dumps(
                     {
                         "pod_id": pod_id,
-                        "time": period_start,
-                        "amount": amount,
-                        "time_billed_ms": item.get("timeBilledMs"),
+                        "start_time": period_start,
+                        "end_time": item.get("endTime"),
                     },
                     sort_keys=True,
                 )
@@ -186,19 +188,13 @@ class RunPodResearchClient:
                         provider_resource_id=str(pod_id) if pod_id else None,
                         period_start=period_start,
                         amount_usd=amount,
-                        billed_duration_ms=(
-                            int(item["timeBilledMs"])
-                            if item.get("timeBilledMs") is not None
-                            else None
-                        ),
+                        billed_duration_ms=None,
                         source="runpod_billing_api",
                         source_record_id=str(
                             uuid.uuid5(uuid.NAMESPACE_URL, identity)
                         ),
-                        gpu_type=item.get("gpuTypeId"),
-                        disk_space_billed_gb=_float_or_none(
-                            item.get("diskSpaceBilledGb")
-                        ),
+                        gpu_type=None,
+                        disk_space_billed_gb=None,
                         raw=item,
                         api_call=call,
                     )
@@ -208,6 +204,15 @@ class RunPodResearchClient:
     def create_replicas(self, cell: TrialCell, requests: Sequence[Any]) -> list[CreateResult]:
         if not requests:
             return []
+        if cell.market != "on-demand":
+            return [
+                CreateResult(
+                    False,
+                    failure_class=FailureClass.UNSUPPORTED_SPEC,
+                    message="RunPod REST v2 supports only on-demand Pods",
+                )
+                for _ in requests
+            ]
         barrier = threading.Barrier(len(requests))
         workers = min(self.max_workers, len(requests))
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
@@ -220,23 +225,16 @@ class RunPodResearchClient:
     def _create_one(self, cell: TrialCell, request: Any, barrier: threading.Barrier) -> CreateResult:
         body = {
             "name": request.name,
-            "computeType": "GPU",
-            "cloudType": cell.resource_class.upper(),
-            "imageName": cell.image or "python:3.12-slim",
-            "gpuCount": cell.gpu_count,
-            "gpuTypeIds": [cell.sku],
-            "gpuTypePriority": "availability",
-            "containerDiskInGb": 20,
-            "volumeInGb": 0,
-            "supportPublicIp": True,
+            "cloud": cell.resource_class.upper(),
+            "image": cell.image or "python:3.12-slim",
+            "gpu": {"id": cell.sku, "count": cell.gpu_count},
+            "disk": 20,
             "ports": ["8080/http"],
-            "interruptible": cell.market in ("spot", "interruptible"),
-            "dockerEntrypoint": ["/bin/sh", "-lc"],
-            "dockerStartCmd": [research_health_command()],
+            "entrypoint": ["/bin/sh", "-lc"],
+            "cmd": [research_health_command()],
         }
         if cell.datacenter:
             body["dataCenterIds"] = [cell.datacenter]
-            body["dataCenterPriority"] = "availability"
         try:
             barrier.wait(timeout=10)
         except threading.BrokenBarrierError:
@@ -269,20 +267,18 @@ class RunPodResearchClient:
                 raw=pod,
                 api_call=call,
             )
-        machine = pod.get("machine") or {}
         return CreateResult(
             True,
             provider_resource_id=str(pod_id),
-            price_usd_hr=_float_or_none(pod.get("costPerHr")),
-            location=machine.get("dataCenterId") or pod.get("dataCenterId"),
-            machine_id=pod.get("machineId"),
+            price_usd_hr=_float_or_none(pod.get("cost")),
+            location=pod.get("dataCenterId"),
             request_payload=body,
             raw=pod,
             api_call=call,
         )
 
     def observe(self, resource_id: str, cell: TrialCell) -> ResourceObservation:
-        url = self.rest_url + "/pods/" + urllib.parse.quote(resource_id, safe="") + "?includeMachine=true"
+        url = self.rest_url + "/pods/" + urllib.parse.quote(resource_id, safe="")
         response = self._request("GET", url)
         call = provider_api_call("get_pod", response)
         if response.status == 404:
@@ -290,12 +286,8 @@ class RunPodResearchClient:
         if not response.ok:
             return ResourceObservation(True, "api-error", False, raw=response.body, api_call=call)
         item = response.payload or {}
-        if isinstance(item, dict) and isinstance(item.get("data"), dict):
-            item = item["data"]
-        state = item.get("desiredStatus")
-        machine = item.get("machine") or {}
-        machine_id = item.get("machineId")
-        provider_ready = state == "RUNNING" and bool(machine_id)
+        state = item.get("status")
+        provider_ready = state == "RUNNING"
         heartbeat_ok = False
         heartbeat_latency = None
         heartbeat_version = None
@@ -305,17 +297,75 @@ class RunPodResearchClient:
                 heartbeat_ok, heartbeat_latency, heartbeat_version = self.heartbeat_probe(endpoint, 5)
         runtime = item.get("runtime") or {}
         return ResourceObservation(
-            exists=state not in ("EXITED", "TERMINATED", None),
+            exists=state != "TERMINATED",
             provider_state=state,
             provider_ready=provider_ready,
             application_ready=heartbeat_ok,
             application_latency_ms=heartbeat_latency,
             heartbeat_version=heartbeat_version,
-            location=machine.get("dataCenterId") or item.get("dataCenterId") or cell.datacenter,
-            machine_id=machine_id,
-            runtime_uptime_seconds=_float_or_none(runtime.get("uptimeInSeconds")),
-            price_usd_hr=_float_or_none(item.get("costPerHr")),
+            location=item.get("dataCenterId") or cell.datacenter,
+            machine_id=None,
+            runtime_uptime_seconds=_float_or_none(runtime.get("uptime")),
+            price_usd_hr=_float_or_none(item.get("cost")),
             raw=item,
+            api_call=call,
+        )
+
+    def lookup_replica(self, cell: TrialCell, name: str) -> CreateResult:
+        del cell
+        cursor = None
+        seen_cursors: set[str] = set()
+        matches: list[dict[str, Any]] = []
+        total_latency = 0
+        last_call = None
+        while True:
+            url = self.rest_url + "/pods"
+            if cursor:
+                url += "?cursor=" + urllib.parse.quote(cursor, safe="")
+            response = self._request("GET", url)
+            total_latency += response.latency_ms
+            last_call = provider_api_call("list_pods_for_create", response)
+            if not response.ok:
+                return CreateResult(
+                    False,
+                    failure_class=last_call.failure_class or FailureClass.UNKNOWN,
+                    message="RunPod list request failed",
+                    api_call=last_call,
+                )
+            page = response.payload or {}
+            if not isinstance(page, dict) or not isinstance(page.get("pods"), list):
+                return CreateResult(False, failure_class=FailureClass.UNKNOWN,
+                                    message="RunPod list response has no pods list")
+            matches.extend(
+                pod for pod in page["pods"]
+                if pod.get("name") == name and pod.get("status") != "TERMINATED"
+            )
+            pagination = page.get("pagination") or {}
+            if not pagination.get("hasNextPage"):
+                break
+            cursor = pagination.get("nextCursor")
+            if not cursor or cursor in seen_cursors:
+                return CreateResult(False, failure_class=FailureClass.UNKNOWN,
+                                    message="RunPod list pagination cursor is missing or repeated")
+            seen_cursors.add(cursor)
+        # List responses include all account Pods and their env; persist only match metadata.
+        call = dataclasses.replace(last_call, latency_ms=total_latency,
+                                   raw={"requested_name": name, "match_count": len(matches)})
+        if len(matches) != 1:
+            return CreateResult(
+                False,
+                failure_class=(FailureClass.REMOTE_NOT_FOUND if not matches else FailureClass.UNKNOWN),
+                message=("no Pod matched the request name" if not matches else
+                         "multiple Pods matched the request name"),
+                api_call=call,
+            )
+        pod = matches[0]
+        return CreateResult(
+            True,
+            provider_resource_id=str(pod["id"]),
+            price_usd_hr=_float_or_none(pod.get("cost")),
+            location=pod.get("dataCenterId"),
+            raw={"id": pod["id"], "name": name},
             api_call=call,
         )
 
@@ -391,17 +441,12 @@ def _float_or_none(value: Any) -> float | None:
 
 
 def _runpod_health_endpoint(item: dict[str, Any]) -> str | None:
-    public_ip = item.get("publicIp")
-    mappings = item.get("portMappings") or {}
-    port = mappings.get("8080") or mappings.get(8080)
-    if public_ip and port:
-        return f"http://{public_ip}:{port}/healthz"
+    runtime = item.get("runtime") or {}
+    for port_item in runtime.get("ports") or []:
+        if port_item.get("private") == 8080 and port_item.get("ip") and port_item.get("public"):
+            return f"http://{port_item['ip']}:{port_item['public']}/healthz"
     pod_id = item.get("id")
     exposed_ports = item.get("ports") or []
     if pod_id and any(str(value).lower() == "8080/http" for value in exposed_ports):
         return f"https://{pod_id}-8080.proxy.runpod.net/healthz"
-    runtime = item.get("runtime") or {}
-    for port_item in runtime.get("ports") or []:
-        if str(port_item.get("privatePort")) == "8080" and port_item.get("ip") and port_item.get("publicPort"):
-            return f"http://{port_item['ip']}:{port_item['publicPort']}/healthz"
     return None

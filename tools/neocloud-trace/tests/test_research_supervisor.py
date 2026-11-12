@@ -73,6 +73,32 @@ def plan_document():
     }
 
 
+class RunPodV2PlanValidationTest(unittest.TestCase):
+    def test_capacity_plan_rejects_interruptible_runpod(self):
+        document = plan_document()
+        document["provider_budgets_usd"] = {"runpod": 1.0}
+        cell = document["capacity_cohorts"][0]["cells"][0]
+        cell.update(provider="runpod", sku="NVIDIA A40", gpu_type="A40",
+                    resource_class="secure", market="interruptible")
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "plan.json"
+            path.write_text(json.dumps(document), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "RunPod.*interruptible"):
+                load_plan(path)
+
+    def test_canary_plan_rejects_runpod_even_when_base_cell_is_on_demand(self):
+        document = stability_plan_document()
+        document["provider_budgets_usd"] = {"runpod": 1.0}
+        cell = document["canary_cohorts"][0]["cells"][0]
+        cell.update(provider="runpod", sku="NVIDIA A40", gpu_type="A40",
+                    resource_class="secure", market="on-demand")
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "plan.json"
+            path.write_text(json.dumps(document), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "RunPod.*canary"):
+                load_plan(path)
+
+
 def stability_plan_document():
     document = plan_document()
     document.update(
@@ -975,21 +1001,21 @@ class ResearchSupervisorTest(unittest.TestCase):
                 "protocol_version": "3.0-survival-cohort",
                 "duration_seconds": 0.5,
                 "max_active_gpus_per_provider": 2,
-                "provider_budgets_usd": {"runpod": 1.0},
+                "provider_budgets_usd": {"vast": 1.0},
                 "total_budget_usd": 1.0,
                 "canary_cohorts": [
                     {
-                        "name": "runpod-spot-survival",
+                        "name": "vast-spot-survival",
                         "max_pairs": 3,
                         "selection_seed": 17,
                         "replacement_delay_seconds": 0,
                         "min_remaining_seconds": 0.01,
                         "cells": [
                             {
-                                "provider": "runpod",
-                                "sku": "NVIDIA A40",
-                                "gpu_type": "A40",
-                                "resource_class": "secure",
+                                "provider": "vast",
+                                "sku": "RTX 4090",
+                                "gpu_type": "RTX 4090",
+                                "resource_class": "verified",
                                 "market": "on-demand",
                                 "duration_seconds": 60,
                                 "interval_seconds": 0.001,
@@ -1007,7 +1033,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         store = TraceStore(self.root / "trace.db")
         self.addCleanup(store.close)
         provider = FastFailingCanaryProvider()
-        supervisor = PilotSupervisor(store, providers={"runpod": provider})
+        supervisor = PilotSupervisor(store, providers={"vast": provider})
 
         result = supervisor.stability_run(
             plan,
@@ -1039,7 +1065,7 @@ class ResearchSupervisorTest(unittest.TestCase):
                 "protocol_version": "3.0-survival-cohort",
                 "duration_seconds": 0.2,
                 "max_active_gpus_per_provider": 2,
-                "provider_budgets_usd": {"runpod": 1.0},
+                "provider_budgets_usd": {"vast": 1.0},
                 "total_budget_usd": 1.0,
                 "canary_cohorts": [
                     {
@@ -1049,10 +1075,10 @@ class ResearchSupervisorTest(unittest.TestCase):
                         "min_remaining_seconds": 0.01,
                         "cells": [
                             {
-                                "provider": "runpod",
-                                "sku": "NVIDIA A40",
-                                "gpu_type": "A40",
-                                "resource_class": "secure",
+                                "provider": "vast",
+                                "sku": "RTX 4090",
+                                "gpu_type": "RTX 4090",
+                                "resource_class": "verified",
                                 "market": "on-demand",
                                 "duration_seconds": 60,
                                 "interval_seconds": 0.01,
@@ -1070,7 +1096,7 @@ class ResearchSupervisorTest(unittest.TestCase):
         self.addCleanup(store.close)
         provider = SpotLaunchFailProvider()
 
-        result = PilotSupervisor(store, {"runpod": provider}).stability_run(
+        result = PilotSupervisor(store, {"vast": provider}).stability_run(
             plan,
             experiment_id="pair-setup-test",
             execute=True,
@@ -1097,7 +1123,7 @@ class ResearchSupervisorTest(unittest.TestCase):
                 "protocol_version": "3.0-survival-cohort",
                 "duration_seconds": 0.2,
                 "max_active_gpus_per_provider": 2,
-                "provider_budgets_usd": {"runpod": 1.0},
+                "provider_budgets_usd": {"vast": 1.0},
                 "total_budget_usd": 1.0,
                 "canary_cohorts": [
                     {
@@ -1107,10 +1133,10 @@ class ResearchSupervisorTest(unittest.TestCase):
                         "min_remaining_seconds": 0.01,
                         "cells": [
                             {
-                                "provider": "runpod",
-                                "sku": "NVIDIA A40",
-                                "gpu_type": "A40",
-                                "resource_class": "secure",
+                                "provider": "vast",
+                                "sku": "RTX 4090",
+                                "gpu_type": "RTX 4090",
+                                "resource_class": "verified",
                                 "market": "on-demand",
                                 "duration_seconds": 60,
                                 "interval_seconds": 0.01,
@@ -1129,7 +1155,7 @@ class ResearchSupervisorTest(unittest.TestCase):
 
         result = PilotSupervisor(
             store,
-            {"runpod": CleanupFailProvider()},
+            {"vast": CleanupFailProvider()},
         ).stability_run(
             plan,
             experiment_id="cleanup-guard-test",
