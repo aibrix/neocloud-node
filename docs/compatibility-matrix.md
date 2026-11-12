@@ -43,6 +43,8 @@ Unsupported fields must fail with a stable `UnsupportedSpecError` code and field
 | `spec.initContainers` | `UnsupportedInitContainers` | `spec.initContainers` |
 | `spec.volumes` | `UnsupportedVolumes` | `spec.volumes` |
 | `spec.hostNetwork: true` | `UnsupportedHostNetwork` | `spec.hostNetwork` |
+| `spec.containers[0].livenessProbe` | `UnsupportedLivenessProbe` | `spec.containers[0].livenessProbe` |
+| `spec.containers[0].startupProbe` | `UnsupportedStartupProbe` | `spec.containers[0].startupProbe` |
 | `exec` or `grpc` readiness probe | `UnsupportedReadinessProbe` | `spec.containers[0].readinessProbe` |
 | readiness probe port that is not a declared container port | `UnsupportedReadinessProbe` | `spec.containers[0].readinessProbe.<handler>.port` |
 | `spec.containers[0].securityContext.privileged: true` | `UnsupportedPrivilegedContainer` | `spec.containers[0].securityContext.privileged` |
@@ -130,7 +132,14 @@ the controller to the provider's public address, so allow for that latency in
 
 `exec` and `grpc` readiness probes cannot run from outside the remote host and
 are rejected. The probe port must be declared in `ports`, otherwise the provider
-does not publish it. Liveness and startup probes are not run.
+does not publish it.
+
+Liveness and startup probes are rejected for all handlers rather than silently
+ignored. The controller marks the Pod `Failed` and emits a Warning event naming
+the unsupported field before creating any remote resource. This is controller
+validation, not admission validation: `kubectl apply` can succeed. Inspect
+`kubectl describe pod` and remove the field from the workload template. For a
+Deployment, update the template to stop repeated replacement of failed Pods.
 
 ## Environment Sources
 

@@ -71,6 +71,8 @@ type ContainerSpec struct {
 	Resources           ResourceSpec
 	SecurityContext     SecurityContext
 	ReadinessProbe      *ProbeSpec
+	HasLivenessProbe    bool
+	HasStartupProbe     bool
 }
 
 // Probe handlers that the controller can run against a published port.
@@ -173,6 +175,20 @@ func (DefaultTransformer) Transform(pod PodSpec) (WorkloadRequest, error) {
 			Code:    "UnsupportedEnvValueFrom",
 			Field:   fmt.Sprintf("spec.containers[0].env[%d].valueFrom", container.EnvValueFromIndices[0]),
 			Message: "only secretKeyRef, configMapKeyRef and metadata or spec fieldRef environment sources are supported",
+		}
+	}
+	if container.HasLivenessProbe {
+		return WorkloadRequest{}, &UnsupportedSpecError{
+			Code:    "UnsupportedLivenessProbe",
+			Field:   "spec.containers[0].livenessProbe",
+			Message: "liveness probes are not supported; remove this field",
+		}
+	}
+	if container.HasStartupProbe {
+		return WorkloadRequest{}, &UnsupportedSpecError{
+			Code:    "UnsupportedStartupProbe",
+			Field:   "spec.containers[0].startupProbe",
+			Message: "startup probes are not supported; remove this field",
 		}
 	}
 	if err := validateReadinessProbe(container); err != nil {

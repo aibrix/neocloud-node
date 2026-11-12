@@ -93,6 +93,8 @@ func containersFromCoreV1(pod *corev1.Pod, containers []corev1.Container) []core
 			Resources:           resourcesFromCoreV1(container.Resources),
 			SecurityContext:     securityContextFromCoreV1(container.SecurityContext),
 			ReadinessProbe:      probeFromCoreV1(container, container.ReadinessProbe),
+			HasLivenessProbe:    container.LivenessProbe != nil,
+			HasStartupProbe:     container.StartupProbe != nil,
 		})
 	}
 	return out
