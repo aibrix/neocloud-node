@@ -13,95 +13,75 @@ provider, and you keep managing it with `kubectl`, Deployments, and Jobs.
 > NeoCloud Node is experimental. Every Pod on the virtual node is a paid cloud
 > instance.
 
-```mermaid
-flowchart LR
-  subgraph cluster [Kubernetes cluster]
-    W[Pod, Deployment, or Job] -->|scheduled onto| N[Virtual node]
-    N --- C[neocloud-node controller]
-    C <--> B[(CloudPodBinding)]
-  end
-  C -->|create, poll, delete| P[Provider API]
-  P --> R[Remote GPU container or VM]
-```
+![AIBrix neocloud-node bridges Kubernetes and Virtual Kubelet to GPU clouds](docs/images/aibrix-neocloud-node-bridge.png)
+
+*Cloud providers in the illustration show the concept; see
+[Provider Compatibility](#provider-compatibility) for implemented adapters.*
 
 The controller records each remote instance in a `CloudPodBinding` keyed by
 the Pod UID, so a controller restart or a retried API call never creates a
 second paid instance.
 
-## Installation
+## Getting Started
 
-You need a Kubernetes cluster, Helm 3, and permission to create CRDs and
-cluster-scoped RBAC. For a real provider, you also need its API key.
-
-### 1. Install with the fake provider
-
-The chart is installed from a checkout of this repository. The default `fake`
-provider simulates the remote lifecycle, so this step needs no credentials and
-costs nothing.
+Requires a Kubernetes cluster, `kubectl`, Helm 3, and a RunPod API key with
+available GPU capacity and account balance.
 
 ```bash
 git clone https://github.com/aibrix/neocloud-node.git
 cd neocloud-node
-helm upgrade --install neocloud ./charts/neocloud-node \
-  --namespace aibrix-system --create-namespace --wait --timeout 3m
+
+export RUNPOD_API_KEY="<your-api-key>"
+kubectl create namespace aibrix-system --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n aibrix-system create secret generic neocloud-runpod \
+  --from-literal=apiKey="$RUNPOD_API_KEY"
+
+helm install neocloud ./charts/neocloud-node \
+  --namespace aibrix-system --wait --timeout 3m \
+  --set-string image.tag=0.1.0 \
+  --set provider=runpod \
+  --set credentials.runpod.secretName=neocloud-runpod \
+  --set-string env.GPU_BURST_ADVERTISE_GPU_COUNT=1
 kubectl get node neocloud-node
 ```
 
-> [!NOTE]
-> The chart defaults to the `0.1.0` release image. Public endpoints, readiness
-> probes, `restartPolicy: Always`, and env from Secrets and ConfigMaps were
-> added after that release. To use them, run an image built from `main` by
-> adding `--set image.tag=<full-commit-sha>` to every `helm upgrade`. See
-> [container images](docs/development.md#container-images).
+For provider configuration, upgrades, and removal, see the
+[chart guide](charts/neocloud-node/README.md).
 
-### 2. Run a test Pod
+## Usage
 
-A Pod runs on the virtual node when it selects the node, tolerates its
-`cloud.aibrix.ai/provider` taint, and requests `nvidia.com/gpu`, as in
-[`config/samples/fake-pod.yaml`](config/samples/fake-pod.yaml).
+### Run a GPU Pod
+
+Run Qwen2.5-1.5B-Instruct with vLLM on one RunPod A40 in the `default`
+namespace. Applying the sample creates a paid GPU instance:
 
 ```bash
-kubectl apply -f config/samples/fake-pod.yaml
-kubectl get pod neocloud-node-fake-smoke
+kubectl apply -f config/samples/runpod-pod.yaml
+kubectl get pod qwen-vllm -w
+```
+
+Once the Pod is `Running`, stop the watch with Ctrl-C. Model loading can take
+several more minutes; check the vLLM startup logs in the RunPod console.
+`Running` confirms the instance has started, not that the model is ready.
+View its binding with:
+
+```bash
 kubectl get cloudpodbindings
-kubectl delete -f config/samples/fake-pod.yaml
 ```
 
-On DigitalOcean Kubernetes, Pods may also need a temporary toleration; see the
-[chart guide](charts/neocloud-node/README.md#smoke-validation-and-doks).
+On DigitalOcean Kubernetes, the Pod may need an additional platform toleration;
+see the [chart guide](charts/neocloud-node/README.md#smoke-validation-and-doks).
 
-### 3. Connect a cloud provider
-
-Store the API key in a Secret, then point the release at it. API keys never go
-into Helm values. Delete all workloads on the node before you switch providers.
+### Clean up
 
 ```bash
-kubectl -n aibrix-system create secret generic neocloud-runpod \
-  --from-literal=apiKey="$RUNPOD_API_KEY"
-helm upgrade --install neocloud ./charts/neocloud-node -n aibrix-system --wait \
-  --set provider=runpod --set credentials.runpod.secretName=neocloud-runpod
+kubectl delete -f config/samples/runpod-pod.yaml --wait=true --timeout=120s
+kubectl get cloudpodbindings \
+  -l cloud.aibrix.ai/pod-name=qwen-vllm
 ```
 
-| Provider | `provider` | Secret reference | Also required |
-| --- | --- | --- | --- |
-| RunPod | `runpod` | `credentials.runpod.secretName` | Nothing |
-| Vast.ai | `vast` | `credentials.vast.secretName` | Nothing |
-| Lambda Cloud | `lambda` | `credentials.lambda.secretName` | A runner callback URL reachable from the VM, and a region, instance type, and SSH key names. See the [Lambda adapter guide](docs/lambda-adapter.md). |
-
-Pods now tolerate `cloud.aibrix.ai/provider=<provider>` instead of `fake`, and
-each one starts a billed instance. Delete Pods when you are done and confirm in
-the provider console that the instance is gone.
-
-### 4. Serve a model
-
-[Run Qwen with vLLM or SGLang](examples/inference/README.md) on one RunPod A40,
-including the public endpoint, a test request, and cleanup.
-
-### Upgrade and uninstall
-
-Helm does not upgrade CRDs, and remote instances must be deleted while the
-controller is still running. Follow the
-[chart guide](charts/neocloud-node/README.md#upgrades-and-removal).
+Confirm the binding and RunPod instance are deleted before stopping the
+controller. Keep the Helm release for subsequent workloads.
 
 ## Provider Compatibility
 
@@ -160,22 +140,10 @@ field.
 | Topic | Document |
 | --- | --- |
 | Helm values, upgrades, migration | [Chart guide](charts/neocloud-node/README.md) |
+| Provider configuration and credentials | [Provider guide](docs/providers.md) |
 | Supported Pod fields and their semantics | [Pod compatibility matrix](docs/compatibility-matrix.md) |
 | Serving vLLM and SGLang | [Inference examples](examples/inference/README.md) |
 | Provider adapters | [RunPod](docs/runpod-adapter.md), [Lambda Cloud](docs/lambda-adapter.md), [VM runner](docs/vm-runner.md) |
-| Local checks, images, paid smoke tests | [Development guide](docs/development.md) |
-
-## Development
-
-Requires Go 1.26.11 or newer and Kustomize 5.4 or newer.
-
-```bash
-make verify
-make test-race
-```
-
-See the [development guide](docs/development.md) for container images and the
-gated smoke tests that create real cloud resources.
 
 ## Contributing
 
