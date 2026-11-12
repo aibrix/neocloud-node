@@ -1,10 +1,7 @@
 name: Provider integration request
-description: Propose or help implement a NeoCloud provider adapter
+description: Suggest a provider to support
 title: "[Provider]: "
-labels:
-  - provider
-  - enhancement
-  - triage
+labels: [provider, enhancement, triage]
 body:
   - type: input
     id: provider
@@ -17,55 +14,15 @@ body:
     attributes:
       label: Official API documentation
       placeholder: https://...
-    validations:
-      required: true
-  - type: input
-    id: kubernetes_version
-    attributes:
-      label: Kubernetes version
-      description: Target or tested Kubernetes version, when the request depends on one.
-      placeholder: v1.31.4 or Not applicable
-  - type: input
-    id: manifest_version
-    attributes:
-      label: Manifest version
-      description: NeoCloud Node release or install manifest version this request targets; use main for a new integration.
-      placeholder: v0.1.0, main, or 0123456789abcdef
   - type: textarea
-    id: expected
+    id: use_case
     attributes:
-      label: Expected Kubernetes and provider behavior
-      description: Describe how Pod creation, status, completion, failure, deletion, and cleanup should map to this provider.
+      label: Use case
+      description: What workloads would you run on this provider?
     validations:
       required: true
   - type: textarea
-    id: compute
+    id: context
     attributes:
-      label: Compute model
-      description: Describe VM, container, serverless, cluster, GPU, region, storage, and network primitives.
-    validations:
-      required: true
-  - type: textarea
-    id: lifecycle
-    attributes:
-      label: Lifecycle API coverage
-      description: Describe create, get, list/search, delete, idempotency, interruption, and terminal-state APIs.
-    validations:
-      required: true
-  - type: textarea
-    id: supply
-    attributes:
-      label: Catalog and supply signals
-      description: Describe pricing, availability, quota, capacity, reservation, and spot APIs.
-  - type: textarea
-    id: validation
-    attributes:
-      label: Validation resources
-      description: State whether test credentials or sponsored low-cost capacity can be provided privately.
-  - type: checkboxes
-    id: contribution
-    attributes:
-      label: Contribution
-      options:
-        - label: I can help test this provider.
-        - label: I can help implement or review the adapter.
+      label: Additional context
+      description: Optional API capabilities or limitations, and whether you can help implement or test the adapter. Do not share credentials.
