@@ -940,6 +940,33 @@ class TraceStore:
     ) -> str:
         billing_id = str(uuid.uuid4())
         with self._lock, self.connection:
+            if (
+                record.provider == "runpod"
+                and record.source == "runpod_billing_api"
+                and record.provider_resource_id
+            ):
+                # v1 lacks an end time, so a changed source ID may mean either a
+                # duplicate bucket or a different bucket size. Preserve both safety
+                # and history by refusing an ambiguous resync.
+                conflict = self.connection.execute(
+                    """
+                    SELECT 1 FROM provider_billing_records
+                    WHERE run_id=? AND provider=? AND source=?
+                      AND provider_resource_id=? AND period_start=?
+                      AND source_record_id<>?
+                    LIMIT 1
+                    """,
+                    (
+                        run_id, record.provider, record.source,
+                        record.provider_resource_id, record.period_start,
+                        record.source_record_id,
+                    ),
+                ).fetchone()
+                if conflict:
+                    raise RuntimeError(
+                        "RunPod billing bucket conflict: existing record has a different "
+                        "identity; back up and migrate old billing data before resync"
+                    )
             self.connection.execute(
                 """
                 INSERT INTO provider_billing_records

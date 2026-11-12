@@ -56,10 +56,29 @@ creation. Optional endpoint overrides are:
 
 ```bash
 export LAMBDA_CLOUD_BASE_URL=https://cloud.lambda.ai/api/v1
-export RUNPOD_BASE_URL=https://rest.runpod.io/v1
+export RUNPOD_BASE_URL=https://api.runpod.io/v2
 export RUNPOD_GRAPHQL_URL=https://api.runpod.io/graphql
 export VAST_BASE_URL=https://console.vast.ai/api/v0
 ```
+
+RunPod active experiments use REST v2 for Pod lifecycle and billing. Its Pod API
+supports on-demand capacity only: RunPod capacity cells with `market: spot` or
+`market: interruptible`, and RunPod matched canary cohorts, fail plan validation.
+The GraphQL GPU catalog remains available for passive observations. The sample
+stability plan uses Vast.ai, which still supports interruptible instances.
+
+Before switching an existing trace installation from REST v1, run `status` on
+each trace database, then `cleanup --execute` or `recover --execute` for every
+unfinished RunPod run using the old client. Confirm the recorded resource IDs
+are gone in RunPod before using the v2 client. The v2 list API is paginated and
+does not filter by name server-side; response-loss recovery walks every page
+and matches the exact deterministic Pod name. The v2 billing response has total
+amount and bucket start/end times, but no billed-duration or GPU-type fields;
+those trace billing columns remain empty. V1 billing rows lack the bucket end
+time needed for an automatic identity migration. If a v2 sync overlaps an
+existing RunPod record with a different ID, the store reports a bucket conflict
+and keeps the old data; back up and migrate that database explicitly, or start
+a fresh trace run, before syncing the same historical interval again.
 
 Vast credentials use the official Bearer-token API and should be scoped to the
 catalog, instance, and billing operations needed by the collector. Never put an

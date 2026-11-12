@@ -172,7 +172,7 @@ def classify_failure(status: int | str, payload: Any) -> FailureClass:
         return FailureClass.CAPACITY
     if status == "timeout" or "timeout" in text or "timed out" in text:
         return FailureClass.TIMEOUT
-    if status == 400 and ("schema" in text or "enum" in text or "invalid-parameters" in text):
+    if status == 422 or status == 400 and ("schema" in text or "enum" in text or "invalid-parameters" in text):
         return FailureClass.UNSUPPORTED_SPEC
     if status == 404 or "not found" in text or "does-not-exist" in text:
         return FailureClass.REMOTE_NOT_FOUND

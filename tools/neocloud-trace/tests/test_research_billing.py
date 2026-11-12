@@ -32,6 +32,51 @@ class BillingReconciliationTest(unittest.TestCase):
         self.store.close()
         self.tempdir.cleanup()
 
+    def test_runpod_v2_bucket_refuses_ambiguous_v1_overlap(self):
+        self.store.record_provider_billing(
+            self.run_id,
+            ProviderBillingRecord(
+                provider="runpod", provider_resource_id="pod-1",
+                period_start="2026-08-10T00:00:00Z", amount_usd=0.35,
+                billed_duration_ms=3600000, source="runpod_billing_api",
+                source_record_id="v1-record",
+                raw={"podId": "pod-1", "time": "2026-08-10T00:00:00Z", "amount": 0.35},
+            ),
+        )
+        with self.assertRaisesRegex(RuntimeError, "RunPod billing bucket conflict"):
+            self.store.record_provider_billing(
+                self.run_id,
+                ProviderBillingRecord(
+                    provider="runpod", provider_resource_id="pod-1",
+                    period_start="2026-08-10T00:00:00Z", amount_usd=0.42,
+                    billed_duration_ms=None, source="runpod_billing_api",
+                    source_record_id="v2-record",
+                    raw={"podId": "pod-1", "startTime": "2026-08-10T00:00:00Z",
+                         "endTime": "2026-08-10T01:00:00Z", "totalAmount": 0.42},
+                ),
+            )
+        rows = self.store.provider_billing_rows(self.run_id)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["amount_usd"], 0.35)
+
+    def test_runpod_different_bucket_sizes_do_not_delete_each_other(self):
+        hour = ProviderBillingRecord(
+            provider="runpod", provider_resource_id="pod-1",
+            period_start="2026-08-10T00:00:00Z", amount_usd=0.42,
+            billed_duration_ms=None, source="runpod_billing_api",
+            source_record_id="hour", raw={"endTime": "2026-08-10T01:00:00Z"},
+        )
+        day = ProviderBillingRecord(
+            provider="runpod", provider_resource_id="pod-1",
+            period_start="2026-08-10T00:00:00Z", amount_usd=1.2,
+            billed_duration_ms=None, source="runpod_billing_api",
+            source_record_id="day", raw={"endTime": "2026-08-11T00:00:00Z"},
+        )
+        self.store.record_provider_billing(self.run_id, hour)
+        with self.assertRaisesRegex(RuntimeError, "RunPod billing bucket conflict"):
+            self.store.record_provider_billing(self.run_id, day)
+        self.assertEqual(len(self.store.provider_billing_rows(self.run_id)), 1)
+
     def test_reconciles_billed_amount_to_capacity_resource(self):
         cell = TrialCell(
             provider="runpod",

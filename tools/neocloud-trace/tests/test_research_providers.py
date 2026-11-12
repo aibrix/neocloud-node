@@ -192,6 +192,11 @@ class RunPodCapacityExecutorTest(unittest.TestCase):
         client = RunPodResearchClient(api_key="unused")
 
         self.assertGreaterEqual(client.max_workers, 16)
+        self.assertEqual(client.rest_url, "https://api.runpod.io/v2")
+
+    def test_v1_endpoint_override_is_rejected_before_any_mutation(self):
+        with self.assertRaisesRegex(ValueError, "REST v2"):
+            RunPodResearchClient(api_key="unused", rest_url="https://rest.runpod.io/v1")
 
     def test_billing_history_returns_resource_attributable_records(self):
         calls = []
@@ -201,16 +206,14 @@ class RunPodCapacityExecutorTest(unittest.TestCase):
             return HTTPResponse(
                 200,
                 7,
-                payload=[
-                    {
-                        "amount": 0.42,
-                        "diskSpaceBilledGb": 20,
-                        "gpuTypeId": "NVIDIA A40",
-                        "podId": "pod-1",
-                        "time": "2026-08-10T00:00:00Z",
-                        "timeBilledMs": 3600000,
-                    }
-                ],
+                payload={"records": [{
+                    "totalAmount": 0.42,
+                    "podId": "pod-1",
+                    "startTime": "2026-08-10T00:00:00Z",
+                    "endTime": "2026-08-10T01:00:00Z",
+                    "gpuAmount": 0.39,
+                    "diskAmount": 0.03,
+                }], "metadata": {}},
             )
 
         client = RunPodResearchClient(api_key="unused", transport=transport)
@@ -223,27 +226,45 @@ class RunPodCapacityExecutorTest(unittest.TestCase):
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0].provider_resource_id, "pod-1")
         self.assertEqual(records[0].amount_usd, 0.42)
-        self.assertEqual(records[0].billed_duration_ms, 3600000)
+        self.assertIsNone(records[0].billed_duration_ms)
         self.assertEqual(records[0].source, "runpod_billing_api")
         self.assertIn("/billing/pods?", calls[0][1])
-        self.assertIn("grouping=podId", calls[0][1])
+        self.assertNotIn("grouping=", calls[0][1])
         self.assertIn("podId=pod-1", calls[0][1])
 
+    def test_billing_resync_updates_the_same_in_progress_bucket(self):
+        amounts = iter((0.42, 0.50))
+
+        def transport(method, url, headers, body, timeout):
+            return HTTPResponse(200, 5, payload={"records": [{
+                "podId": "pod-1", "startTime": "2026-08-10T00:00:00Z",
+                "endTime": "2026-08-10T01:00:00Z",
+                "totalAmount": next(amounts), "gpuAmount": 0, "diskAmount": 0,
+            }], "metadata": {}})
+
+        client = RunPodResearchClient(api_key="unused", transport=transport)
+        first = client.billing_records(start_time="2026-08-10T00:00:00Z",
+                                       resource_ids=("pod-1",))[0]
+        updated = client.billing_records(start_time="2026-08-10T00:00:00Z",
+                                         resource_ids=("pod-1",))[0]
+        self.assertEqual(first.source_record_id, updated.source_record_id)
+        self.assertEqual(updated.amount_usd, 0.50)
+
     def test_parallel_create_uses_unique_names_and_research_health_probe(self):
-        bodies = []
+        calls = []
         lock = threading.Lock()
 
         def transport(method, url, headers, body, timeout):
             with lock:
-                bodies.append(body)
-                index = len(bodies)
+                calls.append((method, url, body))
+                index = len(calls)
             return HTTPResponse(
                 201,
                 10,
                 payload={
                     "id": f"pod-{index}",
-                    "costPerHr": 0.30,
-                    "desiredStatus": "RUNNING",
+                    "cost": 0.30,
+                    "status": "RUNNING",
                 },
             )
 
@@ -254,7 +275,7 @@ class RunPodCapacityExecutorTest(unittest.TestCase):
             gpu_type="A40",
             region=None,
             resource_class="secure",
-            market="interruptible",
+            market="on-demand",
             image="python:3.12-slim",
         )
         requests = [
@@ -266,12 +287,15 @@ class RunPodCapacityExecutorTest(unittest.TestCase):
 
         self.assertEqual(len(results), 2)
         self.assertTrue(all(result.accepted for result in results))
+        bodies = [body for _, _, body in calls]
+        self.assertTrue(all(method == "POST" and url.endswith("/v2/pods") for method, url, _ in calls))
         self.assertEqual({body["name"] for body in bodies}, {"depth-r1", "depth-r2"})
-        self.assertTrue(all(body["interruptible"] for body in bodies))
-        self.assertTrue(all(body["cloudType"] == "SECURE" for body in bodies))
-        self.assertTrue(all(body["gpuCount"] == 1 for body in bodies))
+        self.assertTrue(all("interruptible" not in body for body in bodies))
+        self.assertTrue(all(body["cloud"] == "SECURE" for body in bodies))
+        self.assertTrue(all(body["gpu"] == {"id": "NVIDIA A40", "count": 1} for body in bodies))
         self.assertTrue(all("8080/http" in body["ports"] for body in bodies))
-        self.assertTrue(all("http.server" in " ".join(body["dockerStartCmd"]) for body in bodies))
+        self.assertTrue(all("http.server" in " ".join(body["cmd"]) for body in bodies))
+        self.assertTrue(all(body["entrypoint"] == ["/bin/sh", "-lc"] for body in bodies))
         self.assertEqual(len({result.api_call.id for result in results}), 2)
         self.assertTrue(all(result.api_call.operation == "create_pod" for result in results))
 
@@ -280,7 +304,7 @@ class RunPodCapacityExecutorTest(unittest.TestCase):
 
         def transport(method, url, headers, body, timeout):
             bodies.append(body)
-            return HTTPResponse(201, 10, payload={"id": "pod-1", "costPerHr": 1.2})
+            return HTTPResponse(201, 10, payload={"id": "pod-1", "cost": 1.2})
 
         client = RunPodResearchClient(api_key="unused", transport=transport)
         cell = TrialCell(
@@ -298,13 +322,13 @@ class RunPodCapacityExecutorTest(unittest.TestCase):
             [ReplicaRequest("r1", "depth-r1", 4, 0)],
         )[0]
 
-        self.assertEqual(bodies[0]["gpuCount"], 4)
+        self.assertEqual(bodies[0]["gpu"], {"id": "NVIDIA A40", "count": 4})
         self.assertEqual(result.request_payload, bodies[0])
 
     def test_create_capacity_and_schema_errors_are_classified(self):
         responses = [
             HTTPResponse(500, 5, error={"error": "There are no instances currently available"}),
-            HTTPResponse(400, 5, error={"problems": ["gpuTypeIds enum schema mismatch"]}),
+            HTTPResponse(422, 5, error={"errors": ["gpu.id is invalid"]}),
         ]
 
         def transport(method, url, headers, body, timeout):
@@ -340,11 +364,9 @@ class RunPodCapacityExecutorTest(unittest.TestCase):
                 5,
                 payload={
                     "id": "pod-http",
-                    "desiredStatus": "RUNNING",
-                    "machineId": "machine-1",
+                    "status": "RUNNING",
+                    "cost": 0.3,
                     "ports": ["8080/http"],
-                    "publicIp": "",
-                    "portMappings": {},
                 },
             )
 
@@ -366,6 +388,34 @@ class RunPodCapacityExecutorTest(unittest.TestCase):
             probed, ["https://pod-http-8080.proxy.runpod.net/healthz"]
         )
 
+    def test_observe_reads_v2_runtime_port_uptime_and_cost(self):
+        probed = []
+
+        def transport(method, url, headers, body, timeout):
+            self.assertEqual(url, "https://api.runpod.io/v2/pods/pod-1")
+            return HTTPResponse(200, 5, payload={
+                "id": "pod-1", "status": "RUNNING", "cost": 0.59,
+                "dataCenterId": "US-TX-3", "runtime": {"uptime": 42, "ports": [
+                    {"private": 8080, "public": 31000, "ip": "192.0.2.5", "type": "tcp"}
+                ]},
+            })
+
+        def heartbeat(url, timeout):
+            probed.append(url)
+            return True, 12, "aibrix-neocloud-health-v1"
+
+        client = RunPodResearchClient(api_key="unused", transport=transport,
+                                      heartbeat_probe=heartbeat)
+        cell = TrialCell("runpod", "NVIDIA A40", "A40", None, "secure", "on-demand")
+        observation = client.observe("pod-1", cell)
+        self.assertTrue(observation.exists)
+        self.assertTrue(observation.provider_ready)
+        self.assertTrue(observation.application_ready)
+        self.assertEqual(observation.runtime_uptime_seconds, 42)
+        self.assertEqual(observation.price_usd_hr, 0.59)
+        self.assertEqual(observation.location, "US-TX-3")
+        self.assertEqual(probed, ["http://192.0.2.5:31000/healthz"])
+
     def test_exited_pod_is_terminal(self):
         def transport(method, url, headers, body, timeout):
             return HTTPResponse(
@@ -373,8 +423,7 @@ class RunPodCapacityExecutorTest(unittest.TestCase):
                 5,
                 payload={
                     "id": "pod-exited",
-                    "desiredStatus": "EXITED",
-                    "machineId": "machine-1",
+                    "status": "EXITED",
                 },
             )
 
@@ -385,8 +434,43 @@ class RunPodCapacityExecutorTest(unittest.TestCase):
 
         observation = client.observe("pod-exited", cell)
 
-        self.assertFalse(observation.exists)
+        self.assertTrue(observation.exists)
         self.assertEqual(observation.provider_state, "EXITED")
+
+    def test_lookup_replica_paginates_and_matches_exact_name(self):
+        calls = []
+
+        def transport(method, url, headers, body, timeout):
+            calls.append(url)
+            if "cursor=" not in url:
+                return HTTPResponse(200, 5, payload={"pods": [
+                    {"id": "other", "name": "depth-r10", "status": "RUNNING"}
+                ], "pagination": {"hasNextPage": True, "nextCursor": "next/page"}})
+            return HTTPResponse(200, 5, payload={"pods": [
+                {"id": "wanted", "name": "depth-r1", "status": "RUNNING", "cost": 0.3,
+                 "dataCenterId": "US-TX-3"}
+            ], "pagination": {"hasNextPage": False, "nextCursor": None}})
+
+        client = RunPodResearchClient(api_key="unused", transport=transport)
+        cell = TrialCell("runpod", "NVIDIA A40", "A40", None, "secure", "on-demand")
+        result = client.lookup_replica(cell, "depth-r1")
+
+        self.assertTrue(result.accepted)
+        self.assertEqual(result.provider_resource_id, "wanted")
+        self.assertEqual(result.price_usd_hr, 0.3)
+        self.assertEqual(result.location, "US-TX-3")
+        self.assertEqual(len(calls), 2)
+        self.assertIn("cursor=next%2Fpage", calls[1])
+
+    def test_interruptible_create_is_rejected_without_api_call(self):
+        def transport(method, url, headers, body, timeout):
+            self.fail("unsupported market must not reach RunPod API")
+
+        client = RunPodResearchClient(api_key="unused", transport=transport)
+        cell = TrialCell("runpod", "NVIDIA A40", "A40", None, "secure", "interruptible")
+        result = client.create_replicas(cell, [ReplicaRequest("r1", "r1", 1, 0)])[0]
+        self.assertFalse(result.accepted)
+        self.assertEqual(result.failure_class, FailureClass.UNSUPPORTED_SPEC)
 
 
 class VastResearchClientTest(unittest.TestCase):

@@ -447,7 +447,7 @@ def load_plan(
         ),
         jitter_seconds=float(schedule_document.get("jitter_seconds", 0)),
     )
-    return PilotPlan(
+    plan = PilotPlan(
         experiment=experiment,
         duration_seconds=duration_seconds,
         passive_interval_seconds=float(raw.get("passive_interval_seconds") or 0),
@@ -459,6 +459,14 @@ def load_plan(
         stability_schedule=stability_schedule,
         raw_document=raw,
     )
+    for cohort in plan.capacity_cohorts:
+        for trial in cohort.cells:
+            if trial.cell.provider == "runpod" and trial.cell.market != "on-demand":
+                raise ValueError("RunPod REST v2 does not support interruptible capacity cells")
+    for cohort in plan.canary_cohorts:
+        if any(trial.cell.provider == "runpod" for trial in cohort.cells):
+            raise ValueError("RunPod REST v2 does not support interruptible canary pairs")
+    return plan
 
 
 class BudgetGuard:
