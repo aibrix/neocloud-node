@@ -203,6 +203,8 @@ class RunPodCapacityExecutorTest(unittest.TestCase):
 
         def transport(method, url, headers, body, timeout):
             calls.append((method, url, body))
+            if "endTime=" not in url:
+                return HTTPResponse(400, 7, error={"detail": "startTime and endTime must be provided together"})
             return HTTPResponse(
                 200,
                 7,
@@ -231,6 +233,7 @@ class RunPodCapacityExecutorTest(unittest.TestCase):
         self.assertIn("/billing/pods?", calls[0][1])
         self.assertNotIn("grouping=", calls[0][1])
         self.assertIn("podId=pod-1", calls[0][1])
+        self.assertIn("endTime=", calls[0][1])
 
     def test_billing_resync_updates_the_same_in_progress_bucket(self):
         amounts = iter((0.42, 0.50))
