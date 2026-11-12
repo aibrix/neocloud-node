@@ -1,57 +1,22 @@
 name: Pod compatibility request
-description: Request support for a Pod field or Kubernetes workload behavior
+description: Request support for a Pod field or workload behavior
 title: "[Pod compatibility]: "
-labels:
-  - enhancement
-  - triage
+labels: [enhancement, triage]
 body:
   - type: markdown
     attributes:
-      value: |
-        Use this form for Pod fields or behaviors that NeoCloud Node rejects or
-        does not yet implement. Never include secrets or billable resource IDs.
-  - type: dropdown
-    id: provider
-    attributes:
-      label: Provider
-      options:
-        - fake
-        - RunPod
-        - Lambda Cloud
-        - Vast.ai
-        - Provider-independent
-        - Other
-    validations:
-      required: true
-  - type: input
-    id: kubernetes_version
-    attributes:
-      label: Kubernetes version
-      description: Provide the server version without cluster addresses or other private details.
-      placeholder: v1.31.4
-    validations:
-      required: true
-  - type: input
-    id: manifest_version
-    attributes:
-      label: Manifest version
-      description: NeoCloud Node release, install manifest tag, image digest, or git commit tested.
-      placeholder: v0.1.0, sha256:..., or 0123456789abcdef
-    validations:
-      required: true
+      value: Remove secrets and private resource identifiers from examples and logs.
   - type: textarea
     id: capability
     attributes:
-      label: Pod capability requested
-      description: Name the Pod fields or Kubernetes behavior that need support and explain the workload use case.
-      placeholder: Support envFrom with a ConfigMap for...
+      label: Requested behavior
+      description: Which Pod field or behavior do you need, and for what use case?
     validations:
       required: true
   - type: textarea
     id: manifest
     attributes:
       label: Minimal Pod manifest
-      description: Provide the smallest sanitized manifest that demonstrates the requested behavior.
       render: yaml
     validations:
       required: true
@@ -59,25 +24,9 @@ body:
     id: current
     attributes:
       label: Current behavior
-      description: Include the rejection reason, Pod events, or status currently observed.
-    validations:
-      required: true
+      description: Include the rejection reason or relevant events, if available.
   - type: textarea
-    id: expected
+    id: environment
     attributes:
-      label: Expected behavior
-      description: Describe how the Pod should be translated, run, reported, and cleaned up.
-    validations:
-      required: true
-  - type: textarea
-    id: provider_support
-    attributes:
-      label: Provider support or constraints
-      description: Link provider documentation or describe provider limitations that affect this request.
-  - type: checkboxes
-    id: safety
-    attributes:
-      label: Safety check
-      options:
-        - label: I removed credentials, private endpoints, and private or billable resource identifiers.
-          required: true
+      label: Environment or constraints
+      description: Provider, versions, and relevant provider limitations (if known).

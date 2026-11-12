@@ -1,90 +1,32 @@
 name: Bug report
-description: Report a reproducible NeoCloud Node defect
+description: Report a NeoCloud Node defect
 title: "[Bug]: "
-labels:
-  - bug
-  - triage
+labels: [bug, triage]
 body:
   - type: markdown
     attributes:
-      value: |
-        Search existing issues before filing. Never include API keys, SSH keys,
-        callback secrets, private endpoints, account IDs, or paid resource IDs.
-  - type: dropdown
-    id: provider
-    attributes:
-      label: Provider
-      options:
-        - fake
-        - RunPod
-        - Lambda Cloud
-        - Vast.ai
-        - Provider-independent
-        - Other
-    validations:
-      required: true
-  - type: input
-    id: kubernetes_version
-    attributes:
-      label: Kubernetes version
-      description: Provide the server version without cluster addresses or other private details.
-      placeholder: v1.31.4
-    validations:
-      required: true
-  - type: input
-    id: manifest_version
-    attributes:
-      label: Manifest version
-      description: NeoCloud Node release, install manifest tag, image digest, or git commit in use.
-      placeholder: v0.1.0, sha256:..., or 0123456789abcdef
-    validations:
-      required: true
+      value: Search existing issues first. Remove secrets and private resource identifiers from examples and logs.
   - type: textarea
     id: problem
     attributes:
       label: What happened?
-      description: Describe the observed behavior and its impact.
-    validations:
-      required: true
-  - type: textarea
-    id: expected
-    attributes:
-      label: What did you expect?
+      description: Describe the actual and expected behavior.
     validations:
       required: true
   - type: textarea
     id: reproduce
     attributes:
-      label: Reproduction
-      description: List the commands or steps needed to reproduce the problem.
+      label: Steps to reproduce
+      description: Include a minimal Pod manifest if relevant.
     validations:
       required: true
   - type: textarea
-    id: pod_manifest
-    attributes:
-      label: Minimal Pod manifest
-      description: Include a minimal sanitized manifest when the problem involves a Pod.
-      render: yaml
-  - type: textarea
-    id: state
-    attributes:
-      label: Kubernetes and binding state
-      description: Include sanitized Pod events, CloudPodBinding status, and relevant controller logs.
-      render: text
-  - type: textarea
     id: environment
     attributes:
-      label: Additional environment details
-      placeholder: |
-        Installation method:
-        Controller configuration:
-        Provider API or region:
-  - type: checkboxes
-    id: safety
+      label: Environment
+      description: Provider, NeoCloud Node version or commit, and Kubernetes version (if known).
+  - type: textarea
+    id: logs
     attributes:
-      label: Safety check
-      options:
-        - label: I removed credentials and private or billable resource identifiers.
-          required: true
-        - label: I checked for leaked remote resources and described any cleanup still required.
-          required: true
+      label: Logs or other context
+      description: Include relevant events or logs, and any remote resources still needing cleanup.
