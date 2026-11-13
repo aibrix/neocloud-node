@@ -175,6 +175,16 @@ func requestWithEnv(request WorkloadRequest, env map[string]string) WorkloadRequ
 }
 
 func (s *LifecycleService) SyncStatus(ctx context.Context, namespace string, workloadUID string) (Binding, error) {
+	return s.syncStatus(ctx, namespace, workloadUID, nil)
+}
+
+// SyncStatusWithSnapshot uses one periodic provider snapshot while retaining the
+// same binding update and remote-not-found semantics as a direct SyncStatus.
+func (s *LifecycleService) SyncStatusWithSnapshot(ctx context.Context, namespace string, workloadUID string, snapshot RemoteStatusSnapshot) (Binding, error) {
+	return s.syncStatus(ctx, namespace, workloadUID, &snapshot)
+}
+
+func (s *LifecycleService) syncStatus(ctx context.Context, namespace string, workloadUID string, snapshot *RemoteStatusSnapshot) (Binding, error) {
 	binding, err := s.store.GetByWorkloadUID(ctx, namespace, workloadUID)
 	if err != nil {
 		return Binding{}, err
@@ -196,7 +206,12 @@ func (s *LifecycleService) SyncStatus(ctx context.Context, namespace string, wor
 		}
 		return binding, err
 	}
-	remote, err := provider.Get(ctx, binding.RemoteID)
+	var remote RemoteResource
+	if snapshot == nil {
+		remote, err = provider.Get(ctx, binding.RemoteID)
+	} else {
+		remote, err = snapshot.lookup(ctx, selectedProvider(binding), provider, binding.RemoteID)
+	}
 	if err != nil {
 		if errors.Is(err, ErrRemoteNotFound) {
 			binding.Phase = BindingFailed

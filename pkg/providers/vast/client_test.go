@@ -302,6 +302,37 @@ func TestClientListRemoteResourcesPaginates(t *testing.T) {
 	}
 }
 
+func TestClientSupportsCompleteStatusListing(t *testing.T) {
+	if _, ok := any(NewClient(Config{})).(core.RemoteStatusLister); !ok {
+		t.Fatal("Vast client must opt into complete batch status listing")
+	}
+}
+
+func TestClientBatchStatusMatchesGet(t *testing.T) {
+	t.Parallel()
+	const instance = `{"id":501,"label":"managed","actual_status":"running","gpu_name":"GTX 1070","num_gpus":"1","gpu_ram":8,"dph_total":"0.05222","geolocation":"KR","machine_id":27850,"verification":"verified","ask_contract_id":801}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/instances/501/" {
+			_, _ = w.Write([]byte(`{"instances":` + instance + `}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"instances":[` + instance + `],"next_token":null}`))
+	}))
+	defer server.Close()
+	client := NewClient(Config{BaseURL: server.URL, V1BaseURL: server.URL})
+	listed, err := client.ListRemoteStatuses(context.Background())
+	if err != nil || len(listed) != 1 {
+		t.Fatalf("ListRemoteStatuses() = %#v, %v", listed, err)
+	}
+	got, err := client.Get(context.Background(), "501")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(listed[0], got) {
+		t.Fatalf("list status = %#v, Get status = %#v", listed[0], got)
+	}
+}
+
 func TestClientDeleteIsIdempotentAndRecoversUncertainDelete(t *testing.T) {
 	t.Parallel()
 

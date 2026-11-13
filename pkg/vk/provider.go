@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"sort"
 	"sync"
@@ -308,12 +309,41 @@ func (p *Provider) syncCachedPods(ctx context.Context) {
 		pods = append(pods, pod.DeepCopy())
 	}
 	p.mu.RUnlock()
+	if len(pods) == 0 {
+		return
+	}
+	keys := make(map[struct{ namespace, uid string }]struct{}, len(pods))
+	for _, pod := range pods {
+		keys[struct{ namespace, uid string }{pod.Namespace, string(pod.UID)}] = struct{}{}
+	}
+	bindings, err := p.store.List(ctx)
+	if err != nil {
+		for _, pod := range pods {
+			if ctx.Err() != nil {
+				return
+			}
+			_, _ = p.syncPodStatus(ctx, pod)
+		}
+		return
+	}
+	relevant := make([]core.Binding, 0, len(pods))
+	for _, binding := range bindings {
+		if _, found := keys[struct{ namespace, uid string }{binding.Namespace, binding.WorkloadUID}]; found {
+			relevant = append(relevant, binding)
+		}
+	}
+	snapshot := p.lifecycle.SnapshotRemoteStatuses(ctx, relevant)
+	for provider, err := range snapshot.Errors() {
+		log.Printf("neocloud-node status list failed: provider=%s error=%v", provider, err)
+	}
 
 	for _, pod := range pods {
 		if ctx.Err() != nil {
 			return
 		}
-		_, _ = p.syncPodStatus(ctx, pod)
+		_, _ = p.syncPodStatusWith(ctx, pod, func(ctx context.Context, namespace, uid string) (core.Binding, error) {
+			return p.lifecycle.SyncStatusWithSnapshot(ctx, namespace, uid, snapshot)
+		})
 	}
 }
 
@@ -372,11 +402,15 @@ func (p *Provider) getCachedPod(key string) *corev1.Pod {
 }
 
 func (p *Provider) syncPodStatus(ctx context.Context, pod *corev1.Pod) (*corev1.Pod, error) {
+	return p.syncPodStatusWith(ctx, pod, p.lifecycle.SyncStatus)
+}
+
+func (p *Provider) syncPodStatusWith(ctx context.Context, pod *corev1.Pod, syncStatus func(context.Context, string, string) (core.Binding, error)) (*corev1.Pod, error) {
 	if pod == nil || pod.UID == "" {
 		return pod, nil
 	}
 
-	binding, err := p.lifecycle.SyncStatus(ctx, pod.Namespace, string(pod.UID))
+	binding, err := syncStatus(ctx, pod.Namespace, string(pod.UID))
 	if errors.Is(err, core.ErrBindingNotFound) && pod.Status.Phase == corev1.PodFailed {
 		return pod.DeepCopy(), nil
 	}
