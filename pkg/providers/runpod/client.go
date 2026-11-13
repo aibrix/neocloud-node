@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -18,24 +17,16 @@ import (
 
 const providerName = "runpod"
 
-const (
-	defaultBaseURL   = "https://rest.runpod.io/v1"
-	defaultV2BaseURL = "https://api.runpod.io/v2"
-)
+const defaultBaseURL = "https://api.runpod.io/v2"
 
 type Config struct {
-	BaseURL string
-	// V2BaseURL is used to read container runtime information that the v1 API
-	// does not report. It defaults to the public v2 API when BaseURL is the
-	// default, and is disabled otherwise unless set explicitly.
-	V2BaseURL  string
+	BaseURL    string
 	APIKey     string
 	HTTPClient *http.Client
 }
 
 type Client struct {
 	baseURL    string
-	v2BaseURL  string
 	apiKey     string
 	httpClient *http.Client
 }
@@ -45,10 +36,6 @@ func NewClient(config Config) *Client {
 	if baseURL == "" {
 		baseURL = defaultBaseURL
 	}
-	v2BaseURL := strings.TrimRight(config.V2BaseURL, "/")
-	if v2BaseURL == "" && baseURL == defaultBaseURL {
-		v2BaseURL = defaultV2BaseURL
-	}
 
 	httpClient := config.HTTPClient
 	if httpClient == nil {
@@ -57,7 +44,6 @@ func NewClient(config Config) *Client {
 
 	return &Client{
 		baseURL:    baseURL,
-		v2BaseURL:  v2BaseURL,
 		apiKey:     config.APIKey,
 		httpClient: httpClient,
 	}
@@ -65,27 +51,9 @@ func NewClient(config Config) *Client {
 
 func (c *Client) Create(ctx context.Context, idempotencyKey string, request core.WorkloadRequest) (core.RemoteResource, error) {
 	name := externalName(idempotencyKey)
-	entrypoint, startCmd := startCommand(request.Command, request.Args)
-	payload := createPodRequest{
-		Name:             name,
-		CloudType:        providerHint(request, core.AnnotationRunPodCloudType),
-		ComputeType:      "GPU",
-		ImageName:        request.Image,
-		DockerEntrypoint: entrypoint,
-		DockerStartCmd:   startCmd,
-		Env:              cloneStringMap(request.Env),
-		GPUCount:         request.GPUCount,
-		GPUTypeIDs:       gpuTypeIDs(request.GPUType),
-		GPUTypePriority:  priorityForList(request.GPUType),
-		Ports:            runpodPorts(request.Ports),
-		Interruptible:    request.MarketType == core.MarketTypeSpot,
-		TemplateID:       providerHint(request, core.AnnotationRunPodTemplateID),
-		DataCenterIDs:    splitCSV(providerHint(request, core.AnnotationRunPodDataCenterIDs)),
-		DataCenterPriority: providerHintOrDefault(request,
-			core.AnnotationRunPodDataCenterPriority, priorityForList(providerHint(request, core.AnnotationRunPodDataCenterIDs))),
-		NetworkVolumeID:         providerHint(request, core.AnnotationRunPodNetworkVolumeID),
-		ContainerRegistryAuthID: providerHint(request, core.AnnotationRunPodRegistryAuthID),
-		VolumeMountPath:         providerHint(request, core.AnnotationRunPodVolumeMountPath),
+	payload, err := newCreatePodRequest(name, request)
+	if err != nil {
+		return core.RemoteResource{}, err
 	}
 
 	body, err := json.Marshal(payload)
@@ -102,10 +70,14 @@ func (c *Client) Create(ctx context.Context, idempotencyKey string, request core
 	var pod podResponse
 	if err := c.doJSON(httpReq, http.StatusCreated, &pod); err != nil {
 		if shouldRecoverCreate(err) {
-			if existing, findErr := c.FindByExternalName(ctx, name); findErr == nil {
+			existing, findErr := c.FindByExternalName(ctx, name)
+			if findErr == nil {
 				existing.IdempotencyKey = idempotencyKey
 				existing.Request = request
 				return existing, nil
+			}
+			if !errors.Is(findErr, core.ErrRemoteNotFound) {
+				return core.RemoteResource{}, findErr
 			}
 		}
 		return core.RemoteResource{}, err
@@ -124,46 +96,12 @@ func (c *Client) Get(ctx context.Context, remoteID string) (core.RemoteResource,
 	if err := c.doJSON(httpReq, http.StatusOK, &pod); err != nil {
 		return core.RemoteResource{}, err
 	}
-	remote := remoteFromPod(pod, "", core.WorkloadRequest{})
-	if remote.Phase == core.RemoteRunning {
-		remote.ContainerUptime = c.containerUptime(ctx, remoteID)
-	}
-	return remote, nil
-}
-
-// containerUptime reads the container uptime from the v2 API. RunPod
-// restarts an exited container in place and keeps reporting RUNNING, so a
-// lower uptime is the only signal that the container exited. RunPod refreshes
-// the uptime about every 30 seconds and reports the same value in between.
-// Failures are ignored: the uptime is optional and is read again on the next
-// sync.
-func (c *Client) containerUptime(ctx context.Context, remoteID string) time.Duration {
-	if c.v2BaseURL == "" {
-		return 0
-	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, c.v2BaseURL+"/pods/"+remoteID, nil)
-	if err != nil {
-		return 0
-	}
-	c.setHeaders(httpReq)
-	var pod struct {
-		Status  string `json:"status"`
-		Runtime *struct {
-			Uptime int64 `json:"uptime"`
-		} `json:"runtime"`
-	}
-	if err := c.doJSON(httpReq, http.StatusOK, &pod); err != nil {
-		return 0
-	}
-	if pod.Status != "RUNNING" || pod.Runtime == nil || pod.Runtime.Uptime <= 0 {
-		return 0
-	}
-	return time.Duration(pod.Runtime.Uptime) * time.Second
+	return remoteFromPod(pod, "", core.WorkloadRequest{}), nil
 }
 
 // Stop stops a pod, which releases its GPU and keeps its disk.
 func (c *Client) Stop(ctx context.Context, remoteID string) error {
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/pods/"+remoteID+"/stop", nil)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/pods/"+remoteID+"/action", strings.NewReader(`{"action":"stop"}`))
 	if err != nil {
 		return err
 	}
@@ -178,54 +116,74 @@ func (c *Client) Stop(ctx context.Context, remoteID string) error {
 }
 
 func (c *Client) List(ctx context.Context, filter PodFilter) ([]core.RemoteResource, error) {
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/pods", nil)
-	if err != nil {
-		return nil, err
+	var resources []core.RemoteResource
+	cursor := ""
+	seen := make(map[string]bool)
+	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/pods", nil)
+		if err != nil {
+			return nil, err
+		}
+		query := req.URL.Query()
+		if cursor != "" {
+			query.Set("cursor", cursor)
+		}
+		req.URL.RawQuery = query.Encode()
+		c.setHeaders(req)
+		var page struct {
+			Pods       []podResponse `json:"pods"`
+			Pagination *struct {
+				NextCursor  string `json:"nextCursor"`
+				HasNextPage *bool  `json:"hasNextPage"`
+			} `json:"pagination"`
+		}
+		if err := c.doJSON(req, http.StatusOK, &page); err != nil {
+			return nil, err
+		}
+		if page.Pods == nil || page.Pagination == nil || page.Pagination.HasNextPage == nil {
+			return nil, providerDecodeError(req, errors.New("missing pods or pagination in list response"))
+		}
+		for _, pod := range page.Pods {
+			if filter.Name == "" || pod.Name == filter.Name {
+				resources = append(resources, remoteFromPod(pod, "", core.WorkloadRequest{}))
+			}
+		}
+		if !*page.Pagination.HasNextPage {
+			return resources, nil
+		}
+		cursor = page.Pagination.NextCursor
+		if cursor == "" || seen[cursor] {
+			return nil, providerDecodeError(req, errors.New("missing or repeated pagination cursor"))
+		}
+		seen[cursor] = true
 	}
-	query := httpReq.URL.Query()
-	if filter.Name != "" {
-		query.Set("name", filter.Name)
-	}
-	if filter.TemplateID != "" {
-		query.Set("templateId", filter.TemplateID)
-	}
-	if filter.NetworkVolumeID != "" {
-		query.Set("networkVolumeId", filter.NetworkVolumeID)
-	}
-	if filter.IncludeMachine {
-		query.Set("includeMachine", "true")
-	}
-	if filter.IncludeNetworkVolume {
-		query.Set("includeNetworkVolume", "true")
-	}
-	httpReq.URL.RawQuery = query.Encode()
-	c.setHeaders(httpReq)
-
-	var pods []podResponse
-	if err := c.doJSON(httpReq, http.StatusOK, &pods); err != nil {
-		return nil, err
-	}
-
-	resources := make([]core.RemoteResource, 0, len(pods))
-	for _, pod := range pods {
-		resources = append(resources, remoteFromPod(pod, "", core.WorkloadRequest{}))
-	}
-	return resources, nil
 }
 
 func (c *Client) ListRemoteResources(ctx context.Context) ([]core.RemoteResource, error) {
-	return c.List(ctx, PodFilter{IncludeMachine: true, IncludeNetworkVolume: true})
+	return c.List(ctx, PodFilter{})
 }
 
 func (c *Client) FindByExternalName(ctx context.Context, name string) (core.RemoteResource, error) {
-	pods, err := c.List(ctx, PodFilter{Name: name, IncludeMachine: true, IncludeNetworkVolume: true})
+	pods, err := c.List(ctx, PodFilter{Name: name})
 	if err != nil {
 		return core.RemoteResource{}, err
 	}
+	var found *core.RemoteResource
 	for _, pod := range pods {
-		if pod.ID != "" {
-			return pod, nil
+		if pod.ID == "" || pod.Phase == core.RemoteDeleted {
+			continue
 		}
+		if found != nil {
+			return core.RemoteResource{}, &core.ProviderError{
+				Provider: providerName, Operation: "list", Class: core.ErrorClassConflict,
+				Message: "multiple pods match the external name",
+			}
+		}
+		match := pod
+		found = &match
+	}
+	if found != nil {
+		return *found, nil
 	}
 	return core.RemoteResource{}, &core.ProviderError{
 		Provider:  providerName,
@@ -307,112 +265,49 @@ func (c *Client) doJSON(req *http.Request, expectedStatus int, out any) error {
 	return nil
 }
 
-type createPodRequest struct {
-	Name                    string            `json:"name"`
-	CloudType               string            `json:"cloudType,omitempty"`
-	ComputeType             string            `json:"computeType"`
-	ImageName               string            `json:"imageName"`
-	DockerEntrypoint        []string          `json:"dockerEntrypoint,omitempty"`
-	DockerStartCmd          []string          `json:"dockerStartCmd,omitempty"`
-	Env                     map[string]string `json:"env,omitempty"`
-	GPUCount                int               `json:"gpuCount"`
-	GPUTypeIDs              []string          `json:"gpuTypeIds,omitempty"`
-	GPUTypePriority         string            `json:"gpuTypePriority,omitempty"`
-	Ports                   []string          `json:"ports,omitempty"`
-	Interruptible           bool              `json:"interruptible,omitempty"`
-	TemplateID              string            `json:"templateId,omitempty"`
-	DataCenterIDs           []string          `json:"dataCenterIds,omitempty"`
-	DataCenterPriority      string            `json:"dataCenterPriority,omitempty"`
-	NetworkVolumeID         string            `json:"networkVolumeId,omitempty"`
-	ContainerRegistryAuthID string            `json:"containerRegistryAuthId,omitempty"`
-	VolumeMountPath         string            `json:"volumeMountPath,omitempty"`
-}
-
+// podResponse contains the fields consumed from the v2 Pod schema.
 type podResponse struct {
-	ID                string         `json:"id"`
-	Name              string         `json:"name"`
-	DesiredStatus     string         `json:"desiredStatus"`
-	Image             string         `json:"image"`
-	TemplateID        string         `json:"templateId"`
-	CostPerHr         costValue      `json:"costPerHr"`
-	AdjustedCostPerHr float64        `json:"adjustedCostPerHr"`
-	Ports             []string       `json:"ports"`
-	PublicIP          string         `json:"publicIp"`
-	PortMappings      map[string]int `json:"portMappings"`
-	Interruptible     bool           `json:"interruptible"`
-	GPU               struct {
-		Count       int    `json:"count"`
-		DisplayName string `json:"displayName"`
+	ID     string   `json:"id"`
+	Name   string   `json:"name"`
+	Status string   `json:"status"`
+	Cost   *float64 `json:"cost"`
+	GPU    struct {
+		ID    string `json:"id"`
+		Count int    `json:"count"`
 	} `json:"gpu"`
-	Machine struct {
-		DataCenterID string `json:"dataCenterId"`
-	} `json:"machine"`
-	NetworkVolume struct {
-		ID           string `json:"id"`
-		Name         string `json:"name"`
-		Size         int    `json:"size"`
-		DataCenterID string `json:"dataCenterId"`
-	} `json:"networkVolume"`
-}
-
-type costValue struct {
-	value float64
-	set   bool
-}
-
-func (c *costValue) UnmarshalJSON(data []byte) error {
-	trimmed := strings.TrimSpace(string(data))
-	if trimmed == "" || trimmed == "null" {
-		return nil
-	}
-	var raw any
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
-	switch value := raw.(type) {
-	case float64:
-		c.value = value
-		c.set = true
-		return nil
-	case string:
-		if strings.TrimSpace(value) == "" {
-			return nil
-		}
-		parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
-		if err != nil {
-			return err
-		}
-		c.value = parsed
-		c.set = true
-		return nil
-	default:
-		return fmt.Errorf("unsupported costPerHr value %T", raw)
-	}
+	DataCenterID string    `json:"dataCenterId"`
+	Mounts       podMounts `json:"mounts"`
+	Runtime      *struct {
+		Uptime int64 `json:"uptime"`
+		Ports  []struct {
+			Private int    `json:"private"`
+			Public  int    `json:"public"`
+			Type    string `json:"type"`
+			IP      string `json:"ip"`
+		} `json:"ports"`
+	} `json:"runtime"`
 }
 
 type PodFilter struct {
-	Name                 string
-	TemplateID           string
-	NetworkVolumeID      string
-	IncludeMachine       bool
-	IncludeNetworkVolume bool
+	Name string
 }
 
 func remoteFromPod(pod podResponse, idempotencyKey string, request core.WorkloadRequest) core.RemoteResource {
 	request = requestWithPodShape(request, pod)
-	reason, message := statusDetailFromDesiredStatus(pod.DesiredStatus)
+	reason, message := statusDetailFromStatus(pod.Status)
 	return core.RemoteResource{
-		ID:             pod.ID,
-		IdempotencyKey: idempotencyKey,
-		ExternalName:   pod.Name,
-		Provider:       providerName,
-		Phase:          phaseFromDesiredStatus(pod.DesiredStatus),
-		Request:        request,
-		Endpoints:      endpointsFromPod(pod),
-		HourlyCost:     hourlyCost(pod),
-		CostSource:     costSource(pod),
-		StatusReason:   reason,
-		StatusMessage:  message,
+		ID:              pod.ID,
+		IdempotencyKey:  idempotencyKey,
+		ExternalName:    pod.Name,
+		Provider:        providerName,
+		Phase:           phaseFromStatus(pod.Status),
+		Request:         request,
+		Endpoints:       endpointsFromPod(pod),
+		HourlyCost:      hourlyCost(pod),
+		CostSource:      costSource(pod),
+		ContainerUptime: containerUptime(pod),
+		StatusReason:    reason,
+		StatusMessage:   message,
 	}
 }
 
@@ -424,29 +319,24 @@ func requestWithPodShape(request core.WorkloadRequest, pod podResponse) core.Wor
 		request.GPUCount = pod.GPU.Count
 	}
 	if strings.TrimSpace(request.GPUType) == "" {
-		request.GPUType = strings.TrimSpace(pod.GPU.DisplayName)
+		request.GPUType = strings.TrimSpace(pod.GPU.ID)
 	}
 	if strings.TrimSpace(request.RegionHint) == "" {
-		request.RegionHint = firstNonEmpty(pod.Machine.DataCenterID, pod.NetworkVolume.DataCenterID)
+		request.RegionHint = strings.TrimSpace(pod.DataCenterID)
 	}
 	if strings.TrimSpace(request.MarketType) == "" {
-		if pod.Interruptible {
-			request.MarketType = core.MarketTypeSpot
-		} else {
-			request.MarketType = core.MarketTypeOnDemand
-		}
+		request.MarketType = core.MarketTypeOnDemand
 	}
+
 	if request.ProviderHints == nil {
 		request.ProviderHints = map[string]string{}
 	}
 	if request.RegionHint != "" && request.ProviderHints[core.AnnotationRunPodDataCenterIDs] == "" {
 		request.ProviderHints[core.AnnotationRunPodDataCenterIDs] = request.RegionHint
 	}
-	if pod.TemplateID != "" && request.ProviderHints[core.AnnotationRunPodTemplateID] == "" {
-		request.ProviderHints[core.AnnotationRunPodTemplateID] = pod.TemplateID
-	}
-	if pod.NetworkVolume.ID != "" && request.ProviderHints[core.AnnotationRunPodNetworkVolumeID] == "" {
-		request.ProviderHints[core.AnnotationRunPodNetworkVolumeID] = pod.NetworkVolume.ID
+	if len(pod.Mounts.Network) == 1 && request.ProviderHints[core.AnnotationRunPodNetworkVolumeID] == "" {
+		request.ProviderHints[core.AnnotationRunPodNetworkVolumeID] = pod.Mounts.Network[0].VolumeID
+		request.ProviderHints[core.AnnotationRunPodVolumeMountPath] = pod.Mounts.Network[0].Path
 	}
 	if len(request.ProviderHints) == 0 {
 		request.ProviderHints = nil
@@ -457,15 +347,17 @@ func requestWithPodShape(request core.WorkloadRequest, pod podResponse) core.Wor
 // ReasonRemoteExited marks a RunPod pod that stopped without a known exit code.
 const ReasonRemoteExited = "RemoteExited"
 
-// phaseFromDesiredStatus maps RunPod status to a remote phase. RunPod does not
+// phaseFromStatus maps RunPod status to a remote phase. RunPod does not
 // report the container exit code, so EXITED cannot be told apart from a crash
 // or a reclaimed host and is reported as failed rather than succeeded.
-func phaseFromDesiredStatus(status string) core.RemotePhase {
+func phaseFromStatus(status string) core.RemotePhase {
 	switch status {
 	case "RUNNING":
 		return core.RemoteRunning
-	case "EXITED":
+	case "EXITED", "ERROR":
 		return core.RemoteFailed
+	case "PROVISIONING", "STARTING":
+		return core.RemotePending
 	case "TERMINATED":
 		return core.RemoteDeleted
 	default:
@@ -473,31 +365,35 @@ func phaseFromDesiredStatus(status string) core.RemotePhase {
 	}
 }
 
-func statusDetailFromDesiredStatus(status string) (string, string) {
+func statusDetailFromStatus(status string) (string, string) {
 	if status == "EXITED" {
 		return ReasonRemoteExited, "RunPod reported EXITED; the container exit code is not available"
+	}
+	if status == "ERROR" {
+		return "RemoteError", "RunPod reported an unrecoverable container error"
 	}
 	return "", ""
 }
 
 func hourlyCost(pod podResponse) float64 {
-	if pod.AdjustedCostPerHr > 0 {
-		return pod.AdjustedCostPerHr
-	}
-	if pod.CostPerHr.set {
-		return pod.CostPerHr.value
+	if pod.Cost != nil {
+		return *pod.Cost
 	}
 	return 0
 }
 
 func costSource(pod podResponse) string {
-	if pod.AdjustedCostPerHr > 0 {
-		return "runpod.adjustedCostPerHr"
-	}
-	if pod.CostPerHr.set {
-		return "runpod.costPerHr"
+	if pod.Cost != nil {
+		return "runpod.cost"
 	}
 	return ""
+}
+
+func containerUptime(pod podResponse) time.Duration {
+	if pod.Status != "RUNNING" || pod.Runtime == nil || pod.Runtime.Uptime <= 0 {
+		return 0
+	}
+	return time.Duration(pod.Runtime.Uptime) * time.Second
 }
 
 func externalName(idempotencyKey string) string {
@@ -506,46 +402,6 @@ func externalName(idempotencyKey string) string {
 		return name[:191]
 	}
 	return name
-}
-
-// startCommand maps Kubernetes command and args onto RunPod's ENTRYPOINT and
-// CMD overrides. RunPod rejects null and treats an omitted or empty field as
-// "use the image default", so empty values are left out of the request.
-//
-// Kubernetes ignores the image CMD when only command is set, but RunPod v1
-// cannot clear CMD. The command is therefore split into ENTRYPOINT and CMD so
-// that the image CMD is replaced as well. A single-element command without
-// args still gets the image CMD appended.
-func startCommand(command []string, args []string) ([]string, []string) {
-	switch {
-	case len(command) == 0:
-		return nil, cloneStrings(args)
-	case len(args) > 0:
-		return cloneStrings(command), cloneStrings(args)
-	default:
-		return cloneStrings(command[:1]), cloneStrings(command[1:])
-	}
-}
-
-func cloneStrings(values []string) []string {
-	if len(values) == 0 {
-		return nil
-	}
-	return append([]string(nil), values...)
-}
-
-func gpuTypeIDs(gpuType string) []string {
-	if gpuType == "" {
-		return nil
-	}
-	return []string{gpuType}
-}
-
-func priorityForList(raw string) string {
-	if strings.Contains(raw, ",") {
-		return "custom"
-	}
-	return ""
 }
 
 func runpodPorts(ports []core.Port) []string {
@@ -568,23 +424,6 @@ func providerHint(request core.WorkloadRequest, key string) string {
 		return ""
 	}
 	return strings.TrimSpace(request.ProviderHints[key])
-}
-
-func providerHintOrDefault(request core.WorkloadRequest, key string, fallback string) string {
-	value := providerHint(request, key)
-	if value != "" {
-		return value
-	}
-	return fallback
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
 }
 
 func splitCSV(raw string) []string {
@@ -636,7 +475,21 @@ func providerDecodeError(req *http.Request, err error) error {
 }
 
 func providerHTTPError(req *http.Request, statusCode int, body []byte) error {
-	class := classifyHTTPStatus(statusCode, string(body))
+	message := strings.TrimSpace(string(body))
+	var problem struct {
+		Title  string   `json:"title"`
+		Detail string   `json:"detail"`
+		Errors []string `json:"errors"`
+	}
+	if json.Unmarshal(body, &problem) == nil && problem.Title != "" {
+		parts := []string{problem.Title}
+		if problem.Detail != "" {
+			parts = append(parts, problem.Detail)
+		}
+		parts = append(parts, problem.Errors...)
+		message = strings.Join(parts, ": ")
+	}
+	class := classifyHTTPStatus(statusCode, message)
 	err := fmt.Errorf("unexpected status %d for %s %s", statusCode, req.Method, req.URL.Path)
 	if class == core.ErrorClassRemoteNotFound {
 		err = core.ErrRemoteNotFound
@@ -646,7 +499,7 @@ func providerHTTPError(req *http.Request, statusCode int, body []byte) error {
 		Operation:  strings.ToLower(req.Method),
 		StatusCode: statusCode,
 		Class:      class,
-		Message:    strings.TrimSpace(string(body)),
+		Message:    message,
 		Err:        err,
 	}
 }
@@ -662,15 +515,19 @@ func classifyHTTPStatus(statusCode int, body string) core.ErrorClass {
 		return core.ErrorClassConflict
 	case statusCode == http.StatusTooManyRequests:
 		return core.ErrorClassRateLimited
-	case strings.Contains(lowerBody, "capacity") || strings.Contains(lowerBody, "available"):
-		return core.ErrorClassCapacity
-	case strings.Contains(lowerBody, "quota") || strings.Contains(lowerBody, "limit"):
+	case statusCode == http.StatusPaymentRequired:
 		return core.ErrorClassQuota
-	case statusCode == http.StatusBadRequest || statusCode == http.StatusUnprocessableEntity:
-		// RunPod rejected the request itself, for example a schema error.
+	case statusCode == http.StatusUnprocessableEntity || statusCode == http.StatusRequestEntityTooLarge:
 		return core.ErrorClassUnsupportedSpec
 	case statusCode >= 500:
 		return core.ErrorClassTransient
+	case strings.Contains(lowerBody, "capacity") || strings.Contains(lowerBody, "no longer any instances available"):
+		return core.ErrorClassCapacity
+	case strings.Contains(lowerBody, "quota") || strings.Contains(lowerBody, "limit"):
+		return core.ErrorClassQuota
+	case statusCode == http.StatusBadRequest:
+		// RunPod rejected the request itself, for example a schema error.
+		return core.ErrorClassUnsupportedSpec
 	default:
 		return core.ErrorClassUnknown
 	}
@@ -687,32 +544,21 @@ func cloneStringMap(in map[string]string) map[string]string {
 	return out
 }
 
-// endpointsFromPod maps RunPod's public TCP port mappings. RunPod usually
-// publishes a container port on a different public port, for example
-// {"8000": 40123}, so callers must not assume the container port.
+// endpointsFromPod exposes only public TCP mappings reported by the runtime.
 func endpointsFromPod(pod podResponse) []core.Endpoint {
-	host := strings.TrimSpace(pod.PublicIP)
-	if host == "" || len(pod.PortMappings) == 0 {
+	if pod.Runtime == nil {
 		return nil
 	}
-	endpoints := make([]core.Endpoint, 0, len(pod.PortMappings))
-	for key, publicPort := range pod.PortMappings {
-		containerPort, err := strconv.Atoi(strings.TrimSpace(strings.SplitN(key, "/", 2)[0]))
-		if err != nil || containerPort <= 0 || publicPort <= 0 {
+	var endpoints []core.Endpoint
+	for _, port := range pod.Runtime.Ports {
+		host := strings.TrimSpace(port.IP)
+		if port.Type != "tcp" || host == "" || port.Private <= 0 || port.Private > 65535 || port.Public <= 0 || port.Public > 65535 {
 			continue
 		}
 		endpoints = append(endpoints, core.Endpoint{
-			ContainerPort: containerPort,
-			Protocol:      "TCP",
-			Host:          host,
-			Port:          publicPort,
+			ContainerPort: port.Private, Protocol: "TCP", Host: host, Port: port.Public,
 		})
 	}
-	sort.Slice(endpoints, func(i, j int) bool {
-		return endpoints[i].ContainerPort < endpoints[j].ContainerPort
-	})
-	if len(endpoints) == 0 {
-		return nil
-	}
+	sort.Slice(endpoints, func(i, j int) bool { return endpoints[i].ContainerPort < endpoints[j].ContainerPort })
 	return endpoints
 }
