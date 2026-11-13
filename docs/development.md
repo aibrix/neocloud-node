@@ -103,18 +103,25 @@ Defaults:
 
 - GPU type: `NVIDIA A40`
 - GPU count: `1`
+- Cloud: `SECURE` (override with `RUNPOD_E2E_CLOUD_TYPE=COMMUNITY`)
 - Virtual node: `neocloud-node-runpod-e2e`
 - Binary: `/tmp/neocloud-node-e2e`
 
-Optional capacity-classification check:
+Optional unsupported-spot check:
 
 ```bash
-RUNPOD_E2E=1 RUNPOD_E2E_CAPACITY_CHECK=1 hack/e2e/runpod-smoke.sh
+RUNPOD_E2E=1 RUNPOD_E2E_SPOT_CHECK=1 hack/e2e/runpod-smoke.sh
 ```
 
-The capacity check requests `NVIDIA A40` with `COMMUNITY` and spot. If capacity
-is unavailable, the binding condition must be `Capacity`. If capacity is
-available, the script deletes the created Pod.
+The spot check requests `COMMUNITY` and spot and requires `UnsupportedSpec`
+without a remote allocation, because REST v2 does not support spot Pods.
+
+Set `KUBECONFIG` to select the test cluster. `RUNPOD_BASE_URL` overrides the v2
+endpoint for both the script and its controller. The smoke workload uses a small
+BusyBox container; it does not download a model. Set
+`RUNPOD_E2E_WAIT_FOR_COMPLETION=1` to additionally exercise restart detection and
+stop behavior. A cleanup API failure makes the run fail and retains bindings
+for recovery rather than removing their finalizers.
 
 ### Lambda Cloud
 
