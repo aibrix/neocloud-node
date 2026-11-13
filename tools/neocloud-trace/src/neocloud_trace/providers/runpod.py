@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import dataclasses
+import datetime as dt
 import json
 import os
 import threading
@@ -146,12 +147,14 @@ class RunPodResearchClient:
         if bucket_size not in {"hour", "day", "week", "month", "year"}:
             raise ValueError("unsupported RunPod billing bucket size")
         records: list[ProviderBillingRecord] = []
+        end_time = dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
         for resource_id in resource_ids:
             query = urllib.parse.urlencode(
                 {
                     "bucketSize": bucket_size,
                     "podId": resource_id,
                     "startTime": start_time,
+                    "endTime": end_time,
                 }
             )
             response = self._request(
