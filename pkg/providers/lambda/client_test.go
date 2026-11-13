@@ -7,6 +7,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -274,6 +275,40 @@ func TestClientListBackfillsRemoteRequestShape(t *testing.T) {
 	}
 	if request.ProviderHints[core.AnnotationLambdaInstanceType] != "gpu_1x_a10" {
 		t.Fatalf("provider hints = %#v, want lambda instance type", request.ProviderHints)
+	}
+}
+
+func TestClientSupportsCompleteStatusListing(t *testing.T) {
+	if _, ok := any(NewClient(Config{})).(core.RemoteStatusLister); !ok {
+		t.Fatal("Lambda client must opt into complete batch status listing")
+	}
+}
+
+func TestClientBatchStatusMatchesGet(t *testing.T) {
+	t.Parallel()
+	const instance = `{"id":"lambda-1","name":"managed","status":"active","region":{"name":"us-west-1"},"instance_type":{"name":"gpu_1x_a10","gpu_description":"A10","price_cents_per_hour":74,"specs":{"gpus":1}}}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/instances":
+			_, _ = w.Write([]byte(`{"data":[` + instance + `]}`))
+		case "/instances/lambda-1":
+			_, _ = w.Write([]byte(`{"data":` + instance + `}`))
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := NewClient(Config{BaseURL: server.URL})
+	listed, err := client.ListRemoteStatuses(context.Background())
+	if err != nil || len(listed) != 1 {
+		t.Fatalf("ListRemoteStatuses() = %#v, %v", listed, err)
+	}
+	got, err := client.Get(context.Background(), "lambda-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(listed[0], got) {
+		t.Fatalf("list status = %#v, Get status = %#v", listed[0], got)
 	}
 }
 

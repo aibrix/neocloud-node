@@ -148,6 +148,10 @@ func (c *Client) ListRemoteResources(ctx context.Context) ([]core.RemoteResource
 	return c.List(ctx, InstanceFilter{})
 }
 
+func (c *Client) ListRemoteStatuses(ctx context.Context) ([]core.RemoteResource, error) {
+	return c.ListRemoteResources(ctx)
+}
+
 func (c *Client) FindByExternalName(ctx context.Context, name string) (core.RemoteResource, error) {
 	instances, err := c.List(ctx, InstanceFilter{Name: name})
 	if err != nil {

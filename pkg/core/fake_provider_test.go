@@ -65,3 +65,10 @@ func TestFakeProviderGetAndDelete(t *testing.T) {
 		t.Fatalf("Get after delete returned nil error, want not found")
 	}
 }
+
+func TestFakeProviderSupportsCompleteStatusListing(t *testing.T) {
+	provider := NewFakeProvider("fake")
+	if _, ok := any(provider).(RemoteStatusLister); !ok {
+		t.Fatal("fake provider must opt into complete batch status listing")
+	}
+}

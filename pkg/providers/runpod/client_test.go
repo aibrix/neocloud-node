@@ -14,6 +14,12 @@ import (
 	"github.com/aibrix/neocloud-node/pkg/core"
 )
 
+func TestClientKeepsPerPodGetForUptime(t *testing.T) {
+	if _, ok := any(NewClient(Config{})).(core.RemoteStatusLister); ok {
+		t.Fatal("RunPod list lacks container uptime; periodic sync must keep per-Pod Get")
+	}
+}
+
 func TestClientCreateSendsRunPodPayload(t *testing.T) {
 	t.Parallel()
 

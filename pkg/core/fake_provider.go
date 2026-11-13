@@ -164,6 +164,10 @@ func (p *FakeProvider) ListRemoteResources(ctx context.Context) ([]RemoteResourc
 	return remotes, nil
 }
 
+func (p *FakeProvider) ListRemoteStatuses(ctx context.Context) ([]RemoteResource, error) {
+	return p.ListRemoteResources(ctx)
+}
+
 // Stop stops a fake remote resource, like a provider that keeps the disk of a
 // stopped workload.
 func (p *FakeProvider) Stop(ctx context.Context, remoteID string) error {
