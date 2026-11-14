@@ -44,10 +44,10 @@ func TestClientCreateSendsRunPodPayload(t *testing.T) {
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte(`{
 			"id": "runpod-1",
-			"desiredStatus": "RUNNING",
+			"status": "RUNNING",
 			"image": "example.com/train:latest",
-			"costPerHr": 0.44,
-			"gpu": {"count": 1, "displayName": "NVIDIA H100"}
+			"cost": 0.44,
+			"gpu": {"count": 1, "id": "NVIDIA H100"}
 		}`))
 	}))
 	defer server.Close()
@@ -66,15 +66,14 @@ func TestClientCreateSendsRunPodPayload(t *testing.T) {
 		Ports: []core.Port{
 			{Name: "metrics", ContainerPort: 9090, Protocol: "TCP"},
 		},
-		MarketType: core.MarketTypeSpot,
+		MarketType: core.MarketTypeOnDemand,
 		ProviderHints: map[string]string{
-			core.AnnotationRunPodTemplateID:         "template-1",
-			core.AnnotationRunPodDataCenterIDs:      "US-TX-3,EU-RO-1",
-			core.AnnotationRunPodDataCenterPriority: "custom",
-			core.AnnotationRunPodNetworkVolumeID:    "volume-1",
-			core.AnnotationRunPodRegistryAuthID:     "registry-1",
-			core.AnnotationRunPodVolumeMountPath:    "/workspace",
-			core.AnnotationRunPodCloudType:          "COMMUNITY",
+			core.AnnotationRunPodTemplateID:      "template-1",
+			core.AnnotationRunPodDataCenterIDs:   "US-TX-3,EU-RO-1",
+			core.AnnotationRunPodNetworkVolumeID: "volume-1",
+			core.AnnotationRunPodRegistryAuthID:  "registry-1",
+			core.AnnotationRunPodVolumeMountPath: "/workspace",
+			core.AnnotationRunPodCloudType:       "COMMUNITY",
 		},
 	})
 	if err != nil {
@@ -92,30 +91,31 @@ func TestClientCreateSendsRunPodPayload(t *testing.T) {
 	if math.Abs(remote.HourlyCost-0.44) > 0.000001 {
 		t.Fatalf("remote hourly cost = %.2f, want 0.44", remote.HourlyCost)
 	}
-	if remote.CostSource != "runpod.costPerHr" {
-		t.Fatalf("remote cost source = %q, want runpod.costPerHr", remote.CostSource)
+	if remote.CostSource != "runpod.cost" {
+		t.Fatalf("remote cost source = %q, want runpod.cost", remote.CostSource)
 	}
 
 	assertPayloadString(t, gotPayload, "name", "neocloud-node-default-pod-123")
-	assertPayloadString(t, gotPayload, "imageName", "example.com/train:latest")
-	assertPayloadString(t, gotPayload, "computeType", "GPU")
-	assertPayloadStringSlice(t, gotPayload, "dockerEntrypoint", []string{"python"})
-	assertPayloadStringSlice(t, gotPayload, "dockerStartCmd", []string{"train.py"})
-	assertPayloadStringSlice(t, gotPayload, "gpuTypeIds", []string{"NVIDIA H100"})
+	assertPayloadString(t, gotPayload, "image", "example.com/train:latest")
+	assertPayloadStringSlice(t, gotPayload, "entrypoint", []string{"python"})
+	assertPayloadStringSlice(t, gotPayload, "cmd", []string{"train.py"})
 	assertPayloadStringSlice(t, gotPayload, "ports", []string{"9090/tcp"})
 	assertPayloadStringSlice(t, gotPayload, "dataCenterIds", []string{"US-TX-3", "EU-RO-1"})
-	assertPayloadString(t, gotPayload, "dataCenterPriority", "custom")
 	assertPayloadString(t, gotPayload, "templateId", "template-1")
-	assertPayloadString(t, gotPayload, "networkVolumeId", "volume-1")
-	assertPayloadString(t, gotPayload, "containerRegistryAuthId", "registry-1")
-	assertPayloadString(t, gotPayload, "volumeMountPath", "/workspace")
-	assertPayloadString(t, gotPayload, "cloudType", "COMMUNITY")
+	assertPayloadString(t, gotPayload, "registry", "registry-1")
+	assertPayloadString(t, gotPayload, "cloud", "COMMUNITY")
 
-	if gotPayload["gpuCount"] != float64(1) {
-		t.Fatalf("gpuCount = %#v, want 1", gotPayload["gpuCount"])
+	if got := gotPayload["gpu"]; !reflect.DeepEqual(got, map[string]any{"id": "NVIDIA H100", "count": float64(1)}) {
+		t.Fatalf("gpu = %#v", got)
 	}
-	if gotPayload["interruptible"] != true {
-		t.Fatalf("interruptible = %#v, want true", gotPayload["interruptible"])
+	wantMounts := map[string]any{"network": []any{map[string]any{"volumeId": "volume-1", "path": "/workspace"}}}
+	if !reflect.DeepEqual(gotPayload["mounts"], wantMounts) {
+		t.Fatalf("mounts = %#v", gotPayload["mounts"])
+	}
+	for _, field := range []string{"interruptible", "computeType", "gpuCount", "gpuTypeIds", "dataCenterPriority", "networkVolumeId", "volumeMountPath", "args"} {
+		if _, ok := gotPayload[field]; ok {
+			t.Errorf("unexpected field %s", field)
+		}
 	}
 	env, ok := gotPayload["env"].(map[string]any)
 	if !ok {
@@ -136,15 +136,15 @@ func TestClientCreateRecoversLostCreateResponseByExternalName(t *testing.T) {
 		case requests == 1 && r.Method == http.MethodPost && r.URL.Path == "/pods":
 			http.Error(w, "gateway timeout", http.StatusGatewayTimeout)
 		case requests == 2 && r.Method == http.MethodGet && r.URL.Path == "/pods":
-			if got := r.URL.Query().Get("name"); got != "neocloud-node-default-pod-123" {
-				t.Fatalf("name query = %q, want external name", got)
+			if r.URL.RawQuery != "" {
+				t.Errorf("unexpected query: %s", r.URL.RawQuery)
 			}
-			_, _ = w.Write([]byte(`[{
+			_, _ = w.Write([]byte(`{"pods":[{
 				"id": "runpod-existing",
 				"name": "neocloud-node-default-pod-123",
-				"desiredStatus": "RUNNING",
+				"status": "RUNNING",
 				"image": "example.com/train:latest"
-			}]`))
+			}],"pagination":{"nextCursor":null,"hasNextPage":false}}`))
 		default:
 			t.Fatalf("unexpected request %d %s %s", requests, r.Method, r.URL.String())
 		}
@@ -155,6 +155,7 @@ func TestClientCreateRecoversLostCreateResponseByExternalName(t *testing.T) {
 	remote, err := client.Create(context.Background(), "default/pod-123", core.WorkloadRequest{
 		Image:    "example.com/train:latest",
 		GPUCount: 1,
+		GPUType:  "NVIDIA A40",
 	})
 	if err != nil {
 		t.Fatalf("Create returned error: %v", err)
@@ -175,16 +176,16 @@ func TestClientCreateRecoversDecodeFailureByExternalName(t *testing.T) {
 			w.WriteHeader(http.StatusCreated)
 			_, _ = w.Write([]byte(`{"id":`))
 		case requests == 2 && r.Method == http.MethodGet && r.URL.Path == "/pods":
-			if got := r.URL.Query().Get("name"); got != "neocloud-node-default-pod-123" {
-				t.Fatalf("name query = %q, want external name", got)
+			if r.URL.RawQuery != "" {
+				t.Errorf("unexpected query: %s", r.URL.RawQuery)
 			}
-			_, _ = w.Write([]byte(`[{
+			_, _ = w.Write([]byte(`{"pods":[{
 				"id": "runpod-created",
 				"name": "neocloud-node-default-pod-123",
-				"desiredStatus": "RUNNING",
+				"status": "RUNNING",
 				"image": "example.com/train:latest",
-				"costPerHr": 0.44
-			}]`))
+				"cost": 0.44
+			}],"pagination":{"nextCursor":null,"hasNextPage":false}}`))
 		default:
 			t.Fatalf("unexpected request %d %s %s", requests, r.Method, r.URL.String())
 		}
@@ -195,6 +196,7 @@ func TestClientCreateRecoversDecodeFailureByExternalName(t *testing.T) {
 	remote, err := client.Create(context.Background(), "default/pod-123", core.WorkloadRequest{
 		Image:    "example.com/train:latest",
 		GPUCount: 1,
+		GPUType:  "NVIDIA A40",
 	})
 	if err != nil {
 		t.Fatalf("Create returned error: %v", err)
@@ -229,10 +231,10 @@ func TestClientCreateMapsCommandAndArgs(t *testing.T) {
 		{
 			name:           "command only replaces the image CMD",
 			command:        []string{"sh", "-c", "echo ready; sleep 60"},
-			wantEntrypoint: []string{"sh"},
-			wantStartCmd:   []string{"-c", "echo ready; sleep 60"},
+			wantEntrypoint: []string{"sh", "-c", "echo ready; sleep 60"},
+			wantStartCmd:   []string{},
 		},
-		{name: "single-element command", command: []string{"/start.sh"}, wantEntrypoint: []string{"/start.sh"}},
+		{name: "single-element command", command: []string{"/start.sh"}, wantEntrypoint: []string{"/start.sh"}, wantStartCmd: []string{}},
 	}
 
 	for _, tt := range tests {
@@ -245,7 +247,7 @@ func TestClientCreateMapsCommandAndArgs(t *testing.T) {
 					t.Errorf("decode request body: %v", err)
 				}
 				w.WriteHeader(http.StatusCreated)
-				_, _ = w.Write([]byte(`{"id":"runpod-1","desiredStatus":"RUNNING"}`))
+				_, _ = w.Write([]byte(`{"id":"runpod-1","status":"RUNNING"}`))
 			}))
 			defer server.Close()
 
@@ -255,11 +257,12 @@ func TestClientCreateMapsCommandAndArgs(t *testing.T) {
 				Command:  tt.command,
 				Args:     tt.args,
 				GPUCount: 1,
+				GPUType:  "NVIDIA A40",
 			}); err != nil {
 				t.Fatalf("Create returned error: %v", err)
 			}
-			assertOptionalStringSlice(t, payload, "dockerEntrypoint", tt.wantEntrypoint)
-			assertOptionalStringSlice(t, payload, "dockerStartCmd", tt.wantStartCmd)
+			assertOptionalStringSlice(t, payload, "entrypoint", tt.wantEntrypoint)
+			assertOptionalStringSlice(t, payload, "cmd", tt.wantStartCmd)
 		})
 	}
 }
@@ -269,7 +272,7 @@ func TestClientCreateMapsCommandAndArgs(t *testing.T) {
 func assertOptionalStringSlice(t *testing.T, payload map[string]any, key string, want []string) {
 	t.Helper()
 
-	if len(want) == 0 {
+	if want == nil {
 		if value, ok := payload[key]; ok {
 			t.Fatalf("%s = %#v, want field omitted", key, value)
 		}
@@ -288,16 +291,18 @@ func TestClientClassifiesProviderErrors(t *testing.T) {
 		wantClass      core.ErrorClass
 		wantIsNotFound bool
 	}{
-		{name: "auth", statusCode: http.StatusUnauthorized, body: `{"error":"unauthorized"}`, wantClass: core.ErrorClassAuth},
-		{name: "capacity", statusCode: http.StatusBadRequest, body: `{"error":"insufficient capacity"}`, wantClass: core.ErrorClassCapacity},
-		{name: "capacity in server error", statusCode: http.StatusInternalServerError, body: `{"error":"create pod: There are no longer any instances available with the request specifications."}`, wantClass: core.ErrorClassCapacity},
-		{name: "not found", statusCode: http.StatusNotFound, body: `{"error":"not found"}`, wantClass: core.ErrorClassRemoteNotFound, wantIsNotFound: true},
-		{name: "rate limited", statusCode: http.StatusTooManyRequests, body: `{"error":"rate limited"}`, wantClass: core.ErrorClassRateLimited},
-		{name: "server error", statusCode: http.StatusBadGateway, body: `{"error":"upstream failed"}`, wantClass: core.ErrorClassTransient},
+		{name: "insufficient balance", statusCode: http.StatusPaymentRequired, body: `{"title":"Payment Required","status":402,"detail":"Insufficient balance"}`, wantClass: core.ErrorClassQuota},
+		{name: "validation mentions capacity", statusCode: http.StatusUnprocessableEntity, body: `{"title":"Unprocessable Entity","status":422,"detail":"Invalid capacity field"}`, wantClass: core.ErrorClassUnsupportedSpec},
+		{name: "auth", statusCode: http.StatusUnauthorized, body: `{"title":"Unauthorized","status":401,"detail":"Invalid credentials"}`, wantClass: core.ErrorClassAuth},
+		{name: "capacity", statusCode: http.StatusBadRequest, body: `{"title":"Bad Request","status":400,"detail":"Insufficient capacity"}`, wantClass: core.ErrorClassCapacity},
+		{name: "server error remains transient", statusCode: http.StatusInternalServerError, body: `{"title":"Internal Server Error","status":500,"detail":"There are no longer any instances available with the request specifications."}`, wantClass: core.ErrorClassTransient},
+		{name: "not found", statusCode: http.StatusNotFound, body: `{"title":"Not Found","status":404,"detail":"Pod not found"}`, wantClass: core.ErrorClassRemoteNotFound, wantIsNotFound: true},
+		{name: "rate limited", statusCode: http.StatusTooManyRequests, body: `{"title":"Too Many Requests","status":429,"detail":"Rate limited"}`, wantClass: core.ErrorClassRateLimited},
+		{name: "server error", statusCode: http.StatusBadGateway, body: `{"title":"Bad Gateway","status":502,"detail":"Upstream failed"}`, wantClass: core.ErrorClassTransient},
 		{
 			name:       "invalid request",
-			statusCode: http.StatusBadRequest,
-			body:       `[{"error":"does not meet the schema requirements","problems":["At /pods/properties/dockerStartCmd/type: got null, want array"]}]`,
+			statusCode: http.StatusUnprocessableEntity,
+			body:       `{"title":"Unprocessable Entity","status":422,"detail":"Invalid request","errors":["cmd must be an array"]}`,
 			wantClass:  core.ErrorClassUnsupportedSpec,
 		},
 	}
@@ -328,19 +333,22 @@ func TestClientClassifiesProviderErrors(t *testing.T) {
 	}
 }
 
-func TestClientGetMapsDesiredStatus(t *testing.T) {
+func TestClientGetMapsStatus(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name          string
-		desiredStatus string
-		wantPhase     core.RemotePhase
-		wantReason    string
+		name       string
+		status     string
+		wantPhase  core.RemotePhase
+		wantReason string
 	}{
-		{name: "running", desiredStatus: "RUNNING", wantPhase: core.RemoteRunning},
-		{name: "exited without exit code", desiredStatus: "EXITED", wantPhase: core.RemoteFailed, wantReason: ReasonRemoteExited},
-		{name: "terminated", desiredStatus: "TERMINATED", wantPhase: core.RemoteDeleted},
-		{name: "unknown", desiredStatus: "STARTING", wantPhase: core.RemotePending},
+		{name: "running", status: "RUNNING", wantPhase: core.RemoteRunning},
+		{name: "exited without exit code", status: "EXITED", wantPhase: core.RemoteFailed, wantReason: ReasonRemoteExited},
+		{name: "terminated", status: "TERMINATED", wantPhase: core.RemoteDeleted},
+		{name: "starting", status: "STARTING", wantPhase: core.RemotePending},
+		{name: "provisioning", status: "PROVISIONING", wantPhase: core.RemotePending},
+		{name: "error", status: "ERROR", wantPhase: core.RemoteFailed, wantReason: "RemoteError"},
+		{name: "unknown", status: "FUTURE_STATUS", wantPhase: core.RemotePending},
 	}
 
 	for _, tt := range tests {
@@ -356,10 +364,9 @@ func TestClientGetMapsDesiredStatus(t *testing.T) {
 				}
 				_, _ = w.Write([]byte(`{
 					"id": "runpod-1",
-					"desiredStatus": "` + tt.desiredStatus + `",
+					"status": "` + tt.status + `",
 					"image": "example.com/train:latest",
-					"costPerHr": "0.74",
-					"adjustedCostPerHr": 0.69
+					"cost": 0.69
 				}`))
 			}))
 			defer server.Close()
@@ -381,8 +388,8 @@ func TestClientGetMapsDesiredStatus(t *testing.T) {
 			if tt.wantReason != "" && remote.StatusMessage == "" {
 				t.Fatal("remote status message is empty, want an explanation")
 			}
-			if remote.HourlyCost != 0.69 || remote.CostSource != "runpod.adjustedCostPerHr" {
-				t.Fatalf("cost = %.2f/%q, want 0.69 adjusted source", remote.HourlyCost, remote.CostSource)
+			if remote.HourlyCost != 0.69 || remote.CostSource != "runpod.cost" {
+				t.Fatalf("cost = %.2f/%q, want 0.69 runpod.cost", remote.HourlyCost, remote.CostSource)
 			}
 		})
 	}
@@ -398,23 +405,22 @@ func TestClientGetMapsPublicEndpoints(t *testing.T) {
 	}{
 		{
 			name: "remapped ports",
-			body: `{"id":"runpod-1","desiredStatus":"RUNNING","publicIp":"203.0.113.10",` +
-				`"portMappings":{"8000":40123,"22":40001,"9090/tcp":40500}}`,
+			body: `{"id":"runpod-1","status":"RUNNING","runtime":{"ports":[
+    {"private":8000,"public":40123,"type":"tcp","ip":"203.0.113.10"},
+    {"private":22,"public":40001,"type":"tcp","ip":"203.0.113.10"},
+    {"private":9090,"public":40500,"type":"tcp","ip":"203.0.113.11"}]}}`,
 			want: []core.Endpoint{
 				{ContainerPort: 22, Protocol: "TCP", Host: "203.0.113.10", Port: 40001},
 				{ContainerPort: 8000, Protocol: "TCP", Host: "203.0.113.10", Port: 40123},
-				{ContainerPort: 9090, Protocol: "TCP", Host: "203.0.113.10", Port: 40500},
+				{ContainerPort: 9090, Protocol: "TCP", Host: "203.0.113.11", Port: 40500},
 			},
 		},
-		{
-			name: "address not assigned yet",
-			body: `{"id":"runpod-1","desiredStatus":"RUNNING","publicIp":"","portMappings":null}`,
-		},
-		{
-			name: "invalid mappings ignored",
-			body: `{"id":"runpod-1","desiredStatus":"RUNNING","publicIp":"203.0.113.10",` +
-				`"portMappings":{"http":40123,"8000":0}}`,
-		},
+		{name: "address not assigned yet", body: `{"id":"runpod-1","status":"STARTING","runtime":null}`},
+		{name: "nonpublic and non-TCP ports ignored", body: `{"id":"runpod-1","status":"RUNNING","runtime":{"ports":[
+   {"private":8888,"public":null,"type":"http","ip":null},
+   {"private":22,"public":40001,"type":"tcp","ip":null},
+   {"private":8000,"public":0,"type":"tcp","ip":"203.0.113.10"},
+   {"private":9000,"public":40123,"type":"udp","ip":"203.0.113.10"}]}}`},
 	}
 
 	for _, tt := range tests {
@@ -438,63 +444,46 @@ func TestClientGetMapsPublicEndpoints(t *testing.T) {
 	}
 }
 
-func TestClientGetReadsContainerUptimeFromV2(t *testing.T) {
+func TestClientGetReadsContainerUptime(t *testing.T) {
 	t.Parallel()
-
-	tests := []struct {
-		name     string
-		v2Status int
-		v2Body   string
-		want     time.Duration
+	for _, tt := range []struct {
+		name, body string
+		want       time.Duration
 	}{
-		{name: "running", v2Status: http.StatusOK, v2Body: `{"status":"RUNNING","runtime":{"uptime":90}}`, want: 90 * time.Second},
-		{name: "starting", v2Status: http.StatusOK, v2Body: `{"status":"STARTING","runtime":null}`},
-		{name: "no runtime", v2Status: http.StatusOK, v2Body: `{"status":"RUNNING","runtime":null}`},
-		{name: "zero uptime", v2Status: http.StatusOK, v2Body: `{"status":"RUNNING","runtime":{"uptime":0}}`},
-		{name: "v2 error is ignored", v2Status: http.StatusBadGateway, v2Body: `{"title":"Bad Gateway"}`},
-	}
-
-	for _, tt := range tests {
+		{"running", `{"status":"RUNNING","runtime":{"uptime":90}}`, 90 * time.Second},
+		{"starting", `{"status":"STARTING","runtime":{"uptime":90}}`, 0},
+		{"no runtime", `{"status":"RUNNING","runtime":null}`, 0},
+		{"zero uptime", `{"status":"RUNNING","runtime":{"uptime":0}}`, 0},
+		{"negative uptime", `{"status":"RUNNING","runtime":{"uptime":-1}}`, 0},
+	} {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
+			calls := 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				switch r.URL.Path {
-				case "/v1/pods/runpod-1":
-					_, _ = w.Write([]byte(`{"id":"runpod-1","desiredStatus":"RUNNING"}`))
-				case "/v2/pods/runpod-1":
-					if r.Header.Get("Authorization") != "Bearer test-token" {
-						t.Errorf("v2 authorization header = %q", r.Header.Get("Authorization"))
-					}
-					w.WriteHeader(tt.v2Status)
-					_, _ = w.Write([]byte(tt.v2Body))
-				default:
+				calls++
+				if r.URL.Path != "/v2/pods/runpod-1" {
 					t.Errorf("unexpected path %s", r.URL.Path)
-					w.WriteHeader(http.StatusNotFound)
 				}
+				_, _ = w.Write([]byte(tt.body))
 			}))
 			defer server.Close()
-
-			client := NewClient(Config{BaseURL: server.URL + "/v1", V2BaseURL: server.URL + "/v2", APIKey: "test-token"})
-			remote, err := client.Get(context.Background(), "runpod-1")
+			remote, err := NewClient(Config{BaseURL: server.URL + "/v2"}).Get(context.Background(), "runpod-1")
 			if err != nil {
-				t.Fatalf("Get returned error: %v", err)
+				t.Fatal(err)
 			}
-			if remote.ContainerUptime != tt.want {
-				t.Fatalf("container uptime = %s, want %s", remote.ContainerUptime, tt.want)
+			if calls != 1 || remote.ContainerUptime != tt.want {
+				t.Fatalf("calls=%d uptime=%s, want 1/%s", calls, remote.ContainerUptime, tt.want)
 			}
 		})
 	}
 }
 
-func TestClientV2BaseURLDefaults(t *testing.T) {
+func TestClientBaseURLDefaults(t *testing.T) {
 	t.Parallel()
-
-	if got := NewClient(Config{}).v2BaseURL; got != defaultV2BaseURL {
-		t.Fatalf("default v2 base URL = %q, want %q", got, defaultV2BaseURL)
+	if got := NewClient(Config{}).baseURL; got != "https://api.runpod.io/v2" {
+		t.Fatalf("base URL = %q", got)
 	}
-	if got := NewClient(Config{BaseURL: "http://127.0.0.1:1/v1"}).v2BaseURL; got != "" {
-		t.Fatalf("v2 base URL with a custom v1 URL = %q, want disabled", got)
+	if got := NewClient(Config{BaseURL: "http://127.0.0.1:1/v2/"}).baseURL; got != "http://127.0.0.1:1/v2" {
+		t.Fatalf("base URL = %q", got)
 	}
 }
 
@@ -516,11 +505,15 @@ func TestClientStop(t *testing.T) {
 			t.Parallel()
 
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodPost || r.URL.Path != "/pods/runpod-1/stop" {
-					t.Errorf("request = %s %s, want POST /pods/runpod-1/stop", r.Method, r.URL.Path)
+				if r.Method != http.MethodPost || r.URL.Path != "/pods/runpod-1/action" {
+					t.Errorf("request = %s %s, want POST /pods/runpod-1/action", r.Method, r.URL.Path)
+				}
+				var body map[string]string
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil || !reflect.DeepEqual(body, map[string]string{"action": "stop"}) {
+					t.Errorf("stop body = %#v, err %v", body, err)
 				}
 				w.WriteHeader(tt.status)
-				_, _ = w.Write([]byte(`{"id":"runpod-1","desiredStatus":"EXITED"}`))
+				_, _ = w.Write([]byte(`{"id":"runpod-1","status":"EXITED"}`))
 			}))
 			defer server.Close()
 
@@ -542,15 +535,14 @@ func TestClientListBackfillsRemoteRequestShape(t *testing.T) {
 		if r.URL.Path != "/pods" {
 			t.Fatalf("path = %s, want /pods", r.URL.Path)
 		}
-		_, _ = w.Write([]byte(`[{
+		_, _ = w.Write([]byte(`{"pods":[{
 			"id": "runpod-1",
 			"name": "neocloud-node-default-pod-123",
-			"desiredStatus": "RUNNING",
-			"interruptible": true,
-			"costPerHr": 0.74,
-			"gpu": {"count": 1, "displayName": "A40"},
-			"machine": {"dataCenterId": "US-TX-3"}
-		}]`))
+			"status": "RUNNING",
+			"cost": 0.74,
+			"gpu": {"count": 1, "id": "A40"},
+			"dataCenterId": "US-TX-3"
+		}],"pagination":{"nextCursor":null,"hasNextPage":false}}`))
 	}))
 	defer server.Close()
 
@@ -566,8 +558,8 @@ func TestClientListBackfillsRemoteRequestShape(t *testing.T) {
 	if request.Provider != providerName || request.GPUType != "A40" || request.GPUCount != 1 || request.RegionHint != "US-TX-3" {
 		t.Fatalf("request shape = %#v, want runpod A40 in US-TX-3", request)
 	}
-	if request.MarketType != core.MarketTypeSpot {
-		t.Fatalf("market type = %q, want spot", request.MarketType)
+	if request.MarketType != core.MarketTypeOnDemand {
+		t.Fatalf("market type = %q, want on-demand", request.MarketType)
 	}
 	if request.ProviderHints[core.AnnotationRunPodDataCenterIDs] != "US-TX-3" {
 		t.Fatalf("provider hints = %#v, want datacenter hint", request.ProviderHints)

@@ -1,129 +1,136 @@
 # RunPod Adapter
 
-Date: 2026-06-06
+The RunPod adapter uses REST v2 at `https://api.runpod.io/v2`. Its contract tests
+use local `httptest` servers; the optional smoke test creates a paid GPU Pod.
 
-The Phase 2 RunPod adapter implements the core `ProviderAdapter` interface against the RunPod REST Pods API. It is covered by local `httptest` contract tests and does not require a real RunPod API key.
+API references:
 
-Official API references:
+- [Migration guide](https://docs.runpod.io/api-reference-v2/migrate-from-v1)
+- [Official OpenAPI schema](https://api.runpod.io/v2/openapi.json), specifically
+  `CreatePodRequest`, `BaseContainerConfig`, `Pod`, and `ListPodsResponse`.
 
-- Create Pod: `POST https://rest.runpod.io/v1/pods`
-- List Pods: `GET https://rest.runpod.io/v1/pods`
-- Find Pod by ID: `GET https://rest.runpod.io/v1/pods/{podId}`
-- Delete Pod: `DELETE https://rest.runpod.io/v1/pods/{podId}`
-- Templates, network volumes, registry auth and billing are separate RunPod API surfaces and should stay adapter-owned.
+Set `GPU_BURST_RUNPOD_BASE_URL` only when overriding the API endpoint. Remove old
+`/v1` overrides. The separate `Config.V2BaseURL` runtime reader has been removed;
+`Config.BaseURL` now serves every operation.
 
-## Request Mapping
+## Request mapping
 
-| `core.WorkloadRequest` | RunPod create field | Notes |
-| --- | --- | --- |
-| idempotency key | `name` | Sanitized as `neocloud-node-<namespace>-<uid>`. Transient create failures are recovered by listing this external name before retrying. |
-| `Image` | `imageName` | Required by transformer. |
-| `Command`, `Args` | `dockerEntrypoint`, `dockerStartCmd` | See [Command and args](#command-and-args). |
-| `Env` | `env` | Literal env map only. |
-| `GPUCount` | `gpuCount` | Required to be greater than zero by transformer. |
-| `GPUType` | `gpuTypeIds` | Single-item list when set. |
-| `MarketType=spot` | `interruptible` | Creates an interruptible/spot Pod. |
-| `Ports` | `ports` | Converted to RunPod strings such as `9090/tcp`. |
-| provider hint `runpod-cloud-type` | `cloudType` | `SECURE` or `COMMUNITY`. |
-| provider hint `runpod-template-id` | `templateId` | Uses a RunPod template. |
-| provider hint `runpod-datacenter-ids` | `dataCenterIds` | Comma-separated annotation becomes ordered array. |
-| provider hint `runpod-datacenter-priority` | `dataCenterPriority` | Use `custom` when user order must be preserved. |
-| provider hint `runpod-network-volume-id` | `networkVolumeId` | Attaches a network volume. |
-| provider hint `runpod-registry-auth-id` | `containerRegistryAuthId` | Uses an existing RunPod registry auth object. |
-| provider hint `runpod-volume-mount-path` | `volumeMountPath` | Mount path for pod/network volume. |
-| constant | `computeType: GPU` | Phase 2 only targets GPU pods. |
+- The idempotency key becomes a sanitized `name` with the `neocloud-node-` prefix.
+- `Image` maps to `image`; environment variables map to `env`.
+- `GPUType` and `GPUCount` map to `gpu.id` and `gpu.count`. An explicit single GPU
+  type is required. Missing types and comma-separated fallback lists are rejected.
+- Ports map to strings such as `9090/tcp`. No implicit SSH or HTTP port is added.
+- `runpod-cloud-type` maps to `cloud` (`SECURE` or `COMMUNITY`). Omission uses
+  RunPod's `SECURE` default.
+- `runpod-template-id` maps to `templateId`. RunPod copies template settings at
+  creation; later template changes do not update the Pod.
+- `runpod-datacenter-ids` maps to `dataCenterIds`. These constrain placement;
+  the adapter does not promise that their order controls scheduling.
+- `runpod-registry-auth-id` maps to `registry`, a credential ID string in the
+  current schema. Kubernetes `imagePullSecrets` are not converted automatically.
+- `runpod-network-volume-id` maps to `mounts.network[0].volumeId`;
+  `runpod-volume-mount-path` supplies its `path`, defaulting to `/workspace`.
 
-## Command and Args
+All annotation names above have the `cloud.aibrix.ai/` prefix.
 
-RunPod rejects `null` for `dockerEntrypoint` and `dockerStartCmd`, and treats an
-omitted or empty field as "use the image default". Empty fields are therefore
-omitted.
+`market-type: spot` and `runpod-datacenter-priority` have no v2 equivalent and
+return `UnsupportedSpecError` before any HTTP request. They are not silently
+converted to on-demand requests or unordered placement.
 
-| Pod `command` | Pod `args` | `dockerEntrypoint` | `dockerStartCmd` |
-| --- | --- | --- | --- |
-| empty | empty | omitted (image ENTRYPOINT) | omitted (image CMD) |
-| empty | set | omitted (image ENTRYPOINT) | `args` |
-| set | set | `command` | `args` |
-| set | empty | `command[0]` | `command[1:]` |
+Without a template, the adapter sends `disk: 50`, preserving the
+[documented v1 container-disk default](https://rest.runpod.io/v1/openapi.json).
+Although the v2 schema leaves `disk` optional, live template-free creation was
+rejected without it. Templates retain their own container-disk settings.
 
-Kubernetes ignores the image CMD when only `command` is set. RunPod v1 cannot
-clear CMD, so the command is split across ENTRYPOINT and CMD to replace both.
-A single-element `command` without `args` still gets the image CMD appended.
+Without a template or network volume, the adapter explicitly requests a 20 GB
+persistent mount at `/workspace` (or the annotated mount path), preserving v1's
+storage default. v2 otherwise creates no persistent volume. A template supplies
+its own storage unless a network volume is explicitly requested. A mount-path
+annotation with a template but without a network volume is rejected: v2 requires
+both size and path for a persistent mount, and the adapter cannot infer the
+intended template volume size.
 
-## Status Mapping
+## Command and args
 
-| RunPod `desiredStatus` | `core.RemotePhase` | Pod result |
-| --- | --- | --- |
-| `RUNNING` | `RemoteRunning` | `Running` |
-| `EXITED` | `RemoteFailed` | `Failed`, reason `RemoteExited` |
-| `TERMINATED` | `RemoteDeleted` | `Succeeded`, reason `RemoteWorkloadDeleted` |
-| unknown / empty | `RemotePending` | `Pending` |
+The adapter uses exec-form arrays, avoiding shell quoting or string joining:
 
-`EXITED` means the Pod was stopped, by the controller, by a user or by the host.
-A container that exits on its own is restarted by RunPod instead; see
-[Container restarts](#container-restarts).
+- Neither set: omit `entrypoint` and `cmd`, preserving image/template defaults.
+- Only args set: send `cmd`, preserving the image ENTRYPOINT.
+- Both set: send `entrypoint` and `cmd` unchanged.
+- Only command set: send the entire command as `entrypoint` and `cmd: []`.
 
-RunPod does not report the container exit code. `EXITED` therefore cannot be
-told apart from a crash, an out-of-memory kill, or a reclaimed host, so it is
-reported as `Failed` with reason `RemoteExited` instead of `Succeeded`. A Job
-retries such a Pod according to its `backoffLimit`, including a run that
-actually exited with code 0. A Pod reaches `Succeeded` only through a runner
-callback that reports exit code 0, which RunPod Pods do not have yet.
+The v2 schema explicitly supports an empty array to clear CMD. This replaces the
+v1 workaround that split the command and could append an unwanted image CMD.
 
-The exited RunPod Pod is not deleted automatically. It no longer bills GPU time,
-but it keeps its disk until the Kubernetes Pod is deleted.
+## Lifecycle and recovery
 
-## Container Restarts
+`POST /pods` returns 201; provisioning is asynchronous. Status mappings are:
 
-RunPod restarts an exited container in place: `desiredStatus` stays `RUNNING`
-and no exit code is reported. The v1 API exposes no signal for this, so `Get`
-also reads `GET https://api.runpod.io/v2/pods/{podId}` and sets
-`RemoteResource.ContainerUptime` from `runtime.uptime` while the v2 `status` is
-`RUNNING`. `runtime` is null while the image is pulled. A failed v2 read is
-ignored for that sync.
+- `PROVISIONING`, `STARTING`, unknown or empty: Pending.
+- `RUNNING`: Running.
+- `ERROR`: Failed with reason `RemoteError`.
+- `EXITED`: Failed with reason `RemoteExited`; an exit code is unavailable.
+- `TERMINATED`: Deleted.
 
-RunPod refreshes `runtime.uptime` about every 30 seconds and reports the same
-value in between, so the uptime cannot be turned into an exact start time. The
-lifecycle records the last uptime on the binding, and an uptime lower than that
-is a restart. See
-[Restart semantics](compatibility-matrix.md#restart-semantics) for how
-`restartPolicy` is applied. `Stop` calls `POST /pods/{podId}/stop`, which
-releases the GPU and keeps the disk; the Pod then reports `EXITED`.
+`EXITED` is not evidence of successful completion. The stopped Pod can still
+retain billable storage until deletion.
 
-## Endpoints
+`GET /pods` returns a `pods` array with cursor pagination. The adapter follows
+`pagination.nextCursor` while `hasNextPage` is true, then filters names locally.
+No v1 name or include query parameters are sent. Missing pagination or repeated
+cursors return an error, never a partial successful listing. This also protects
+the orphan sweeper from interpreting an incomplete response as a complete list.
 
-`publicIp` and `portMappings` from `GET /pods/{podId}` become
-`RemoteResource.Endpoints`. A mapping such as `{"8000": 40123}` means container
-port 8000 is reachable at `<publicIp>:40123`. RunPod reports the address only
-after the Pod has started, so endpoints usually appear after the binding is
-already `Running`. Only TCP ports receive a public mapping; `Ports` are always
-requested as TCP.
+After an uncertain create response, recovery looks up the exact external name
+across all pages. A terminated Pod is not adopted; multiple matching live Pods
+are reported as a conflict rather than selecting one arbitrarily. Name lookup
+is recovery logic, not a provider-side atomic idempotency guarantee.
 
-## Delete Semantics
+`Stop` sends `POST /pods/{id}/action` with `{"action":"stop"}`. It releases compute
+and keeps storage. `Delete` sends `DELETE /pods/{id}`; both 204 and 404 are
+successful cleanup. After a transient deletion error, a GET returning 404 also
+confirms cleanup. Deleting a Pod destroys its host-local persistent disk but only
+detaches existing network volumes; those volumes are not deleted by the adapter.
 
-`DELETE /pods/{podId}` treats both `204 No Content` and `404 Not Found` as successful cleanup. If delete returns a transient/timeout error, the adapter reads `GET /pods/{podId}` once; if the pod is already gone, cleanup is treated as successful. This matches the lifecycle invariant that remote not found during deletion means there is no paid resource left to clean up.
+## Runtime and endpoints
 
-## Error Semantics
+`Get` reads `runtime.uptime` from the same v2 response while status is `RUNNING`.
+A null runtime or nonpositive uptime produces no restart observation. Failed GETs
+are returned as errors rather than hidden by a second, optional runtime request.
+List responses have null runtime; they cannot supply restart or endpoint data.
 
-RunPod HTTP errors are converted to `core.ProviderError`:
+The lifecycle compares successive uptime observations to detect containers
+restarted in place. See [restart semantics](compatibility-matrix.md#restart-semantics).
 
-| HTTP/result | Error class | Runtime behavior |
-| --- | --- | --- |
-| 401/403 | `Auth` | Terminal by default; no cross-provider fallback unless policy explicitly allows. |
-| 400/422 without a capacity or quota message | `UnsupportedSpec` | Terminal; RunPod rejected the request itself. |
-| 404 | `RemoteNotFound` | Used for remote manually deleted and idempotent cleanup. |
-| 409 | `Conflict` | Retryable. |
-| 429 | `RateLimited` | Retryable and fallback-eligible. |
-| 5xx | `Transient` | Retryable and fallback-eligible. |
-| body mentioning capacity/availability | `Capacity` | Fallback-eligible. |
-| body mentioning quota/limit | `Quota` | Policy-dependent fallback. |
+Public TCP entries in `runtime.ports` map `private` to the container port and
+`ip`/`public` to the reachable address. Entries without an IP or public port,
+invalid ports, and non-TCP entries are not exposed as TCP endpoints.
 
-If `Create` returns a transient error after the request may have reached RunPod, the adapter runs `List(name=<externalName>)` before returning the error. If a matching pod exists, it returns that remote allocation instead of creating a duplicate on the next reconcile.
+`cost` supplies the hourly compute rate and source `runpod.cost`. This is a
+quoted rate, not accumulated billing or proof that a stopped Pod is billing
+compute. Disk charges are separate.
 
-## Current Limitations
+## Errors
 
-- A gated real RunPod smoke test exists in `hack/e2e/runpod-smoke.sh`; it is not run by default because it creates paid resources.
-- RunPod catalog lookup is still limited; GPU type normalization, pricing and capacity signals are mostly provided by configured or observed placement offers.
-- Kubernetes `imagePullSecrets` are not automatically converted into RunPod registry auth objects; users must currently reference an existing `containerRegistryAuthId`.
-- No logs API integration.
-- No billing history polling yet; launch-time and provider response cost fields are preserved for binding status and burn-rate metrics.
+RFC 9457 `title`, `detail`, and validation `errors` are included in provider
+errors. HTTP status determines authentication (401/403), not found (404),
+conflict (409), rate limiting (429), insufficient balance (402), schema or body
+size rejection (422/413), and transient failures (5xx).
+
+RunPod documents no machine-readable capacity code. For other errors, capacity
+and quota messages are classified from their text; an ordinary 400 is an
+unsupported request. A 422 remains a schema rejection even when its validation
+message mentions capacity, and a 5xx remains transient.
+
+## Validation and limitations
+
+Run `go test ./pkg/providers/runpod` for contract tests and
+`python3 hack/e2e/runpod-smoke_test.py` for the cleanup-helper tests. The gated
+`hack/e2e/runpod-smoke.sh` provisions one A40 by default, verifies status and
+confirmed deletion, and checks all list pages for matching leftovers. See the
+[development guide](development.md#runpod) for options. Cleanup lookup failures
+fail the smoke test; they do not count as an empty account.
+
+Catalog integration, automatic GPU fallback, logs, and billing-history polling
+are outside this migration. Contract tests cover the documented mappings;
+use the gated smoke test to validate lifecycle changes against live RunPod.
