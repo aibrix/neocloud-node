@@ -2,6 +2,8 @@ package runpod
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -142,5 +144,99 @@ func TestClientListOffersFiltersCatalog(t *testing.T) {
 				t.Fatalf("any available = %v, want %v", available, tt.inStock)
 			}
 		})
+	}
+}
+
+func TestClientListOffersResponses(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name   string
+		status int
+		body   string
+		class  core.ErrorClass
+	}{
+		{"empty", 200, `{"gpus":[]}`, ""},
+		{"no datacenters", 200, `{"gpus":[{"id":"NVIDIA A40","secure":true,"price":{"secure":0.5},"maxCount":{"secure":8},"availability":"NONE"}]}`, ""},
+		{"community stock without datacenters", 200, `{"gpus":[{"id":"NVIDIA GeForce RTX 4090","community":true,"price":{"community":0.34},"maxCount":{"community":8},"availability":"LOW"}]}`, ""},
+		{"missing gpus", 200, `{}`, core.ErrorClassTransient},
+		{"null gpus", 200, `{"gpus":null}`, core.ErrorClassTransient},
+		{"malformed JSON", 200, `{"gpus":`, core.ErrorClassTransient},
+		{"wrong shape", 200, `{"gpus":{}}`, core.ErrorClassTransient},
+		{"unauthorized", 401, `{"title":"Unauthorized"}`, core.ErrorClassAuth},
+		{"forbidden", 403, `{"title":"Forbidden"}`, core.ErrorClassAuth},
+		{"rate limited", 429, `{"title":"Too Many Requests"}`, core.ErrorClassRateLimited},
+		{"server failure", 500, `{"title":"Internal Server Error"}`, core.ErrorClassTransient},
+		{"service unavailable", 503, `{"title":"Service Unavailable"}`, core.ErrorClassTransient},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.status)
+				fmt.Fprint(w, tt.body)
+			}))
+			defer server.Close()
+			offers, err := NewClient(Config{BaseURL: server.URL}).ListOffers(context.Background(), burstresource.Intent{})
+			if tt.class == "" {
+				if err != nil || len(offers) != 0 {
+					t.Fatalf("expected empty catalog; got %v, %v", offers, err)
+				}
+				return
+			}
+			var providerErr *core.ProviderError
+			if !errors.As(err, &providerErr) || providerErr.Provider != "runpod" || core.ClassifyError(err) != tt.class || len(offers) != 0 {
+				t.Fatalf("expected %s error and no offers; got %v, %v", tt.class, offers, err)
+			}
+		})
+	}
+}
+
+func TestClientListOffersDiscardsPartialCatalog(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("cloud") == "COMMUNITY" {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		fmt.Fprint(w, catalogFixture)
+	}))
+	defer server.Close()
+	offers, err := NewClient(Config{BaseURL: server.URL}).ListOffers(context.Background(), burstresource.Intent{})
+	if len(offers) != 0 || core.ClassifyError(err) != core.ErrorClassRateLimited {
+		t.Fatalf("expected failed whole snapshot; got %v, %v", offers, err)
+	}
+}
+
+func TestClientListOffersSkipsSpotAndHonorsCancellation(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("unexpected catalog request")
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	client := NewClient(Config{BaseURL: server.URL})
+	if offers, err := client.ListOffers(context.Background(), burstresource.Intent{Market: burstresource.MarketSpot}); err != nil || len(offers) != 0 {
+		t.Fatalf("spot offers = %v, %v", offers, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := client.ListOffers(ctx, burstresource.Intent{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled request error = %v", err)
+	}
+}
+
+func TestCatalogOfferIDsRemainStable(t *testing.T) {
+	t.Parallel()
+	var response struct {
+		GPUs []catalogGPU `json:"gpus"`
+	}
+	if err := json.Unmarshal([]byte(catalogFixture), &response); err != nil {
+		t.Fatal(err)
+	}
+	before := offersFromCatalogGPUs(response.GPUs, "SECURE", 1, burstresource.Intent{})
+	*response.GPUs[0].Price["secure"] = 0.5
+	response.GPUs[0].Availability = "NONE"
+	after := offersFromCatalogGPUs(response.GPUs, "SECURE", 1, burstresource.Intent{})
+	multi := offersFromCatalogGPUs(response.GPUs, "SECURE", 2, burstresource.Intent{})
+	if len(before) != 2 || len(after) != 2 || len(multi) != 2 || before[0].ID != after[0].ID || before[0].ID == multi[0].ID {
+		t.Fatalf("unstable/colliding IDs: %v, %v, %v", before, after, multi)
 	}
 }
