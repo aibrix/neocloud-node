@@ -110,6 +110,47 @@ invalid ports, and non-TCP entries are not exposed as TCP endpoints.
 quoted rate, not accumulated billing or proof that a stopped Pod is billing
 compute. Disk charges are separate.
 
+## Catalog Semantics
+
+The adapter implements `resource.ProviderOfferSource` using
+`GET /catalog/gpus?include=AVAILABILITY&product=POD`. It makes one request for
+each cloud tier, `SECURE` and `COMMUNITY`, with `count` set to the requested GPU
+count (one when no intent is supplied). Availability is specific to that tier
+and count; it is not inferred from the GPU's presence in the catalog.
+
+Each supported GPU type, tier, and returned datacenter becomes an on-demand
+offer. `GPUType` is the exact RunPod GPU ID used by Pod creation, not its display
+name. The tier's per-GPU USD hourly list price is multiplied by the GPU count;
+storage charges and account discounts are not included. Missing, null, zero,
+or negative tier prices are skipped. Requests beyond the tier's `maxCount`
+ceiling are skipped; that ceiling is not a measure of free stock.
+
+Both overall and datacenter stock must be `LOW`, `MEDIUM`, or `HIGH` for an offer
+to be available. `NONE`, missing, and unknown stock values produce unavailable
+offers. Missing datacenters produce no offers; no location is invented.
+Live API reads on 2026-11-14 returned Community GPUs with overall `LOW` stock
+but no `dataCenters` entries. Those GPUs therefore produce no placement offers,
+even though RunPod reports stock at the tier level.
+Offer IDs include GPU ID, tier, datacenter, and count, and remain stable when
+price or availability changes. Provider hints carry `runpod-cloud-type` and
+`runpod-datacenter-ids` through placement into the create request. Offers support
+ports and registry credentials. Only Secure Cloud offers advertise network
+volumes, following RunPod's [network volume restriction](https://docs.runpod.io/storage/network-volumes#network-volumes-for-pods).
+Spot offers are never emitted.
+
+HTTP failures use the existing provider error classes. A missing/null `gpus`
+array or invalid JSON is a transient response error; `gpus: []` is a valid empty
+catalog. If either tier request fails, no partial catalog is returned.
+
+The app selects the catalog source instead of deriving additional offers from
+existing RunPod Pods. Existing allocations do not establish stock for a new Pod.
+Periodic refresh uses an empty intent and therefore records single-GPU offers,
+as with Lambda. Multi-GPU placement needs an explicit intent-based catalog query
+or suitable bootstrap offers. The observed catalog owns TTL and refresh timing;
+stock can change between a snapshot and creation, so a quote does not guarantee
+capacity. Entries omitted by a later refresh remain until their existing TTL
+expires.
+
 ## Errors
 
 RFC 9457 `title`, `detail`, and validation `errors` are included in provider
@@ -131,6 +172,14 @@ confirmed deletion, and checks all list pages for matching leftovers. See the
 [development guide](development.md#runpod) for options. Cleanup lookup failures
 fail the smoke test; they do not count as an empty account.
 
-Catalog integration, automatic GPU fallback, logs, and billing-history polling
-are outside this migration. Contract tests cover the documented mappings;
-use the gated smoke test to validate lifecycle changes against live RunPod.
+On 2026-11-14, a live adapter check queried one- and two-GPU offers, passed a
+single-GPU offer through `LifecycleCandidatePlanner`, and created a Secure Cloud
+RTX 2000 Ada in `EU-RO-1`. The Pod reported Running at the catalog's $0.24/hour
+compute rate. Deletion was independently verified by ID (404) and a complete
+name-filtered listing. This checked the Go adapter and placement request mapping;
+it did not deploy a new controller or test inference or GPU performance.
+
+Logs and billing-history polling are outside the adapter's scope. Contract tests
+cover catalog mapping and lifecycle behavior; use the gated smoke test to
+validate lifecycle changes against live RunPod. Catalog tests do not establish
+live capacity or the ability to create a Pod at a quoted price.
