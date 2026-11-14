@@ -1011,6 +1011,26 @@ func TestRemoteEndpointsSetPodIPAndAnnotation(t *testing.T) {
 	if changed.PodIP != "203.0.113.10" {
 		t.Fatalf("pod IP = %q, want unchanged 203.0.113.10", changed.PodIP)
 	}
+
+	// A stopped workload removes the annotation even if the provider still
+	// reports its ports. The Pod IP stays, as kubelet keeps it after exit.
+	if err := adapter.SetStatus(binding.RemoteID, core.RemoteFailed, "RemoteExited", "exited"); err != nil {
+		t.Fatalf("SetStatus() setup error = %v", err)
+	}
+	stopped, err := provider.GetPodStatus(ctx, "default", "serve")
+	if err != nil {
+		t.Fatalf("GetPodStatus() error = %v", err)
+	}
+	if stopped.Phase != corev1.PodFailed || stopped.PodIP != "203.0.113.10" {
+		t.Fatalf("status = %s/%q, want Failed with the original Pod IP", stopped.Phase, stopped.PodIP)
+	}
+	stored, err = clientset.CoreV1().Pods("default").Get(ctx, "serve", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Get pod error = %v", err)
+	}
+	if got, ok := stored.Annotations[core.AnnotationEndpoints]; ok {
+		t.Fatalf("endpoints annotation = %q, want removed after the workload stopped", got)
+	}
 }
 
 func TestRemoteEndpointsWithoutPodClientOnlySetPodIP(t *testing.T) {
