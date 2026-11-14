@@ -172,6 +172,13 @@ confirmed deletion, and checks all list pages for matching leftovers. See the
 [development guide](development.md#runpod) for options. Cleanup lookup failures
 fail the smoke test; they do not count as an empty account.
 
+On 2026-11-14, a live adapter check queried one- and two-GPU offers, passed a
+single-GPU offer through `LifecycleCandidatePlanner`, and created a Secure Cloud
+RTX 2000 Ada in `EU-RO-1`. The Pod reported Running at the catalog's $0.24/hour
+compute rate. Deletion was independently verified by ID (404) and a complete
+name-filtered listing. This checked the Go adapter and placement request mapping;
+it did not deploy a new controller or test inference or GPU performance.
+
 Logs and billing-history polling are outside the adapter's scope. Contract tests
 cover catalog mapping and lifecycle behavior; use the gated smoke test to
 validate lifecycle changes against live RunPod. Catalog tests do not establish
