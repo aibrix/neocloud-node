@@ -16,6 +16,7 @@ import (
 	kubefake "k8s.io/client-go/kubernetes/fake"
 
 	"github.com/aibrix/neocloud-node/pkg/core"
+	"github.com/aibrix/neocloud-node/pkg/providers/runpod"
 	burstresource "github.com/aibrix/neocloud-node/pkg/resource"
 )
 
@@ -369,6 +370,25 @@ func TestNewPlacementPlannerIncludesProviderCatalogSources(t *testing.T) {
 	}
 	if len(candidates) != 1 || candidates[0].Request.RegionHint != "catalog-region" {
 		t.Fatalf("candidates = %#v, want catalog-region candidate", candidates)
+	}
+}
+
+func TestPlacementOfferSourcesPrefersRunPodCatalog(t *testing.T) {
+	client := runpod.NewClient(runpod.Config{})
+	sources := placementOfferSources(ProviderRunPod, nil, map[string]core.ProviderAdapter{ProviderRunPod: client})
+	if len(sources) != 1 || sources[0] != client {
+		t.Fatalf("sources = %#v, want only the RunPod catalog", sources)
+	}
+}
+
+func TestPlacementOfferSourcesRetainsListerFallback(t *testing.T) {
+	adapter := core.NewFakeProvider(ProviderFake)
+	sources := placementOfferSources(ProviderFake, nil, map[string]core.ProviderAdapter{ProviderFake: adapter})
+	if len(sources) != 1 {
+		t.Fatalf("sources = %#v, want one lister fallback", sources)
+	}
+	if _, ok := sources[0].(burstresource.RemoteResourceOfferSource); !ok {
+		t.Fatalf("source = %T, want RemoteResourceOfferSource", sources[0])
 	}
 }
 
