@@ -421,6 +421,9 @@ func TestClientGetMapsPublicEndpoints(t *testing.T) {
    {"private":22,"public":40001,"type":"tcp","ip":null},
    {"private":8000,"public":0,"type":"tcp","ip":"203.0.113.10"},
    {"private":9000,"public":40123,"type":"udp","ip":"203.0.113.10"}]}}`},
+		// RunPod keeps the runtime ports of a stopped pod; they no longer accept connections.
+		{name: "exited pod exposes no endpoints", body: `{"id":"runpod-1","status":"EXITED","runtime":{"uptime":4,"ports":[
+   {"private":8000,"public":13006,"type":"tcp","ip":"203.0.113.10"}]}}`},
 	}
 
 	for _, tt := range tests {

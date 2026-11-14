@@ -544,9 +544,11 @@ func cloneStringMap(in map[string]string) map[string]string {
 	return out
 }
 
-// endpointsFromPod exposes only public TCP mappings reported by the runtime.
+// endpointsFromPod exposes only public TCP mappings reported by the runtime of
+// a RUNNING pod. RunPod keeps reporting the runtime ports of an EXITED pod,
+// although they no longer accept connections.
 func endpointsFromPod(pod podResponse) []core.Endpoint {
-	if pod.Runtime == nil {
+	if pod.Status != "RUNNING" || pod.Runtime == nil {
 		return nil
 	}
 	var endpoints []core.Endpoint

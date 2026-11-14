@@ -106,6 +106,10 @@ published port equals the container port. Callers that need the remapped port
 read the annotation. Selector-based Services and kube-proxy forward to
 `podIP:targetPort` and therefore do not work with remapped ports.
 
+Endpoints are removed from the binding and the annotation once the workload
+stops (`Failed`, `Succeeded`, or deleted remotely), even if the provider still
+reports the ports. `status.podIP` stays, matching kubelet.
+
 Published ports are reachable from the internet. Protect them in the workload,
 for example with an API key, or with provider firewalls where they exist.
 
