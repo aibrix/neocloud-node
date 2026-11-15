@@ -27,6 +27,12 @@ type RemoteResource struct {
 	Provider       string
 	Phase          RemotePhase
 	Request        WorkloadRequest
+	// DirectEndpointHost opts into mapping declared TCP ports 1:1 on this
+	// public host. It is an ephemeral provider observation; lifecycle derives
+	// endpoints from the binding's durable request, including after restart.
+	// Explicit Endpoints take precedence. Providers without 1:1 publishing
+	// must leave this empty.
+	DirectEndpointHost string
 	// Endpoints lists the published container ports, when the provider has
 	// assigned an address.
 	Endpoints  []Endpoint

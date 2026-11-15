@@ -2,6 +2,11 @@ package runner
 
 import (
 	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -31,7 +36,7 @@ func TestBuildCloudInit(t *testing.T) {
 	assertContains(t, cloudInit, "docker pull 'example.com/train:latest'")
 	assertContains(t, cloudInit, "--gpus all")
 	assertContains(t, cloudInit, "-e 'MODEL=llama'")
-	assertContains(t, cloudInit, "'example.com/train:latest' 'python' 'train.py' '--model' 'llama 3'")
+	assertContains(t, cloudInit, "--entrypoint 'python' 'example.com/train:latest' 'train.py' '--model' 'llama 3'")
 	assertContains(t, cloudInit, "https://controller.example.com/v1/runner/status")
 	assertContains(t, cloudInit, "--retry 60 --retry-all-errors --retry-delay 10 --max-time 10")
 	assertContains(t, cloudInit, "default/pod-123")
@@ -155,5 +160,128 @@ func assertNotContains(t *testing.T, s string, substr string) {
 
 	if strings.Contains(s, substr) {
 		t.Fatalf("cloud-init unexpectedly contains %q:\n%s", substr, s)
+	}
+}
+
+func TestLogsCloudInitOptIn(t *testing.T) {
+	cfg := CloudInitConfig{WorkloadID: "ns/uid", CallbackURL: "https://controller/status", RunnerLogsURL: "http://controller/logs", RunnerLogsSecret: "logs-root-secret", Request: core.WorkloadRequest{Image: "image"}}
+	out, e := BuildCloudInit(cfg)
+	if e != nil {
+		t.Fatal(e)
+	}
+	for _, want := range []string{"write_files:", "/var/lib/neocloud-node/logship.py", "nohup python3", "docker wait", "docker run -d"} {
+		assertContains(t, out, want)
+	}
+	assertNotContains(t, out, "--rm")
+	cfg.RunnerLogsSecret = ""
+	if _, e = BuildCloudInit(cfg); e == nil {
+		t.Fatal("unsigned logs accepted")
+	}
+}
+
+func TestLogsLifecycleDoesNotWaitForUploader(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("docker", "#!/bin/sh\ncase \"$1\" in wait) for i in $(seq 1 500); do if [ -f \"$STARTED\" ]; then echo 7; exit 0; fi; sleep 0.01; done; exit 1;; esac\n")
+	write("nvidia-container-runtime", "#!/bin/sh\nexit 0\n")
+	write("curl", "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$CALLBACKS\"\ncase \"$*\" in *Failed*) if [ ! -f \"$FINISHED\" ]; then echo independent >> \"$CALLBACKS\"; fi; touch \"$RELEASE\";; esac\n")
+	write("logship.py", "import time,os\nopen(os.environ['STARTED'],'w').close()\nfor _ in range(1000):\n if os.path.exists(os.environ['RELEASE']): break\n time.sleep(0.01)\nopen(os.environ['FINISHED'],'w').close()\n")
+	cfg := CloudInitConfig{WorkloadID: "ns/uid", CallbackURL: "http://controller/status", RunnerLogsURL: "http://controller/logs", Request: core.WorkloadRequest{Image: "image"}}
+	command := strings.ReplaceAll(runnerCommand(cfg), "/var/lib/neocloud-node/logship.py", filepath.Join(dir, "logship.py"))
+	command = strings.ReplaceAll(command, "/var/log/neocloud-logship.log", filepath.Join(dir, "shipper.log"))
+	cmd := exec.Command("sh", "-c", command)
+	cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "CALLBACKS="+filepath.Join(dir, "callbacks"), "FINISHED="+filepath.Join(dir, "finished"), "RELEASE="+filepath.Join(dir, "release"), "STARTED="+filepath.Join(dir, "started"))
+	out, err := cmd.CombinedOutput()
+	if err == nil || cmd.ProcessState.ExitCode() != 7 {
+		t.Fatalf("exit %v: %s", err, out)
+	}
+
+	callbacks, err := os.ReadFile(filepath.Join(dir, "callbacks"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(callbacks), "independent") {
+		t.Fatalf("uploader blocked terminal callback: %s", callbacks)
+	}
+	if !strings.Contains(string(callbacks), `"phase":"Failed","exitCode":7`) {
+		t.Fatalf("terminal callback missing: %s", callbacks)
+	}
+}
+
+func TestLogsDockerRetentionBounded(t *testing.T) {
+	cmd := runWithLogsCommand(CloudInitConfig{RunnerLogsURL: "http://controller/logs", Request: core.WorkloadRequest{Image: "image"}})
+	assertContains(t, cmd, "--log-opt max-size=16m --log-opt max-file=2")
+}
+
+// Execute the generated shell so quoting errors and Docker option placement are
+// observable at the process boundary, without needing a Docker daemon.
+func TestDockerRunEntrypointAndPublishedPorts(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		command, args []string
+		ports         []core.Port
+		want          []string
+	}{
+		{name: "override", command: []string{"python3", "-m", "vllm.entrypoints.openai.api_server"}, args: []string{"--model", "model's name", "$(false)"}, ports: []core.Port{{ContainerPort: 8000, Protocol: "TCP"}, {ContainerPort: 9000}}, want: []string{"--publish", "8000:8000/tcp", "--publish", "9000:9000/tcp", "--entrypoint", "python3", "image:tag", "-m", "vllm.entrypoints.openai.api_server", "--model", "model's name", "$(false)"}},
+		{name: "image entrypoint", args: []string{"--model", "model name"}, want: []string{"image:tag", "--model", "model name"}},
+	} {
+		for _, logs := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/logs=%t", tt.name, logs), func(t *testing.T) {
+				dir := t.TempDir()
+				if err := os.WriteFile(filepath.Join(dir, "docker"), []byte("#!/bin/sh\nprintf '%s\\000' \"$@\"\nexit 9\n"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				config := CloudInitConfig{Request: core.WorkloadRequest{Image: "image:tag", Command: tt.command, Args: tt.args, Ports: tt.ports}}
+				if logs {
+					config.RunnerLogsURL = "http://controller/logs"
+				}
+				cmd := exec.Command("sh", "-c", runWithLogsCommand(config))
+				cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"))
+				out, err := cmd.Output()
+				if err == nil || cmd.ProcessState.ExitCode() != 9 {
+					t.Fatalf("exit=%v, want 9", err)
+				}
+				got := strings.Split(strings.TrimSuffix(string(out), "\x00"), "\x00")
+				prefix := []string{"run", "--rm"}
+				if logs {
+					prefix = []string{"run", "-d", "--log-opt", "max-size=16m", "--log-opt", "max-file=2"}
+				}
+				want := append(prefix, "--gpus", "all", "--name", "neocloud-node-workload")
+				want = append(want, tt.want...)
+				if !reflect.DeepEqual(got, want) {
+					t.Fatalf("docker argv = %#v, want %#v", got, want)
+				}
+			})
+		}
+	}
+}
+
+func TestBuildCloudInitRejectsInvalidEntrypointAndPorts(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		command []string
+		ports   []core.Port
+		code    string
+	}{
+		{name: "empty entrypoint", command: []string{""}, code: "InvalidCommand"},
+		{name: "blank entrypoint", command: []string{"  "}, code: "InvalidCommand"},
+		{name: "zero", ports: []core.Port{{ContainerPort: 0}}, code: "InvalidPort"},
+		{name: "negative", ports: []core.Port{{ContainerPort: -1}}, code: "InvalidPort"},
+		{name: "overflow", ports: []core.Port{{ContainerPort: 65536}}, code: "InvalidPort"},
+		{name: "UDP", ports: []core.Port{{ContainerPort: 8000, Protocol: "UDP"}}, code: "UnsupportedProtocol"},
+		{name: "SCTP", ports: []core.Port{{ContainerPort: 8000, Protocol: "SCTP"}}, code: "UnsupportedProtocol"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := BuildCloudInit(CloudInitConfig{WorkloadID: "ns/uid", CallbackURL: "http://controller/status", Request: core.WorkloadRequest{Image: "image", Command: tt.command, Ports: tt.ports}})
+			var configErr *ConfigError
+			if !errors.As(err, &configErr) || configErr.Code != tt.code {
+				t.Fatalf("error = %v, want ConfigError %s", err, tt.code)
+			}
+		})
 	}
 }

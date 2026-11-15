@@ -152,3 +152,19 @@ kubectl delete clusterrolebinding,clusterrole aibrix-neocloud-node
 Do not run `kubectl delete -f deploy/neocloud-node.yaml`: it would also delete
 the shared namespace and CRD. If the new controller fails, scale it to zero
 before restoring the old controller to one replica.
+
+## Container logs
+
+Set `kubeletAPI.enabled=true` and explicitly set
+`kubeletAPI.authenticationMode=none` for an isolated development deployment.
+The controller advertises its Pod IP; verify API-server reachability and restrict
+access to port 10250. An optional `kubeletAPI.tlsSecretName` mounts an existing
+serving certificate; otherwise the controller generates a self-signed certificate.
+
+Lambda additionally needs `runnerLogs.enabled=true`, `runnerLogs.secretName`,
+`runnerLogs.callbackURL` and `runnerLogs.url`. The Secret's key defaults to
+`sharedSecret`. The chart creates an internal runner Service on port 9091;
+provide your own VM-reachable TLS proxy. Upload authentication remains enabled
+even when kubelet authentication is disabled. See the
+[container log guide](../../docs/container-logs.md) for the full configuration
+and retention/compatibility limits.

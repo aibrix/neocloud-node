@@ -440,6 +440,7 @@ func RecordRunnerStatus(ctx context.Context, store BindingStore, namespace strin
 			Message:   "unsupported runner phase " + string(phase),
 		}
 	}
+	clearStoppedEndpoints(&binding)
 	if err := store.Update(ctx, binding); err != nil {
 		return Binding{}, err
 	}
@@ -626,10 +627,26 @@ func recordRemoteCost(binding *Binding, remote RemoteResource) {
 // does not clear endpoints that were already published. They are cleared
 // once the workload stops; see clearStoppedEndpoints.
 func recordRemoteEndpoints(binding *Binding, remote RemoteResource) {
-	if binding == nil || len(remote.Endpoints) == 0 {
+	if binding == nil {
 		return
 	}
 	endpoints := append([]Endpoint(nil), remote.Endpoints...)
+	if len(endpoints) == 0 && remote.DirectEndpointHost != "" {
+		for _, port := range binding.Request.Ports {
+			if port.ContainerPort < 1 || port.ContainerPort > 65535 || (port.Protocol != "" && port.Protocol != "TCP") {
+				continue
+			}
+			endpoints = append(endpoints, Endpoint{
+				ContainerPort: port.ContainerPort,
+				Protocol:      "TCP",
+				Host:          remote.DirectEndpointHost,
+				Port:          port.ContainerPort,
+			})
+		}
+	}
+	if len(endpoints) == 0 {
+		return
+	}
 	sort.SliceStable(endpoints, func(i, j int) bool {
 		if endpoints[i].ContainerPort != endpoints[j].ContainerPort {
 			return endpoints[i].ContainerPort < endpoints[j].ContainerPort

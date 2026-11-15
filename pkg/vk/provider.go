@@ -39,6 +39,8 @@ type EventRecorder interface {
 }
 
 type Config struct {
+	ForgetLogs       func(core.LogTarget)
+	LogReaders       map[string]core.ProviderLogReader
 	Store            core.BindingStore
 	Adapter          core.ProviderAdapter
 	FallbackAdapters map[string]core.ProviderAdapter
@@ -57,6 +59,8 @@ type Config struct {
 }
 
 type Provider struct {
+	forgetLogs  func(core.LogTarget)
+	logReaders  map[string]core.ProviderLogReader
 	transformer PodTransformer
 	lifecycle   *core.LifecycleService
 	store       core.BindingStore
@@ -102,6 +106,8 @@ func NewProvider(config Config) (*Provider, error) {
 	}
 
 	provider := &Provider{
+		forgetLogs:  config.ForgetLogs,
+		logReaders:  config.LogReaders,
 		transformer: config.Transformer,
 		lifecycle:   core.NewLifecycleService(config.Store, config.Adapter, options...),
 		store:       config.Store,
@@ -154,6 +160,7 @@ func (p *Provider) DeletePod(ctx context.Context, pod *corev1.Pod) error {
 
 	key := podKey(pod.Namespace, pod.Name)
 	cached := p.getCachedPod(key)
+	logBinding, logErr := p.store.GetByWorkloadUID(ctx, pod.Namespace, string(pod.UID))
 	if err := p.lifecycle.EnsureDeleted(ctx, pod.Namespace, string(pod.UID)); err != nil {
 		if cached != nil {
 			p.recordPodEvent(cached, corev1.EventTypeWarning, "DeleteFailure", err.Error())
@@ -166,6 +173,9 @@ func (p *Provider) DeletePod(ctx context.Context, pod *corev1.Pod) error {
 	p.mu.Lock()
 	delete(p.pods, key)
 	p.mu.Unlock()
+	if p.forgetLogs != nil && logErr == nil {
+		p.forgetLogs(core.LogTarget{Namespace: logBinding.Namespace, WorkloadUID: logBinding.WorkloadUID, RemoteID: logBinding.RemoteID})
+	}
 	p.readiness.stop(key)
 
 	if cached != nil {
@@ -232,10 +242,7 @@ func (p *Provider) NotifyPods(ctx context.Context, notifier func(*corev1.Pod)) {
 }
 
 func (p *Provider) GetContainerLogs(ctx context.Context, namespace, podName, containerName string, opts api.ContainerLogOpts) (io.ReadCloser, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	return nil, unsupportedMethod("container logs")
+	return p.containerLogs(ctx, namespace, podName, containerName, opts)
 }
 
 func (p *Provider) RunInContainer(ctx context.Context, namespace, podName, containerName string, cmd []string, attach api.AttachIO) error {

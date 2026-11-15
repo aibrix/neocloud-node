@@ -20,15 +20,19 @@ const providerName = "runpod"
 const defaultBaseURL = "https://api.runpod.io/v2"
 
 type Config struct {
-	BaseURL    string
-	APIKey     string
-	HTTPClient *http.Client
+	LogSnapshotIdle time.Duration
+	LogSnapshotMax  time.Duration
+	BaseURL         string
+	APIKey          string
+	HTTPClient      *http.Client
 }
 
 type Client struct {
-	baseURL    string
-	apiKey     string
-	httpClient *http.Client
+	logSnapshotIdle time.Duration
+	logSnapshotMax  time.Duration
+	baseURL         string
+	apiKey          string
+	httpClient      *http.Client
 }
 
 func NewClient(config Config) *Client {
@@ -43,9 +47,11 @@ func NewClient(config Config) *Client {
 	}
 
 	return &Client{
-		baseURL:    baseURL,
-		apiKey:     config.APIKey,
-		httpClient: httpClient,
+		logSnapshotIdle: config.LogSnapshotIdle,
+		logSnapshotMax:  config.LogSnapshotMax,
+		baseURL:         baseURL,
+		apiKey:          config.APIKey,
+		httpClient:      httpClient,
 	}
 }
 

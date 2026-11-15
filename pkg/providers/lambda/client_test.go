@@ -286,7 +286,7 @@ func TestClientSupportsCompleteStatusListing(t *testing.T) {
 
 func TestClientBatchStatusMatchesGet(t *testing.T) {
 	t.Parallel()
-	const instance = `{"id":"lambda-1","name":"managed","status":"active","region":{"name":"us-west-1"},"instance_type":{"name":"gpu_1x_a10","gpu_description":"A10","price_cents_per_hour":74,"specs":{"gpus":1}}}`
+	const instance = `{"id":"lambda-1","ip":"203.0.113.42","private_ip":"10.0.0.1","name":"managed","status":"active","region":{"name":"us-west-1"},"instance_type":{"name":"gpu_1x_a10","gpu_description":"A10","price_cents_per_hour":74,"specs":{"gpus":1}}}`
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/instances":
@@ -306,6 +306,9 @@ func TestClientBatchStatusMatchesGet(t *testing.T) {
 	got, err := client.Get(context.Background(), "lambda-1")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if got.DirectEndpointHost != "203.0.113.42" {
+		t.Errorf("public endpoint host = %q, want 203.0.113.42", got.DirectEndpointHost)
 	}
 	if !reflect.DeepEqual(listed[0], got) {
 		t.Fatalf("list status = %#v, Get status = %#v", listed[0], got)
@@ -512,5 +515,19 @@ func assertPayloadTags(t *testing.T, payload map[string]any, want map[string]str
 		if got[key] != value {
 			t.Fatalf("tag %q = %q, want %q; tags=%#v", key, got[key], value, got)
 		}
+	}
+}
+
+func TestClientGetDoesNotExposePrivateIPAsEndpointHost(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{"id":"lambda-1","private_ip":"10.0.0.1","status":"active"}}`))
+	}))
+	defer server.Close()
+	remote, err := NewClient(Config{BaseURL: server.URL}).Get(context.Background(), "lambda-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remote.DirectEndpointHost != "" {
+		t.Fatalf("endpoint host = %q without public IP", remote.DirectEndpointHost)
 	}
 }

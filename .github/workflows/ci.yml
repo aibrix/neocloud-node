@@ -126,10 +126,27 @@ jobs:
           provenance: false
           sbom: false
 
+  runner-python:
+    name: Runner Python ${{ matrix.python }}
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12"]
+    container: python:${{ matrix.python }}-slim
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Test runner log capture and replay
+        run: python -m unittest discover -s pkg/runner -p 'logship_test.py' -v
+
   publish:
     name: Publish post-submit image
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [verify, race, container]
+    needs: [verify, race, container, runner-python]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 45
     permissions:

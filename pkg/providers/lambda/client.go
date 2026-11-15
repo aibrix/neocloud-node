@@ -18,6 +18,9 @@ import (
 const providerName = "lambda"
 
 type Config struct {
+	RunnerLogsURL       string
+	RunnerLogsSecret    string
+	LogStore            *runner.LogStore
 	BaseURL             string
 	APIKey              string
 	CallbackURL         string
@@ -29,6 +32,9 @@ type Config struct {
 }
 
 type Client struct {
+	runnerLogsURL       string
+	runnerLogsSecret    string
+	logStore            *runner.LogStore
 	baseURL             string
 	apiKey              string
 	callbackURL         string
@@ -51,6 +57,7 @@ func NewClient(config Config) *Client {
 	}
 
 	return &Client{
+		runnerLogsURL: config.RunnerLogsURL, runnerLogsSecret: config.RunnerLogsSecret, logStore: config.LogStore,
 		baseURL:             baseURL,
 		apiKey:              config.APIKey,
 		callbackURL:         config.CallbackURL,
@@ -246,9 +253,13 @@ func (c *Client) launchPayload(idempotencyKey string, name string, request core.
 	for _, firewallID := range splitCSV(providerHint(request, core.AnnotationLambdaFirewallIDs)) {
 		payload.FirewallRulesets = append(payload.FirewallRulesets, resourceRef{ID: firewallID})
 	}
+	if c.runnerLogsURL != "" && c.callbackURL == "" {
+		return launchRequest{}, &runner.ConfigError{Code: "MissingCallbackURL", Message: "Lambda runner logs require the runner status callback URL"}
+	}
 	if c.callbackURL != "" {
 		cloudInit, err := runner.BuildCloudInit(runner.CloudInitConfig{
-			WorkloadID:     idempotencyKey,
+			WorkloadID:    idempotencyKey,
+			RunnerLogsURL: c.runnerLogsURL, RunnerLogsSecret: c.runnerLogsSecret,
 			CallbackURL:    c.callbackURL,
 			CallbackSecret: c.callbackSecret,
 			Request:        request,
@@ -372,13 +383,14 @@ type InstanceFilter struct {
 
 func remoteFromInstance(instance instance) core.RemoteResource {
 	return core.RemoteResource{
-		ID:           instance.ID,
-		ExternalName: instance.Name,
-		Provider:     providerName,
-		Phase:        phaseFromStatus(instance.Status),
-		Request:      requestFromInstance(instance),
-		HourlyCost:   float64(instance.InstanceType.PriceCentsPerHour) / 100.0,
-		CostSource:   costSource(instance),
+		ID:                 instance.ID,
+		ExternalName:       instance.Name,
+		Provider:           providerName,
+		Phase:              phaseFromStatus(instance.Status),
+		DirectEndpointHost: instance.IP,
+		Request:            requestFromInstance(instance),
+		HourlyCost:         float64(instance.InstanceType.PriceCentsPerHour) / 100.0,
+		CostSource:         costSource(instance),
 	}
 }
 
