@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestLifecycleServiceEnsureCreatedIsIdempotent(t *testing.T) {
@@ -1032,5 +1033,56 @@ func TestLifecycleServiceKeepsPublishedEndpoints(t *testing.T) {
 	}
 	if !reflect.DeepEqual(synced.Endpoints, want) {
 		t.Fatalf("endpoints after empty observation = %#v, want kept %#v", synced.Endpoints, want)
+	}
+}
+
+// The fake remote keeps reporting its endpoints after it stops, as RunPod does
+// for an EXITED pod. A stopped workload must not keep publishing them.
+func TestLifecycleServiceClearsEndpointsWhenWorkloadStops(t *testing.T) {
+	t.Parallel()
+
+	published := []Endpoint{{ContainerPort: 8000, Protocol: "TCP", Host: "203.0.113.10", Port: 40123}}
+	for _, tt := range []struct {
+		name string
+		stop func(*FakeProvider, string) error
+	}{
+		{"remote failed", func(provider *FakeProvider, remoteID string) error {
+			return provider.SetStatus(remoteID, RemoteFailed, "RemoteExited", "exited")
+		}},
+		{"restart stopped by restartPolicy", func(provider *FakeProvider, remoteID string) error {
+			return provider.SetContainerUptime(remoteID, 4*time.Second)
+		}},
+		{"remote deleted outside the controller", func(provider *FakeProvider, remoteID string) error {
+			return provider.Delete(context.Background(), remoteID)
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			provider := NewFakeProvider("runpod")
+			service, store, binding := newRestartTestService(t, provider, RestartPolicyNever)
+			if err := provider.SetEndpoints(binding.RemoteID, published); err != nil {
+				t.Fatalf("SetEndpoints() setup error = %v", err)
+			}
+			running, err := syncWithUptime(t, service, provider, binding.RemoteID, 60)
+			if err != nil || !reflect.DeepEqual(running.Endpoints, published) {
+				t.Fatalf("running endpoints = %#v, %v; want %#v", running.Endpoints, err, published)
+			}
+
+			if err := tt.stop(provider, binding.RemoteID); err != nil {
+				t.Fatalf("stop setup error = %v", err)
+			}
+			synced, err := service.SyncStatus(context.Background(), "default", "pod-restart")
+			if err != nil && !errors.Is(err, ErrRemoteNotFound) {
+				t.Fatalf("SyncStatus() error = %v", err)
+			}
+			if synced.Phase != BindingFailed || len(synced.Endpoints) != 0 {
+				t.Fatalf("binding = %s endpoints=%#v, want Failed without endpoints", synced.Phase, synced.Endpoints)
+			}
+			stored, err := store.GetByWorkloadUID(context.Background(), "default", "pod-restart")
+			if err != nil || len(stored.Endpoints) != 0 {
+				t.Fatalf("stored endpoints = %#v, %v; want none", stored.Endpoints, err)
+			}
+		})
 	}
 }

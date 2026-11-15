@@ -104,7 +104,10 @@ restarted in place. See [restart semantics](compatibility-matrix.md#restart-sema
 
 Public TCP entries in `runtime.ports` map `private` to the container port and
 `ip`/`public` to the reachable address. Entries without an IP or public port,
-invalid ports, and non-TCP entries are not exposed as TCP endpoints.
+invalid ports, and non-TCP entries are not exposed as TCP endpoints. Endpoints
+are read only while status is `RUNNING`: unlike the schema says, RunPod keeps
+returning `runtime.ports` for an `EXITED` Pod, and those ports refuse
+connections.
 
 `cost` supplies the hourly compute rate and source `runpod.cost`. This is a
 quoted rate, not accumulated billing or proof that a stopped Pod is billing

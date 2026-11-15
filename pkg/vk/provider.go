@@ -481,18 +481,28 @@ func (p *Provider) onReadinessChange(key string) {
 
 // publishEndpoints writes the binding endpoints to the Pod annotation so that
 // callers can find remapped public ports without reading CloudPodBindings.
-// Failures are reported as events and retried on the next status sync.
+// The annotation is removed when the binding has no endpoints, for example
+// after the workload stopped. Failures are reported as events and retried on
+// the next status sync.
 func (p *Provider) publishEndpoints(ctx context.Context, pod *corev1.Pod, binding core.Binding) {
-	if p.podClient == nil || pod == nil || len(binding.Endpoints) == 0 {
+	if p.podClient == nil || pod == nil {
 		return
 	}
-	value, err := endpointsAnnotation(binding.Endpoints)
-	if err != nil || pod.Annotations[core.AnnotationEndpoints] == value {
+	current, published := pod.Annotations[core.AnnotationEndpoints]
+	// A nil value encodes as JSON null, which removes the annotation.
+	var value *string
+	if len(binding.Endpoints) > 0 {
+		encoded, err := endpointsAnnotation(binding.Endpoints)
+		if err != nil || (published && current == encoded) {
+			return
+		}
+		value = &encoded
+	} else if !published {
 		return
 	}
 	patch, err := json.Marshal(map[string]interface{}{
 		"metadata": map[string]interface{}{
-			"annotations": map[string]string{core.AnnotationEndpoints: value},
+			"annotations": map[string]*string{core.AnnotationEndpoints: value},
 		},
 	})
 	if err != nil {
@@ -503,10 +513,14 @@ func (p *Provider) publishEndpoints(ctx context.Context, pod *corev1.Pod, bindin
 		p.recordPodEvent(pod, corev1.EventTypeWarning, "EndpointPublishFailed", err.Error())
 		return
 	}
+	if value == nil {
+		delete(pod.Annotations, core.AnnotationEndpoints)
+		return
+	}
 	if pod.Annotations == nil {
 		pod.Annotations = map[string]string{}
 	}
-	pod.Annotations[core.AnnotationEndpoints] = value
+	pod.Annotations[core.AnnotationEndpoints] = *value
 }
 
 type endpointAnnotation struct {

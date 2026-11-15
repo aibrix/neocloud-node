@@ -222,6 +222,7 @@ func (s *LifecycleService) syncStatus(ctx context.Context, namespace string, wor
 				Reason:  string(ErrorClassRemoteNotFound),
 				Message: "remote resource is missing; it may have been deleted outside the controller",
 			})
+			clearStoppedEndpoints(&binding)
 			_ = s.store.Update(ctx, binding)
 		}
 		return binding, err
@@ -235,6 +236,7 @@ func (s *LifecycleService) syncStatus(ctx context.Context, namespace string, wor
 		_ = s.store.Update(ctx, binding)
 		return binding, err
 	}
+	clearStoppedEndpoints(&binding)
 	if err := s.store.Update(ctx, binding); err != nil {
 		return Binding{}, err
 	}
@@ -621,7 +623,8 @@ func recordRemoteCost(binding *Binding, remote RemoteResource) {
 
 // recordRemoteEndpoints keeps the last published endpoints. Providers often
 // report an address only after the workload starts, so an empty observation
-// does not clear endpoints that were already published.
+// does not clear endpoints that were already published. They are cleared
+// once the workload stops; see clearStoppedEndpoints.
 func recordRemoteEndpoints(binding *Binding, remote RemoteResource) {
 	if binding == nil || len(remote.Endpoints) == 0 {
 		return
@@ -674,6 +677,15 @@ func bindingPhaseFromRemote(phase RemotePhase) BindingPhase {
 		return BindingDeleted
 	default:
 		return BindingPending
+	}
+}
+
+// clearStoppedEndpoints drops the published addresses of a stopped workload.
+// They no longer accept connections, although a provider may keep reporting
+// them, for example RunPod for an EXITED pod.
+func clearStoppedEndpoints(binding *Binding) {
+	if binding != nil && isTerminalBindingPhase(binding.Phase) {
+		binding.Endpoints = nil
 	}
 }
 
