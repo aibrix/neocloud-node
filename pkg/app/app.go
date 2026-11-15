@@ -496,6 +496,8 @@ func placementOfferSources(primary string, fallbackOrder []string, adapters map[
 		}
 		if source, ok := adapter.(burstresource.ProviderOfferSource); ok {
 			sources = append(sources, source)
+			// Existing allocations are not stock for another create attempt.
+			continue
 		}
 		lister, ok := adapter.(core.RemoteResourceLister)
 		if !ok {
