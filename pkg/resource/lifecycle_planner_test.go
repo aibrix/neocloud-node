@@ -267,3 +267,66 @@ func hasCapability(capabilities []Capability, want Capability) bool {
 	}
 	return false
 }
+
+func TestLifecycleCandidatePlannerHonorsPinnedHints(t *testing.T) {
+	cloud, dc := core.AnnotationRunPodCloudType, core.AnnotationRunPodDataCenterIDs
+	offers := []Offer{
+		{ID: "secure-us", Provider: "runpod", Location: "US-KS-2", GPUCount: 1, Market: MarketOnDemand, HourlyPrice: .44, Available: true, ProviderHints: map[string]string{cloud: "SECURE", dc: "US-KS-2"}},
+		{ID: "community-eu", Provider: "runpod", Location: "EU-RO-1", GPUCount: 1, Market: MarketOnDemand, HourlyPrice: .31, Available: true, ProviderHints: map[string]string{cloud: "COMMUNITY", dc: "EU-RO-1"}},
+		{ID: "secure-eu", Provider: "runpod", Location: "EU-RO-1", GPUCount: 1, Market: MarketOnDemand, HourlyPrice: .40, Available: true, ProviderHints: map[string]string{cloud: "SECURE", dc: "EU-RO-1"}},
+	}
+	for _, tt := range []struct {
+		name   string
+		hints  map[string]string
+		prices []float64
+	}{
+		{"unpinned", nil, []float64{.31, .40, .44}},
+		{"cloud", map[string]string{cloud: "SECURE"}, []float64{.40, .44}},
+		{"datacenter", map[string]string{dc: "US-KS-2"}, []float64{.44}},
+		{"both", map[string]string{cloud: "SECURE", dc: "EU-RO-1"}, []float64{.40}},
+		{"allow list", map[string]string{cloud: "SECURE", dc: " US-KS-2, EU-RO-1 "}, []float64{.40, .44}},
+		{"no match", map[string]string{cloud: "COMMUNITY", dc: "US-KS-2"}, nil},
+		{"exact membership", map[string]string{dc: "US-KS-20"}, nil},
+		{"unrelated hint", map[string]string{core.AnnotationLambdaSSHKeyNames: "my-key"}, []float64{.31, .40, .44}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			planner := LifecycleCandidatePlanner{Catalog: CompositeCatalog{Sources: []ProviderOfferSource{StaticCatalog{Offers: offers}}}}
+			request := core.WorkloadRequest{GPUCount: 1, ProviderHints: tt.hints}
+			candidates, err := planner.CreateCandidates(context.Background(), core.Binding{Request: request})
+			if len(tt.prices) == 0 {
+				if core.ClassifyError(err) != core.ErrorClassCapacity || len(candidates) != 0 {
+					t.Fatalf("got %v, %v; want no candidates and capacity error", candidates, err)
+				}
+				return
+			}
+			if err != nil || len(candidates) != len(tt.prices) {
+				t.Fatalf("got %v, %v", candidates, err)
+			}
+			for i, candidate := range candidates {
+				if candidate.EstimatedHourlyCost != tt.prices[i] {
+					t.Fatalf("candidate %d price = %v, want %v", i, candidate.EstimatedHourlyCost, tt.prices[i])
+				}
+				if candidate.Request.ProviderHints[dc] != candidate.Request.RegionHint {
+					t.Fatal("selected datacenter hint differs from request location")
+				}
+			}
+		})
+	}
+}
+
+func TestPlannerRejectsConflictingLambdaHint(t *testing.T) {
+	key := core.AnnotationLambdaInstanceType
+	request := core.WorkloadRequest{ProviderHints: map[string]string{key: "gpu_1x_a10"}}
+	intent := IntentFromWorkloadRequest(request)
+	request.ProviderHints[key] = "changed-after-intent"
+	offer := Offer{ID: "wrong-type", Available: true, Market: MarketOnDemand, ProviderHints: map[string]string{key: "gpu_1x_a100"}}
+	_, err := (Planner{}).Plan(intent, []Offer{offer}, Policy{})
+	var unavailable *UnavailableError
+	if !errors.As(err, &unavailable) || len(unavailable.Rejected) != 1 || unavailable.Rejected[0].Reason != ReasonProviderHintMismatch {
+		t.Fatalf("expected provider hint rejection, got %v", err)
+	}
+	offer.ProviderHints[key] = "gpu_1x_a10"
+	if _, err := (Planner{}).Plan(intent, []Offer{offer}, Policy{}); err != nil {
+		t.Fatalf("matching Lambda hint rejected: %v", err)
+	}
+}
