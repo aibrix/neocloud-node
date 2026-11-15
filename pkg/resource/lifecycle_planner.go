@@ -63,6 +63,7 @@ func (p LifecycleCandidatePlanner) CreateCandidates(ctx context.Context, binding
 // IntentFromWorkloadRequest maps the provider-neutral workload request into placement inputs.
 func IntentFromWorkloadRequest(request core.WorkloadRequest) Intent {
 	return Intent{
+		ProviderHints:  cloneProviderHints(request.ProviderHints),
 		GPUCount:       request.GPUCount,
 		GPUType:        strings.TrimSpace(request.GPUType),
 		GPUMemory:      strings.TrimSpace(request.GPUMemory),

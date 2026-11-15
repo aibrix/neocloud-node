@@ -30,6 +30,7 @@ const (
 )
 
 type Intent struct {
+	ProviderHints  map[string]string
 	GPUCount       int
 	GPUType        string
 	GPUMemory      string
@@ -98,6 +99,7 @@ type RejectedOffer struct {
 type RejectionReason string
 
 const (
+	ReasonProviderHintMismatch  RejectionReason = "ProviderHintMismatch"
 	ReasonGPUTypeMismatch       RejectionReason = "GPUTypeMismatch"
 	ReasonGPUMemoryMismatch     RejectionReason = "GPUMemoryMismatch"
 	ReasonInsufficientGPUCount  RejectionReason = "InsufficientGPUCount"
@@ -178,6 +180,22 @@ func rejectOffer(intent Intent, offer Offer, policy Policy, now time.Time) (Reje
 			Message: "offer is temporarily blocked by a recent provider failure",
 			Class:   blocked.Class,
 		}, true
+	}
+	for key, value := range offer.ProviderHints {
+		allowed := strings.TrimSpace(intent.ProviderHints[key])
+		if allowed == "" {
+			continue
+		}
+		matches := false
+		for _, candidate := range strings.Split(allowed, ",") {
+			if strings.TrimSpace(candidate) == strings.TrimSpace(value) {
+				matches = true
+				break
+			}
+		}
+		if !matches {
+			return RejectedOffer{Offer: offer, Reason: ReasonProviderHintMismatch, Message: "offer conflicts with a pinned provider hint"}, true
+		}
 	}
 	if strings.TrimSpace(intent.GPUType) != "" && offer.GPUType != intent.GPUType {
 		return RejectedOffer{Offer: offer, Reason: ReasonGPUTypeMismatch, Message: "offer GPU type does not match request"}, true
