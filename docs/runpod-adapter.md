@@ -141,6 +141,14 @@ ports and registry credentials. Only Secure Cloud offers advertise network
 volumes, following RunPod's [network volume restriction](https://docs.runpod.io/storage/network-volumes#network-volumes-for-pods).
 Spot offers are never emitted.
 
+Pinned provider hints constrain placement. An offer that supplies the same hint
+key must match a value in the request's comma-separated allow-list. For example,
+`runpod-cloud-type: SECURE` excludes Community offers, and
+`runpod-datacenter-ids: US-KS-2,EU-RO-1` permits either datacenter. The selected
+offer narrows the allow-list to its concrete datacenter for creation. This check
+also applies to fallback offers and other providers' hints, including Lambda
+instance types. Hints absent from an offer remain on the request.
+
 HTTP failures use the existing provider error classes. A missing/null `gpus`
 array or invalid JSON is a transient response error; `gpus: []` is a valid empty
 catalog. If either tier request fails, no partial catalog is returned.
