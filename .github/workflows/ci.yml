@@ -43,6 +43,17 @@ jobs:
         run: make verify
       - name: Validate workflows
         run: make actionlint
+      - name: Test runner on Python 3.10, 3.11, and 3.12
+        run: |
+          for python_version in 3.10 3.11 3.12; do
+            echo "::group::Runner Python ${python_version}"
+            docker run --rm \
+              --volume "${GITHUB_WORKSPACE}:/workspace:ro" \
+              --workdir /workspace \
+              "python:${python_version}-slim" \
+              python -m unittest discover -s pkg/runner -p 'logship_test.py' -v
+            echo '::endgroup::'
+          done
 
   vulnerabilities:
     name: Vulnerability scan (advisory)
@@ -126,27 +137,10 @@ jobs:
           provenance: false
           sbom: false
 
-  runner-python:
-    name: Runner Python ${{ matrix.python }}
-    runs-on: blacksmith-2vcpu-ubuntu-2404
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        python: ["3.10", "3.11", "3.12"]
-    container: python:${{ matrix.python }}-slim
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Test runner log capture and replay
-        run: python -m unittest discover -s pkg/runner -p 'logship_test.py' -v
-
   publish:
     name: Publish post-submit image
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [verify, race, container, runner-python]
+    needs: [verify, race, container]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 45
     permissions:
