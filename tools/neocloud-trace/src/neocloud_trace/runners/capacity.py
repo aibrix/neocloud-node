@@ -59,7 +59,8 @@ class CapacityProvider(Protocol):
     provider: str
 
     def create_replicas(
-        self, cell: TrialCell, requests: Sequence[ReplicaRequest]
+        self, cell: TrialCell, requests: Sequence[ReplicaRequest], *,
+        one_shot: bool = False,
     ) -> Sequence[CreateResult]: ...
 
     def observe(self, resource_id: str, cell: TrialCell) -> ResourceObservation: ...
@@ -91,6 +92,8 @@ class CapacityRunner:
         create_reconcile_timeout_seconds: float = 90.0,
         create_reconcile_poll_interval_seconds: float = 5.0,
         require_application_ready: bool = True,
+        completion_mode: str = "ready",
+        launch_mode: str = "staged",
     ) -> None:
         self.store = store
         self.provider = provider
@@ -104,6 +107,14 @@ class CapacityRunner:
             create_reconcile_poll_interval_seconds
         )
         self.require_application_ready = require_application_ready
+        if completion_mode not in {"ready", "allocated"}:
+            raise ValueError("completion_mode must be ready or allocated")
+        if launch_mode not in {"staged", "one_shot"}:
+            raise ValueError("launch_mode must be staged or one_shot")
+        if launch_mode == "one_shot" and provider.provider not in {"runpod", "vast"}:
+            raise ValueError("one_shot launch is supported only for RunPod and Vast")
+        self.completion_mode = completion_mode
+        self.launch_mode = launch_mode
         if create_reconcile_timeout_seconds < 0:
             raise ValueError("create reconcile timeout must not be negative")
         if create_reconcile_poll_interval_seconds <= 0:
@@ -120,6 +131,7 @@ class CapacityRunner:
         stages = capacity_stages(
             target_gpu_depth=target_gpu_depth,
             gpu_count_per_instance=cell.gpu_count,
+            launch_mode=self.launch_mode,
         )
         if cell.provider != self.provider.provider:
             raise ValueError("trial cell provider does not match capacity provider")
@@ -159,7 +171,12 @@ class CapacityRunner:
                     )
                     logical_ordinal += 1
 
-                results = list(self.provider.create_replicas(cell, requests))
+                if self.launch_mode == "one_shot":
+                    results = list(
+                        self.provider.create_replicas(cell, requests, one_shot=True)
+                    )
+                else:
+                    results = list(self.provider.create_replicas(cell, requests))
                 if len(results) != len(requests):
                     results.extend(
                         CreateResult(
@@ -172,7 +189,11 @@ class CapacityRunner:
                     results = results[: len(requests)]
 
                 stage_failed = False
-                for request, result in zip(requests, results):
+                request_results = list(zip(requests, results))
+                if self.launch_mode == "one_shot":
+                    # Persist known allocations before reconciling any lost create response.
+                    request_results.sort(key=lambda item: not item[1].accepted)
+                for request, result in request_results:
                     final_request, final_result = self._resolve_create_result(
                         run_id,
                         trial_id,
@@ -218,15 +239,21 @@ class CapacityRunner:
                                 ),
                             },
                         )
-                        if first_failed_stage is None:
+                        if first_failed_stage is None or (
+                            self.launch_mode == "one_shot"
+                            and failure_class == FailureClass.CAPACITY
+                            and current_class != FailureClass.CAPACITY
+                        ):
                             first_failed_stage = stage.target_gpu_depth
                             failure_class = current_class
 
                 if stage_failed:
                     break
 
-            readiness_failure = self._wait_ready(
-                run_id, cell, accepted, seen_api_calls
+            readiness_failure = (
+                self._wait_ready(run_id, cell, accepted, seen_api_calls)
+                if self.completion_mode == "ready"
+                else None
             )
             readiness_failed_trial = readiness_failure is not None and first_failed_stage is None
             if readiness_failed_trial:
@@ -239,6 +266,10 @@ class CapacityRunner:
             status = "cleanup_incomplete"
         elif readiness_failed_trial:
             status = "readiness_failure"
+        elif self.launch_mode == "one_shot" and failure_class not in {
+            None, FailureClass.CAPACITY,
+        }:
+            status = "transport_censored"
         elif failure_class in {
             FailureClass.TIMEOUT,
             FailureClass.TRANSIENT,
@@ -255,6 +286,8 @@ class CapacityRunner:
             details={
                 "elapsed_seconds": max(0.0, self.monotonic() - trial_started),
                 "require_application_ready": self.require_application_ready,
+                "completion_mode": self.completion_mode,
+                "launch_mode": self.launch_mode,
             },
         )
         row = self.store.capacity_trial_row(trial_id)
@@ -306,6 +339,7 @@ class CapacityRunner:
                     FailureClass.TRANSIENT,
                     FailureClass.RATE_LIMIT,
                 }
+                or self.launch_mode == "one_shot"
                 or retry_count >= self.max_transient_retries
             ):
                 break

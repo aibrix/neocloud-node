@@ -15,7 +15,7 @@ from .model import (
     ExperimentConfig,
     TerminalReason,
     TrialCell,
-    validate_capacity_target,
+    capacity_stages,
 )
 from .providers import DeleteResult
 from .runners.canary import CanaryRunner, CanarySample
@@ -62,12 +62,25 @@ class CapacityTrialPlan:
     weight: float = 1.0
     billing_minimum_seconds: float = 0.0
     settlement_safety_multiplier: float = 1.0
+    completion_mode: str = "ready"
+    launch_mode: str = "staged"
 
     def __post_init__(self) -> None:
-        validate_capacity_target(self.target_gpu_depth, self.cell.gpu_count)
+        capacity_stages(
+            target_gpu_depth=self.target_gpu_depth,
+            gpu_count_per_instance=self.cell.gpu_count,
+            launch_mode=self.launch_mode,
+        )
+        if self.completion_mode not in {"ready", "allocated"}:
+            raise ValueError("completion_mode must be ready or allocated")
+        if self.launch_mode == "one_shot" and self.cell.provider not in {"runpod", "vast"}:
+            raise ValueError("one_shot launch is supported only for RunPod and Vast")
         if self.ready_timeout_seconds <= 0 or self.max_lease_seconds <= 0:
             raise ValueError("capacity timeouts must be positive")
-        if self.max_lease_seconds < self.ready_timeout_seconds:
+        if (
+            self.completion_mode == "ready"
+            and self.max_lease_seconds < self.ready_timeout_seconds
+        ):
             raise ValueError("capacity max lease must cover the ready timeout")
         if self.estimated_price_usd_hr <= 0:
             raise ValueError("capacity estimated price must be positive")
@@ -367,6 +380,8 @@ def _capacity_trial_plan(document: Mapping[str, Any]) -> CapacityTrialPlan:
         max_lease_seconds=float(document["max_lease_seconds"]),
         estimated_price_usd_hr=float(document["estimated_price_usd_hr"]),
         require_application_ready=bool(document.get("require_application_ready", True)),
+        completion_mode=str(document.get("completion_mode", "ready")),
+        launch_mode=str(document.get("launch_mode", "staged")),
         weight=float(document.get("weight") or 1.0),
         billing_minimum_seconds=float(document.get("billing_minimum_seconds") or 0),
         settlement_safety_multiplier=float(
@@ -654,6 +669,8 @@ class PilotSupervisor:
                         "target_instance_count": trial.target_instance_count,
                         "estimated_price_usd_hr": trial.estimated_price_usd_hr,
                         "max_lease_seconds": trial.max_lease_seconds,
+                        "completion_mode": trial.completion_mode,
+                        "launch_mode": trial.launch_mode,
                         "billing_minimum_seconds": trial.billing_minimum_seconds,
                         "settlement_safety_multiplier": (
                             trial.settlement_safety_multiplier
@@ -1128,6 +1145,8 @@ class PilotSupervisor:
             self.providers[trial.cell.provider],
             ready_timeout_seconds=trial.ready_timeout_seconds,
             require_application_ready=trial.require_application_ready,
+            completion_mode=trial.completion_mode,
+            launch_mode=trial.launch_mode,
         )
         try:
             result = runner.run_trial(

@@ -19,6 +19,73 @@ from neocloud_trace.providers import (
 from neocloud_trace.runners.capacity import ReplicaRequest
 
 
+class OneShotCapacityExecutorTest(unittest.TestCase):
+    def test_full_batch_starts_before_any_response_beyond_worker_limit(self):
+        for provider in ("runpod", "vast"):
+            for count in (17, 32):
+                with self.subTest(provider=provider, count=count):
+                    barrier = threading.Barrier(count)
+                    creates = []
+                    searches = []
+                    lock = threading.Lock()
+
+                    def transport(method, url, headers, body, timeout):
+                        if provider == "vast" and method == "POST":
+                            searches.append(body)
+                            return HTTPResponse(200, 1, payload={"offers": [
+                                {"id": i + 100, "dph_total": .3} for i in range(count)
+                            ]})
+                        with lock:
+                            creates.append(body)
+                        barrier.wait(timeout=5)
+                        name = body.get("name") or body["label"]
+                        index = int(name.rsplit("-", 1)[1])
+                        if index == 0:
+                            return HTTPResponse(429, 1, error={"message": "rate limit"})
+                        return HTTPResponse(201, 1, payload={"id": name}) if provider == "runpod" else HTTPResponse(
+                            200, 1, payload={"success": True, "new_contract": index + 1000}
+                        )
+
+                    client_type = RunPodResearchClient if provider == "runpod" else VastResearchClient
+                    client = client_type(api_key="unused", transport=transport, max_workers=1)
+                    cell = TrialCell(provider, "A40", "A40", None, "secure" if provider == "runpod" else "verified", "on-demand")
+                    requests = [ReplicaRequest(str(i), f"test-{i}", count, i) for i in range(count)]
+                    results = client.create_replicas(cell, requests, one_shot=True)
+                    self.assertEqual(len(creates), count)
+                    self.assertEqual(len(results), count)
+                    self.assertEqual(sum(r.accepted for r in results), count - 1)
+                    self.assertEqual(results[0].failure_class, FailureClass.RATE_LIMIT)
+                    if provider == "vast":
+                        self.assertEqual(len(searches), 1)
+                        self.assertEqual(searches[0]["num_gpus"], {"eq": 1})
+                    else:
+                        self.assertTrue(all(body["gpu"] == {"id": "A40", "count": 1} for body in creates))
+
+    def test_runpod_default_batching_respects_worker_limit_without_barrier_failure(self):
+        calls = []
+        def transport(method, url, headers, body, timeout):
+            calls.append(body["name"])
+            return HTTPResponse(201, 1, payload={"id": body["name"]})
+        client = RunPodResearchClient(api_key="unused", transport=transport, max_workers=1)
+        cell = TrialCell("runpod", "A40", "A40", None, "secure", "on-demand")
+        results = client.create_replicas(cell, [ReplicaRequest(str(i), str(i), 3, i) for i in range(3)])
+        self.assertEqual(calls, ["0", "1", "2"])
+        self.assertTrue(all(r.accepted for r in results))
+
+    def test_runpod_real_capacity_response_is_not_a_schema_failure(self):
+        cell = TrialCell("runpod", "A40", "A40", None, "secure", "on-demand")
+        for message in (
+            "There are no longer any instances available with the requested specifications.",
+            "This machine does not have the resources to deploy your pod. Please try a different machine",
+        ):
+            with self.subTest(message=message):
+                client = RunPodResearchClient(api_key="unused", transport=lambda *args: HTTPResponse(
+                    400, 1, error={"detail": message}
+                ))
+                result = client.create_replicas(cell, [ReplicaRequest("r1", "r1", 1, 0)], one_shot=True)[0]
+                self.assertEqual(result.failure_class, FailureClass.CAPACITY)
+
+
 class LambdaCapacityExecutorTest(unittest.TestCase):
     def test_rejects_undocumented_multi_instance_launch_quantity(self):
         with self.assertRaisesRegex(ValueError, "one instance per request"):
@@ -921,9 +988,9 @@ class VastResearchClientTest(unittest.TestCase):
         self.assertFalse(observation.provider_ready)
         self.assertEqual(probed, [])
 
-    def test_null_instance_is_absent_for_delete_verification(self):
+    def test_null_instance_requires_complete_inventory_for_delete_verification(self):
         def transport(method, url, headers, body, timeout):
-            return HTTPResponse(200, 5, payload={"instances": None})
+            return HTTPResponse(200, 5, payload={"instances": [] if url.endswith("/instances/") else None})
 
         client = VastResearchClient(api_key="unused", transport=transport)
         cell = TrialCell(
@@ -936,6 +1003,29 @@ class VastResearchClientTest(unittest.TestCase):
         self.assertFalse(observation.exists)
         self.assertTrue(verified.accepted)
         self.assertTrue(verified.missing)
+
+    def test_null_direct_lookup_does_not_hide_initializing_instance(self):
+        def transport(method, url, headers, body, timeout):
+            return HTTPResponse(200, 5, payload={"instances": [
+                {"id": 503, "actual_status": None, "cur_state": "running"},
+                {"id": 999, "label": "other-user-instance"},
+            ] if url.endswith("/instances/") else None})
+        client = VastResearchClient(
+            api_key="unused", transport=transport, cleanup_timeout_seconds=0
+        )
+        cell = TrialCell("vast", "RTX_4090", "RTX 4090", None, "verified", "on-demand")
+        observation = client.observe("503", cell)
+        self.assertTrue(observation.exists)
+        self.assertFalse(observation.provider_ready)
+        self.assertEqual(len(observation.api_call.raw["instances"]), 1)
+        self.assertFalse(client.verify_deleted("503", cell).accepted)
+
+    def test_null_direct_lookup_with_failed_inventory_is_not_verified_deleted(self):
+        def transport(method, url, headers, body, timeout):
+            return HTTPResponse(503, 5, error={"message": "unavailable"}) if url.endswith("/instances/") else HTTPResponse(200, 5, payload={"instances": None})
+        client = VastResearchClient(api_key="unused", transport=transport, cleanup_timeout_seconds=0)
+        cell = TrialCell("vast", "RTX_4090", "RTX 4090", None, "verified", "on-demand")
+        self.assertFalse(client.verify_deleted("503", cell).accepted)
 
     def test_delete_treats_not_found_as_clean(self):
         def transport(method, url, headers, body, timeout):

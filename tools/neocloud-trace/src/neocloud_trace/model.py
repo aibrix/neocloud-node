@@ -49,22 +49,32 @@ def validate_capacity_target(
     target_gpu_depth: int,
     gpu_count_per_instance: int,
 ) -> None:
-    if not _is_power_of_two(target_gpu_depth) or target_gpu_depth > MAX_CAPACITY_GPU_DEPTH:
+    if target_gpu_depth <= 0 or target_gpu_depth > MAX_CAPACITY_GPU_DEPTH:
         raise ValueError(
-            f"target_gpu_depth must be a power of two up to {MAX_CAPACITY_GPU_DEPTH}"
+            f"target_gpu_depth must be positive and at most {MAX_CAPACITY_GPU_DEPTH}"
         )
     if not _is_power_of_two(gpu_count_per_instance):
         raise ValueError("gpu_count_per_instance must be a power of two")
     if target_gpu_depth < gpu_count_per_instance:
         raise ValueError("target_gpu_depth must be at least gpu_count_per_instance")
+    if target_gpu_depth % gpu_count_per_instance:
+        raise ValueError("target_gpu_depth must be a multiple of gpu_count_per_instance")
 
 
 def capacity_stages(
     *,
     target_gpu_depth: int,
     gpu_count_per_instance: int,
+    launch_mode: str = "staged",
 ) -> tuple[CapacityStage, ...]:
     validate_capacity_target(target_gpu_depth, gpu_count_per_instance)
+    if launch_mode == "one_shot":
+        count = target_gpu_depth // gpu_count_per_instance
+        return (CapacityStage(target_gpu_depth, count, count),)
+    if launch_mode != "staged":
+        raise ValueError("launch_mode must be staged or one_shot")
+    if not _is_power_of_two(target_gpu_depth):
+        raise ValueError("staged target_gpu_depth must be a power of two")
     stages: list[CapacityStage] = []
     target_instances = 1
     previous_instances = 0
