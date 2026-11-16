@@ -88,7 +88,13 @@ func requestForOffer(request core.WorkloadRequest, offer Offer) core.WorkloadReq
 		out.MarketType = string(offer.Market)
 	}
 	if len(offer.ProviderHints) > 0 {
-		out.ProviderHints = mergeStringMaps(out.ProviderHints, offer.ProviderHints)
+		out.ProviderHints = mergeStringMaps(offer.ProviderHints, out.ProviderHints)
+		// Narrow placement allow-lists to the selected offer's canonical value.
+		for _, key := range placementHintKeys {
+			if value, ok := offer.ProviderHints[key]; ok {
+				out.ProviderHints[key] = value
+			}
+		}
 	}
 	return out
 }

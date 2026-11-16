@@ -3,6 +3,7 @@ package resource
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -282,6 +283,7 @@ func TestLifecycleCandidatePlannerHonorsPinnedHints(t *testing.T) {
 	}{
 		{"unpinned", nil, []float64{.31, .40, .44}},
 		{"cloud", map[string]string{cloud: "SECURE"}, []float64{.40, .44}},
+		{"lowercase pins", map[string]string{cloud: "secure", dc: "eu-ro-1"}, []float64{.40}},
 		{"datacenter", map[string]string{dc: "US-KS-2"}, []float64{.44}},
 		{"both", map[string]string{cloud: "SECURE", dc: "EU-RO-1"}, []float64{.40}},
 		{"allow list", map[string]string{cloud: "SECURE", dc: " US-KS-2, EU-RO-1 "}, []float64{.40, .44}},
@@ -324,6 +326,11 @@ func TestPlannerRejectsConflictingLambdaHint(t *testing.T) {
 	var unavailable *UnavailableError
 	if !errors.As(err, &unavailable) || len(unavailable.Rejected) != 1 || unavailable.Rejected[0].Reason != ReasonProviderHintMismatch {
 		t.Fatalf("expected provider hint rejection, got %v", err)
+	}
+	for _, detail := range []string{key, "gpu_1x_a100", "gpu_1x_a10"} {
+		if !strings.Contains(unavailable.Rejected[0].Message, detail) {
+			t.Fatalf("rejection message %q missing %q", unavailable.Rejected[0].Message, detail)
+		}
 	}
 	offer.ProviderHints[key] = "gpu_1x_a10"
 	if _, err := (Planner{}).Plan(intent, []Offer{offer}, Policy{}); err != nil {

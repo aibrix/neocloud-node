@@ -141,8 +141,14 @@ ports and registry credentials. Only Secure Cloud offers advertise network
 volumes, following RunPod's [network volume restriction](https://docs.runpod.io/storage/network-volumes#network-volumes-for-pods).
 Spot offers are never emitted.
 
-Pinned provider hints constrain placement. An offer that supplies the same hint
-key must match a value in the request's comma-separated allow-list. For example,
+Placement pins constrain offers: `runpod-cloud-type`, `runpod-datacenter-ids`,
+`lambda-instance-type`, `vast-offer-id`, and `vast-machine-id`. An offer that
+supplies one of these keys must match a value in the request's comma-separated
+allow-list, ignoring case and surrounding whitespace. Other hints, such as
+Vast verification modes and disk quantities, retain their provider-specific
+semantics and are not compared by this check. Explicit request settings take
+precedence over offer defaults; only placement pins are narrowed to the selected
+offer's canonical values. For example,
 `runpod-cloud-type: SECURE` excludes Community offers, and
 `runpod-datacenter-ids: US-KS-2,EU-RO-1` permits either datacenter. The selected
 offer narrows the allow-list to its concrete datacenter for creation. This check
