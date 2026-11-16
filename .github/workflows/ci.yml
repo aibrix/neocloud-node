@@ -43,17 +43,6 @@ jobs:
         run: make verify
       - name: Validate workflows
         run: make actionlint
-      - name: Test runner on Python 3.10, 3.11, and 3.12
-        run: |
-          for python_version in 3.10 3.11 3.12; do
-            echo "::group::Runner Python ${python_version}"
-            docker run --rm \
-              --volume "${GITHUB_WORKSPACE}:/workspace:ro" \
-              --workdir /workspace \
-              "python:${python_version}-slim" \
-              python -m unittest discover -s pkg/runner -p 'logship_test.py' -v
-            echo '::endgroup::'
-          done
 
   vulnerabilities:
     name: Vulnerability scan (advisory)

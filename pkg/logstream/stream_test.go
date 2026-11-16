@@ -21,8 +21,8 @@ func TestLogsFilterBeforeTailAndFormat(t *testing.T) {
 				return err
 			}
 		}
-		return emit(Event{ReplayComplete: true})
-	}, Timing{NativeReplay: true})
+		return nil
+	}, Timing{Finite: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,23 +202,21 @@ func TestLogsBoundsConcurrentStreamsAndReleasesSlots(t *testing.T) {
 	t.Fatal("stream slots leaked after close")
 }
 
-func TestLogsZeroTailFollowSkipsNativeReplay(t *testing.T) {
-	zero := 0
-	r, err := Open(context.Background(), core.LogOptions{Tail: &zero, Follow: true}, func(ctx context.Context, emit func(Event) error) error {
-		for _, e := range []Event{{Line: "historical"}, {ReplayComplete: true}, {Line: "live"}} {
-			if err := emit(e); err != nil {
-				return err
-			}
+func TestLogsFiniteSnapshotDoesNotUseIdleTimeout(t *testing.T) {
+	r, err := Open(context.Background(), core.LogOptions{}, func(ctx context.Context, emit func(Event) error) error {
+		if err := emit(Event{Line: "first"}); err != nil {
+			return err
 		}
-		return nil
-	}, Timing{NativeReplay: true})
+		time.Sleep(20 * time.Millisecond)
+		return emit(Event{Line: "second"})
+	}, Timing{Finite: true, SnapshotIdle: time.Millisecond, SnapshotMax: 5 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer r.Close()
-	b, err := io.ReadAll(r)
-	if err != nil || string(b) != "live\n" {
-		t.Fatalf("logs=%q err=%v", b, err)
+	out, err := io.ReadAll(r)
+	if err != nil || string(out) != "first\nsecond\n" {
+		t.Fatalf("finite output=%q err=%v", out, err)
 	}
 }
 

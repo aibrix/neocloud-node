@@ -161,10 +161,13 @@ The controller advertises its Pod IP; verify API-server reachability and restric
 access to port 10250. An optional `kubeletAPI.tlsSecretName` mounts an existing
 serving certificate; otherwise the controller generates a self-signed certificate.
 
-Lambda additionally needs `runnerLogs.enabled=true`, `runnerLogs.secretName`,
-`runnerLogs.callbackURL` and `runnerLogs.url`. The Secret's key defaults to
-`sharedSecret`. The chart creates an internal runner Service on port 9091;
-provide your own VM-reachable TLS proxy. Upload authentication remains enabled
-even when kubelet authentication is disabled. See the
-[container log guide](../../docs/container-logs.md) for the full configuration
-and retention/compatibility limits.
+Lambda reads logs over SSH. Set `lambdaSSH.secretName` to an existing Secret
+containing `ssh-privatekey` and verified `known_hosts` entries. The default SSH user
+is `ubuntu`; it needs noninteractive `sudo docker` access, and the controller
+must reach VM TCP port 22. No log-upload endpoint or log signing Secret is needed.
+
+The existing Lambda lifecycle callback can be configured independently with
+`runnerCallback.enabled`, `runnerCallback.secretName`, and `runnerCallback.url`.
+The chart creates an internal status Service on port 9091; supply a VM-reachable
+TLS proxy for that route. See the [container log guide](../../docs/container-logs.md)
+for credentials, host verification and Docker retention details.

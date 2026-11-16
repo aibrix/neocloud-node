@@ -20,14 +20,13 @@ const maxTailBytes = 4 << 20
 var activeStreams = make(chan struct{}, 16)
 
 type Event struct {
-	Timestamp      time.Time
-	Line           string
-	ReplayComplete bool
+	Timestamp time.Time
+	Line      string
 }
 type Producer func(context.Context, func(Event) error) error
 type Timing struct {
 	SnapshotIdle, SnapshotMax time.Duration
-	NativeReplay              bool
+	Finite                    bool
 }
 
 // Open owns producer's context. Producers must unblock when it is cancelled.
@@ -135,7 +134,7 @@ func copyEvents(ctx context.Context, w io.Writer, events <-chan Event, result <-
 	}
 	var idle *time.Timer
 	var idleC, maxC <-chan time.Time
-	bounded := !t.NativeReplay && (!o.Follow || buffering)
+	bounded := !t.Finite && (!o.Follow || buffering)
 	if bounded {
 		ceiling := time.NewTimer(t.SnapshotMax)
 		defer ceiling.Stop()
@@ -191,15 +190,6 @@ func copyEvents(ctx context.Context, w io.Writer, events <-chan Event, result <-
 				}
 				return normalize(flush())
 			}
-			if e.ReplayComplete {
-				if replay {
-					done, err := endReplay()
-					if done || err != nil {
-						return normalize(err)
-					}
-				}
-				continue
-			}
 			if bounded && replay {
 				if idle == nil {
 					idle = time.NewTimer(t.SnapshotIdle)
@@ -207,9 +197,6 @@ func copyEvents(ctx context.Context, w io.Writer, events <-chan Event, result <-
 					idle.Reset(t.SnapshotIdle)
 				}
 				idleC = idle.C
-			}
-			if t.NativeReplay && replay && o.Follow && o.Tail != nil && *o.Tail == 0 {
-				continue
 			}
 			if !o.SinceTime.IsZero() && e.Timestamp.Before(o.SinceTime) {
 				continue

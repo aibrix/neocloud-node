@@ -24,7 +24,9 @@
             "POD_IP",
             "GPU_BURST_ENABLE_KUBELET_API",
             "GPU_BURST_KUBELET_AUTH_MODE",
-            "GPU_BURST_LAMBDA_LOGS_URL"
+            "GPU_BURST_LAMBDA_SSH_USER",
+            "GPU_BURST_LAMBDA_SSH_PRIVATE_KEY_FILE",
+            "GPU_BURST_LAMBDA_SSH_KNOWN_HOSTS_FILE"
           ]
         }
       }
@@ -94,13 +96,12 @@
         }
       ]
     },
-    "runnerLogs": {
+    "runnerCallback": {
       "type": "object",
       "required": [
         "enabled",
         "secretName",
         "secretKey",
-        "callbackURL",
         "url"
       ],
       "properties": {
@@ -111,9 +112,6 @@
           "type": "string"
         },
         "secretKey": {
-          "type": "string"
-        },
-        "callbackURL": {
           "type": "string"
         },
         "url": {
@@ -137,9 +135,6 @@
               "secretKey": {
                 "minLength": 1
               },
-              "callbackURL": {
-                "minLength": 1
-              },
               "url": {
                 "minLength": 1
               }
@@ -147,13 +142,39 @@
           }
         }
       ]
+    },
+    "lambdaSSH": {
+      "type": "object",
+      "required": [
+        "secretName",
+        "privateKeyKey",
+        "knownHostsKey",
+        "user"
+      ],
+      "properties": {
+        "secretName": {
+          "type": "string"
+        },
+        "privateKeyKey": {
+          "type": "string",
+          "minLength": 1
+        },
+        "knownHostsKey": {
+          "type": "string",
+          "minLength": 1
+        },
+        "user": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
     }
   },
   "allOf": [
     {
       "if": {
         "properties": {
-          "runnerLogs": {
+          "runnerCallback": {
             "properties": {
               "enabled": {
                 "const": true

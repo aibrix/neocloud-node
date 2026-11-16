@@ -12,7 +12,6 @@ import (
 	"math/big"
 	"net"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -39,14 +38,8 @@ func validateLogOptions(o Options) error {
 			return errors.New("kubelet API requires a fixed listening port")
 		}
 	}
-	if o.LambdaLogsURL != "" {
-		u, err := url.Parse(o.LambdaLogsURL)
-		if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") || u.User != nil || u.Path != "/neocloud-node/v1/runner/logs" || u.RawQuery != "" || u.Fragment != "" {
-			return errors.New("lambda logs URL must be an HTTP(S) runner endpoint ending /neocloud-node/v1/runner/logs")
-		}
-		if strings.TrimSpace(o.RunnerCallbackSecret) == "" || o.RunnerCallbackListenAddr == "" || o.LambdaCallbackURL == "" {
-			return errors.New("Lambda logs require runner callback listener, callback secret and Lambda callback URL")
-		}
+	if (o.LambdaSSHPrivateKeyFile == "") != (o.LambdaSSHKnownHostsFile == "") {
+		return errors.New("Lambda logs require both SSH private-key and known-hosts files")
 	}
 	return nil
 }

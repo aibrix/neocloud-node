@@ -58,87 +58,61 @@ query timestamp requires live validation in the gated smoke before release.
 
 ## Lambda
 
-Enable logs when launching a new VM; existing VMs are not modified. Configure
-runner-reachable URLs and an existing Secret holding the callback signing root:
+Lambda logs are pulled on demand over SSH. The controller resolves the instance
+address from the current Pod binding and executes `sudo -n docker logs` for the
+runner's fixed `neocloud-node-workload` container. Docker handles follow, tail
+and time filters; the controller bounds streams, formats timestamps and applies
+byte limits. Finite reads wait for Docker to finish. Closing the request closes
+the SSH connection. No log shipper, log-upload endpoint, controller log cache or
+replay protocol is used.
+
+Configure an existing SSH key whose public key is registered with Lambda and
+selected by `GPU_BURST_LAMBDA_SSH_KEY_NAMES`. Populate `known_hosts` with the VM
+host keys verified through an independent trusted channel, including each VM's
+address. Refresh those entries when instances or their host keys change.
+
+```bash
+kubectl -n aibrix-system create secret generic neocloud-lambda-ssh \
+  --from-file=ssh-privatekey=./id_ed25519 \
+  --from-file=known_hosts=./known_hosts
+```
 
 ```yaml
-runnerLogs:
+lambdaSSH:
+  secretName: neocloud-lambda-ssh
+  privateKeyKey: ssh-privatekey
+  knownHostsKey: known_hosts
+  user: ubuntu
+```
+
+The SSH user must have noninteractive `sudo docker` access. The controller needs
+to reach the VM on TCP 22. Unknown or changed host keys fail verification. An
+unencrypted OpenSSH/PEM private key is required; an SSH agent and passphrase prompt
+are not supported. Key and known-hosts files are read for each new log session.
+Existing sessions are not reauthenticated when these files change.
+
+CLI equivalents are `--lambda-ssh-user`, `--lambda-ssh-private-key-file` and
+`--lambda-ssh-known-hosts-file`; their environment variables are
+`GPU_BURST_LAMBDA_SSH_USER`, `GPU_BURST_LAMBDA_SSH_PRIVATE_KEY_FILE` and
+`GPU_BURST_LAMBDA_SSH_KNOWN_HOSTS_FILE`. Supplying only one file is invalid.
+
+The VM runner retains the workload container after exit and bounds Docker's
+json-file logs to two 16 MiB files. Logs are available only while the VM and
+container exist and Docker retains them; this is not a durable log archive.
+Existing VMs created with automatic container removal need a fresh retained
+container to expose completed logs. Reading logs does not allocate a VM.
+
+Lambda's existing lifecycle status callback remains separate from SSH logs. If
+not already configured, the chart can expose its internal status Service:
+
+```yaml
+runnerCallback:
   enabled: true
   secretName: neocloud-runner
   secretKey: sharedSecret
-  callbackURL: https://controller.example/neocloud-node/v1/runner/status
-  url: https://controller.example/neocloud-node/v1/runner/logs
+  url: https://controller.example/neocloud-node/v1/runner/status
 ```
 
-The chart creates an internal runner ClusterIP Service on port 9091. Configure a
-reachable TLS ingress/proxy for the two paths. HTTP is accepted for isolated
-networks, but HMAC signatures do not encrypt log contents. No credentials are
-stored in Helm values and no credential Secret is created. Kubelet development
-auth settings do not disable log upload authentication.
-
-CLI users configure `--lambda-logs-url`, `--lambda-callback-url`,
-`--runner-callback-addr`, and `--runner-callback-secret`. The controller derives
-a workload-scoped upload key and validates the binding before accepting records.
-
-The runner keeps a detached workload container and captures timestamped stdout
-and stderr. Signed batches and lifecycle callbacks run independently. Sequence
-numbers deduplicate retries. A new controller epoch requests retained replay;
-reads may report unavailable until it arrives. Missing heartbeats eventually
-produce transport errors, not empty successful logs.
-
-The runner supports Python 3.10 and newer. Docker's RFC3339 nanosecond timestamps
-are normalized only for Python datetime validation; original timestamps and
-nanosecond checkpoint ordering are preserved. CI exercises Python 3.10, 3.11 and
-3.12. An existing helper that stopped on a capture error needs an explicit
-operator repair or a fresh runner; updating the controller alone does not change
-scripts already installed on a VM.
-
-The VM spool retains at most 8 MiB and 5000 records; the controller retains at
-most 4 MiB and 5000 records per workload. The app holds at most 32 workloads;
-Pod deletion releases the buffer. Docker storage rotates at 16 MiB per file,
-two files maximum. The helper remains for 24 hours after completion, allowing
-completed logs and restart recovery during that window. VM deletion ends recovery.
-Evicted history produces explicit errors for full-history reads; retained tail
-or time ranges can remain available when completeness can be proven. Time filters
-are inclusive: a cutoff must be strictly after every known evicted timestamp,
-or a requested tail must have enough matching retained records. If the VM lost
-an unuploaded prefix, only a sufficiently retained tail can prove coverage.
-Workloads bypassing controller deletion may
-occupy a cache slot until restart.
-
-Docker24+ resumes capture from a verified timestamp suffix. Older or unrecognized
-Docker versions replay the full retained Docker log and verify a durable prefix
-proof before appending records; they do not use per-record since filtering,
-which can lose nonmonotonic timestamps. On this fallback path, Docker rotation
-that removes the captured prefix produces an explicit history-loss error.
-Upgrading an old spool without that proof requires its complete prefix to still
-be retained; incomplete proof is never treated as successful recovery.
-
-## Shared behavior and limits
-
-The current Pod UID, container and virtual node are validated before routing to
-the provider and remote resource on the binding. Log reads never allocate remote
-resources. Timestamps and time filters use recorded event times. `--previous`
-is unsupported until restart-instance history is available.
-
-There are at most 16 concurrent streams across all backends, with a 1 MiB record
-limit and 4 MiB tail buffer. Exceeding supported limits fails explicitly. Closing
-a stream cancels upstream reads and background tasks. RunPod does not transparently
-reconnect after a transport failure.
-
-Container logs can contain application credentials or user data. Output is
-returned unchanged to readers; controller diagnostics must not copy raw payloads
-or cloud keys. Collect diagnostics before deleting paid resources. No durable
-archive independent of the remote resource is introduced.
-
-## Errors through the API-server proxy
-
-One-shot reads buffer up to 4 MiB until the snapshot boundary or requested byte
-limit, so source failures before completion return an error before HTTP output
-is committed. Use tail or limit-bytes for larger output. Continuous follow
-streams cannot change their status after output begins. Some API-server proxy
-versions turn a backend read failure into clean EOF even if the controller aborts
-its connection. The controller emits a Warning Pod event with reason
-`ContainerLogStreamFailed` on source read failures; check `kubectl describe pod`
-or events when a follow stream ends unexpectedly. Controller diagnostics are
-never appended to the application log body.
+The callback signing Secret and VM-reachable HTTPS route are operator-managed.
+This Service is for status callbacks, not log uploads. No additional callback
+route or signing key is required by SSH log reads.

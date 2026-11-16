@@ -58,10 +58,11 @@ const (
 type Options struct {
 	PodIP                    string
 	KubeletAuthMode          string
-	LambdaLogsURL            string
+	LambdaSSHUser            string
+	LambdaSSHPrivateKeyFile  string
+	LambdaSSHKnownHostsFile  string
 	LogSnapshotIdle          time.Duration
 	LogSnapshotMax           time.Duration
-	runnerLogStore           *runner.LogStore
 	AllowMissingCredentials  bool
 	NodeName                 string
 	Provider                 string
@@ -120,7 +121,9 @@ func ParseOptions(args []string, getenv func(string) string) (Options, error) {
 	options := Options{
 		PodIP:                   envOr(getenv, "POD_IP", ""),
 		KubeletAuthMode:         envOr(getenv, "GPU_BURST_KUBELET_AUTH_MODE", ""),
-		LambdaLogsURL:           envOr(getenv, "GPU_BURST_LAMBDA_LOGS_URL", ""),
+		LambdaSSHUser:           envOr(getenv, "GPU_BURST_LAMBDA_SSH_USER", "ubuntu"),
+		LambdaSSHPrivateKeyFile: envOr(getenv, "GPU_BURST_LAMBDA_SSH_PRIVATE_KEY_FILE", ""),
+		LambdaSSHKnownHostsFile: envOr(getenv, "GPU_BURST_LAMBDA_SSH_KNOWN_HOSTS_FILE", ""),
 		LogSnapshotIdle:         durationEnv(getenv, "GPU_BURST_LOG_SNAPSHOT_IDLE", time.Second),
 		LogSnapshotMax:          durationEnv(getenv, "GPU_BURST_LOG_SNAPSHOT_MAX", 30*time.Second),
 		AllowMissingCredentials: boolEnv(getenv, "GPU_BURST_ALLOW_MISSING_CREDENTIALS", false),
@@ -177,7 +180,9 @@ func ParseOptions(args []string, getenv func(string) string) (Options, error) {
 	fs.SetOutput(io.Discard)
 	fs.StringVar(&options.PodIP, "pod-ip", options.PodIP, "controller Pod IP advertised for the kubelet API")
 	fs.StringVar(&options.KubeletAuthMode, "kubelet-auth-mode", options.KubeletAuthMode, "explicit none for isolated development only")
-	fs.StringVar(&options.LambdaLogsURL, "lambda-logs-url", options.LambdaLogsURL, "runner-reachable log upload URL; requires callback secret and Lambda runner")
+	fs.StringVar(&options.LambdaSSHUser, "lambda-ssh-user", options.LambdaSSHUser, "SSH user for Lambda Docker logs")
+	fs.StringVar(&options.LambdaSSHPrivateKeyFile, "lambda-ssh-private-key-file", options.LambdaSSHPrivateKeyFile, "SSH private-key file for Lambda Docker logs")
+	fs.StringVar(&options.LambdaSSHKnownHostsFile, "lambda-ssh-known-hosts-file", options.LambdaSSHKnownHostsFile, "trusted SSH known_hosts file for Lambda Docker logs")
 	fs.DurationVar(&options.LogSnapshotIdle, "log-snapshot-idle", options.LogSnapshotIdle, "RunPod one-shot replay idle gap")
 	fs.DurationVar(&options.LogSnapshotMax, "log-snapshot-max", options.LogSnapshotMax, "RunPod one-shot replay maximum duration")
 	fs.BoolVar(&options.AllowMissingCredentials, "allow-missing-credentials", options.AllowMissingCredentials, "start without provider credentials; disable GPU capacity until credentials are configured and the controller restarts")
@@ -263,9 +268,6 @@ func NewNode(ctx context.Context, options Options, kubeClient kubernetes.Interfa
 	if err != nil {
 		return nil, err
 	}
-	if options.LambdaLogsURL != "" {
-		options.runnerLogStore = runner.NewLogStore(runner.LogStoreConfig{MaxWorkloads: 32, MaxStreams: 16})
-	}
 	adapter, err := newProviderAdapter(options)
 	if err != nil {
 		return nil, err
@@ -283,7 +285,7 @@ func NewNode(ctx context.Context, options Options, kubeClient kubernetes.Interfa
 	if err := startOrphanSweeper(ctx, store, adapter, options); err != nil {
 		return nil, err
 	}
-	if _, _, err := startRunnerCallbackServer(ctx, options.RunnerCallbackListenAddr, options.RunnerCallbackSecret, store, options.runnerLogStore); err != nil {
+	if _, _, err := startRunnerCallbackServer(ctx, options.RunnerCallbackListenAddr, options.RunnerCallbackSecret, store); err != nil {
 		return nil, err
 	}
 
@@ -302,9 +304,6 @@ func NewNode(ctx context.Context, options Options, kubeClient kubernetes.Interfa
 		PodClient:          kubeClient.CoreV1(),
 		StatusSyncContext:  ctx,
 		StatusSyncInterval: options.StatusSyncInterval,
-	}
-	if options.runnerLogStore != nil {
-		providerConfig.ForgetLogs = options.runnerLogStore.Forget
 	}
 
 	nodeOptions := []nodeutil.NodeOpt{
@@ -696,9 +695,9 @@ func providerAdapterFor(options Options, provider string) (core.ProviderAdapter,
 		}), nil
 	case ProviderLambda:
 		return lambdacloud.NewClient(lambdacloud.Config{
-			RunnerLogsURL:       options.LambdaLogsURL,
-			RunnerLogsSecret:    options.RunnerCallbackSecret,
-			LogStore:            options.runnerLogStore,
+			SSHUser:             options.LambdaSSHUser,
+			SSHPrivateKeyFile:   options.LambdaSSHPrivateKeyFile,
+			SSHKnownHostsFile:   options.LambdaSSHKnownHostsFile,
 			APIKey:              options.LambdaAPIKey,
 			BaseURL:             options.LambdaBaseURL,
 			CallbackURL:         options.LambdaCallbackURL,
@@ -817,7 +816,7 @@ func runnerCallbackSignature(secret string, timestamp string, body []byte) strin
 	return "v1=" + hex.EncodeToString(mac.Sum(nil))
 }
 
-func startRunnerCallbackServer(ctx context.Context, listenAddr string, callbackSecret string, store core.BindingStore, logStores ...*runner.LogStore) (string, func(context.Context) error, error) {
+func startRunnerCallbackServer(ctx context.Context, listenAddr string, callbackSecret string, store core.BindingStore) (string, func(context.Context) error, error) {
 	if strings.TrimSpace(listenAddr) == "" {
 		return "", func(context.Context) error { return nil }, nil
 	}
@@ -827,9 +826,6 @@ func startRunnerCallbackServer(ctx context.Context, listenAddr string, callbackS
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/neocloud-node/v1/runner/status", runnerStatusHandler(store, callbackSecret))
-	if len(logStores) > 0 && logStores[0] != nil {
-		mux.Handle("/neocloud-node/v1/runner/logs", runnerLogsHandler(store, logStores[0], callbackSecret))
-	}
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()

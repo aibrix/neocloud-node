@@ -18,9 +18,10 @@ import (
 const providerName = "lambda"
 
 type Config struct {
-	RunnerLogsURL       string
-	RunnerLogsSecret    string
-	LogStore            *runner.LogStore
+	SSHUser             string
+	SSHPrivateKeyFile   string
+	SSHKnownHostsFile   string
+	SSHPort             int
 	BaseURL             string
 	APIKey              string
 	CallbackURL         string
@@ -32,9 +33,7 @@ type Config struct {
 }
 
 type Client struct {
-	runnerLogsURL       string
-	runnerLogsSecret    string
-	logStore            *runner.LogStore
+	sshConfig           Config
 	baseURL             string
 	apiKey              string
 	callbackURL         string
@@ -57,7 +56,7 @@ func NewClient(config Config) *Client {
 	}
 
 	return &Client{
-		runnerLogsURL: config.RunnerLogsURL, runnerLogsSecret: config.RunnerLogsSecret, logStore: config.LogStore,
+		sshConfig:           config,
 		baseURL:             baseURL,
 		apiKey:              config.APIKey,
 		callbackURL:         config.CallbackURL,
@@ -253,13 +252,9 @@ func (c *Client) launchPayload(idempotencyKey string, name string, request core.
 	for _, firewallID := range splitCSV(providerHint(request, core.AnnotationLambdaFirewallIDs)) {
 		payload.FirewallRulesets = append(payload.FirewallRulesets, resourceRef{ID: firewallID})
 	}
-	if c.runnerLogsURL != "" && c.callbackURL == "" {
-		return launchRequest{}, &runner.ConfigError{Code: "MissingCallbackURL", Message: "Lambda runner logs require the runner status callback URL"}
-	}
 	if c.callbackURL != "" {
 		cloudInit, err := runner.BuildCloudInit(runner.CloudInitConfig{
-			WorkloadID:    idempotencyKey,
-			RunnerLogsURL: c.runnerLogsURL, RunnerLogsSecret: c.runnerLogsSecret,
+			WorkloadID:     idempotencyKey,
 			CallbackURL:    c.callbackURL,
 			CallbackSecret: c.callbackSecret,
 			Request:        request,

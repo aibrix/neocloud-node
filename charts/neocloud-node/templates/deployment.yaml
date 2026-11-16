@@ -22,6 +22,9 @@ spec:
       terminationGracePeriodSeconds: 30
       securityContext:
         runAsNonRoot: true
+        {{- if .Values.lambdaSSH.secretName }}
+        fsGroup: 65532
+        {{- end }}
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -62,18 +65,24 @@ spec:
                 fieldRef:
                   fieldPath: status.podIP
             {{- end }}
-            {{- if .Values.runnerLogs.enabled }}
+            {{- if .Values.lambdaSSH.secretName }}
+            - name: GPU_BURST_LAMBDA_SSH_USER
+              value: {{ .Values.lambdaSSH.user | quote }}
+            - name: GPU_BURST_LAMBDA_SSH_PRIVATE_KEY_FILE
+              value: /etc/neocloud-lambda-ssh/ssh-privatekey
+            - name: GPU_BURST_LAMBDA_SSH_KNOWN_HOSTS_FILE
+              value: /etc/neocloud-lambda-ssh/known_hosts
+            {{- end }}
+            {{- if .Values.runnerCallback.enabled }}
             - name: GPU_BURST_RUNNER_CALLBACK_ADDR
               value: ':9091'
             - name: GPU_BURST_RUNNER_CALLBACK_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: {{ required "runnerLogs.secretName is required" .Values.runnerLogs.secretName | quote }}
-                  key: {{ .Values.runnerLogs.secretKey | quote }}
+                  name: {{ required "runnerCallback.secretName is required" .Values.runnerCallback.secretName | quote }}
+                  key: {{ .Values.runnerCallback.secretKey | quote }}
             - name: GPU_BURST_LAMBDA_CALLBACK_URL
-              value: {{ required "runnerLogs.callbackURL is required" .Values.runnerLogs.callbackURL | quote }}
-            - name: GPU_BURST_LAMBDA_LOGS_URL
-              value: {{ required "runnerLogs.url is required" .Values.runnerLogs.url | quote }}
+              value: {{ required "runnerCallback.url is required" .Values.runnerCallback.url | quote }}
             {{- end }}
             {{- range $name, $value := .Values.env }}
             - name: {{ $name }}
@@ -89,22 +98,29 @@ spec:
                   optional: true
             {{- end }}
             {{- end }}
-          {{- if or .Values.kubeletAPI.enabled .Values.runnerLogs.enabled }}
+          {{- if or .Values.kubeletAPI.enabled .Values.runnerCallback.enabled }}
           ports:
             {{- if .Values.kubeletAPI.enabled }}
             - name: kubelet
               containerPort: 10250
             {{- end }}
-            {{- if .Values.runnerLogs.enabled }}
+            {{- if .Values.runnerCallback.enabled }}
             - name: runner
               containerPort: 9091
             {{- end }}
           {{- end }}
-          {{- if and .Values.kubeletAPI.enabled .Values.kubeletAPI.tlsSecretName }}
+          {{- if or .Values.lambdaSSH.secretName (and .Values.kubeletAPI.enabled .Values.kubeletAPI.tlsSecretName) }}
           volumeMounts:
+            {{- if .Values.lambdaSSH.secretName }}
+            - name: lambda-ssh
+              mountPath: /etc/neocloud-lambda-ssh
+              readOnly: true
+            {{- end }}
+            {{- if and .Values.kubeletAPI.enabled .Values.kubeletAPI.tlsSecretName }}
             - name: kubelet-tls
               mountPath: /etc/neocloud-kubelet-tls
               readOnly: true
+            {{- end }}
           {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
@@ -117,11 +133,24 @@ spec:
             runAsNonRoot: true
             runAsUser: 65532
           terminationMessagePolicy: FallbackToLogsOnError
-      {{- if and .Values.kubeletAPI.enabled .Values.kubeletAPI.tlsSecretName }}
+      {{- if or .Values.lambdaSSH.secretName (and .Values.kubeletAPI.enabled .Values.kubeletAPI.tlsSecretName) }}
       volumes:
+        {{- if .Values.lambdaSSH.secretName }}
+        - name: lambda-ssh
+          secret:
+            secretName: {{ .Values.lambdaSSH.secretName | quote }}
+            defaultMode: 0440
+            items:
+              - key: {{ .Values.lambdaSSH.privateKeyKey | quote }}
+                path: ssh-privatekey
+              - key: {{ .Values.lambdaSSH.knownHostsKey | quote }}
+                path: known_hosts
+        {{- end }}
+        {{- if and .Values.kubeletAPI.enabled .Values.kubeletAPI.tlsSecretName }}
         - name: kubelet-tls
           secret:
             secretName: {{ .Values.kubeletAPI.tlsSecretName | quote }}
+        {{- end }}
       {{- end }}
       nodeSelector:
         {{- toYaml .Values.nodeSelector | nindent 8 }}

@@ -1,13 +1,7 @@
 package runner
 
 import (
-	"crypto/rand"
-	_ "embed"
-	"encoding/base64"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -15,16 +9,11 @@ import (
 	"github.com/aibrix/neocloud-node/pkg/core"
 )
 
-//go:embed logship.py
-var logShipper string
-
 type CloudInitConfig struct {
-	RunnerLogsURL    string
-	RunnerLogsSecret string
-	WorkloadID       string
-	CallbackURL      string
-	CallbackSecret   string
-	Request          core.WorkloadRequest
+	WorkloadID     string
+	CallbackURL    string
+	CallbackSecret string
+	Request        core.WorkloadRequest
 }
 
 type ConfigError struct {
@@ -59,25 +48,9 @@ func BuildCloudInit(config CloudInitConfig) (string, error) {
 		}
 	}
 
-	if config.RunnerLogsURL != "" {
-		u, e := url.Parse(config.RunnerLogsURL)
-		if e != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || strings.TrimSpace(config.RunnerLogsSecret) == "" {
-			return "", &ConfigError{Code: "InvalidRunnerLogs", Message: "logs require an HTTP(S) URL and nonempty signing secret"}
-		}
-	}
 	command := runnerCommand(config)
-	files := ""
-	if config.RunnerLogsURL != "" {
-		token := make([]byte, 16)
-		if _, err := rand.Read(token); err != nil {
-			return "", err
-		}
-		data, _ := json.Marshal(map[string]string{"url": config.RunnerLogsURL, "workloadID": config.WorkloadID, "generation": hex.EncodeToString(token), "key": DeriveLogKey(config.RunnerLogsSecret, config.WorkloadID), "directory": "/var/lib/neocloud-node/logs", "container": "neocloud-node-workload"})
-		files = "write_files:\n" + cloudInitFile("/var/lib/neocloud-node/logship.py", []byte(logShipper)) + cloudInitFile("/var/lib/neocloud-node/logship.json", data)
-	}
 	return strings.Join([]string{
 		"#cloud-config",
-		files,
 		"runcmd:",
 		"  - " + strconv.Quote(command),
 		"",
@@ -86,7 +59,7 @@ func BuildCloudInit(config CloudInitConfig) (string, error) {
 
 func runnerCommand(config CloudInitConfig) string {
 	bootstrap := bootstrapRunnerCommand()
-	if config.RunnerLogsURL != "" {
+	if config.CallbackSecret != "" {
 		bootstrap += "; if ! command -v python3 >/dev/null 2>&1; then apt-get update && apt-get install -y python3; fi"
 	}
 	image := shellQuote(config.Request.Image)
@@ -100,8 +73,9 @@ func runnerCommand(config CloudInitConfig) string {
 		callbackCommand(config, "$(printf "+runningPayloadFormat+" "+workloadID+` "$runner_message")`) + " || true",
 		"docker pull " + image,
 		"set +e",
-		runWithLogsCommand(config),
+		dockerRunCommand(config.Request),
 		"code=$?",
+		`if [ "$code" -eq 0 ]; then code=$(docker wait neocloud-node-workload) || code=125; fi`,
 		`if [ "$code" -eq 0 ]; then phase=Succeeded; else phase=Failed; fi`,
 		callbackCommand(config, "$(printf "+terminalPayloadFormat+" "+workloadID+` "$phase" "$code")`),
 		"exit $code",
@@ -148,7 +122,7 @@ func signedCallbackHeaders(secret string) string {
 }
 
 func dockerRunCommand(request core.WorkloadRequest) string {
-	parts := []string{"docker run --rm --gpus all --name neocloud-node-workload"}
+	parts := []string{"docker run -d --log-driver json-file --log-opt max-size=16m --log-opt max-file=2 --gpus all --name neocloud-node-workload"}
 	for _, env := range sortedEnv(request.Env) {
 		parts = append(parts, "-e "+shellQuote(env))
 	}
@@ -193,16 +167,4 @@ func shellQuote(s string) string {
 
 func statusPayload(workloadID string, exitCode string) string {
 	return fmt.Sprintf(`{"workloadID":%q,"exitCode":%s}`, workloadID, exitCode)
-}
-
-func cloudInitFile(path string, data []byte) string {
-	return "  - path: " + path + "\n    permissions: '0600'\n    encoding: b64\n    content: " + base64.StdEncoding.EncodeToString(data) + "\n"
-}
-func runWithLogsCommand(config CloudInitConfig) string {
-	cmd := dockerRunCommand(config.Request)
-	if config.RunnerLogsURL == "" {
-		return cmd
-	}
-	cmd = strings.Replace(cmd, "docker run --rm", "docker run -d --log-opt max-size=16m --log-opt max-file=2", 1)
-	return cmd + "; launch_code=$?; if [ \"$launch_code\" -eq 0 ]; then nohup python3 /var/lib/neocloud-node/logship.py /var/lib/neocloud-node/logship.json >/var/log/neocloud-logship.log 2>&1 </dev/null & code=$(docker wait neocloud-node-workload) || code=125; else code=$launch_code; fi; (exit \"$code\")"
 }

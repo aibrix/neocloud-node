@@ -67,6 +67,26 @@ func TestKubeletRequiresExplicitAuthAndValidCertificatePair(t *testing.T) {
 	}
 }
 
+func TestLambdaSSHLogOptions(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		args  []string
+		valid bool
+	}{
+		{"disabled", nil, true},
+		{"configured", []string{"--lambda-ssh-private-key-file=/keys/id", "--lambda-ssh-known-hosts-file=/keys/hosts", "--lambda-ssh-user=ubuntu"}, true},
+		{"missing hosts", []string{"--lambda-ssh-private-key-file=/keys/id"}, false},
+		{"missing private key", []string{"--lambda-ssh-known-hosts-file=/keys/hosts"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseOptions(tc.args, emptyEnv)
+			if (err == nil) != tc.valid {
+				t.Fatalf("options error=%v valid=%t", err, tc.valid)
+			}
+		})
+	}
+}
+
 func TestKubeletLogRoutePreservesExplicitZeroTail(t *testing.T) {
 	// VK's ContainerLogOpts.Tail collapses omitted tailLines and explicit zero.
 	// Verify our actual HTTP boundary restores that distinction for the provider.

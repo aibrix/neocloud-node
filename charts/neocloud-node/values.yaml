@@ -11,13 +11,18 @@ kubeletAPI:
   # protect requests made directly to the controller port.
   authenticationMode: ''
   tlsSecretName: ''
-runnerLogs:
+lambdaSSH:
+  # Existing Secret containing the private key and verified VM host keys.
+  secretName: ''
+  privateKeyKey: ssh-privatekey
+  knownHostsKey: known_hosts
+  user: ubuntu
+runnerCallback:
   enabled: false
   # Existing Secret holding the runner callback signing root, never a Helm value.
   secretName: ''
   secretKey: sharedSecret
   # URLs reachable from the remote Lambda VM; terminate TLS in your own ingress.
-  callbackURL: ''
   url: ''
 credentials:
   runpod:
