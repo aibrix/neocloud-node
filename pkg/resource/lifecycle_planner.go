@@ -63,6 +63,7 @@ func (p LifecycleCandidatePlanner) CreateCandidates(ctx context.Context, binding
 // IntentFromWorkloadRequest maps the provider-neutral workload request into placement inputs.
 func IntentFromWorkloadRequest(request core.WorkloadRequest) Intent {
 	return Intent{
+		ProviderHints:  cloneProviderHints(request.ProviderHints),
 		GPUCount:       request.GPUCount,
 		GPUType:        strings.TrimSpace(request.GPUType),
 		GPUMemory:      strings.TrimSpace(request.GPUMemory),
@@ -87,7 +88,13 @@ func requestForOffer(request core.WorkloadRequest, offer Offer) core.WorkloadReq
 		out.MarketType = string(offer.Market)
 	}
 	if len(offer.ProviderHints) > 0 {
-		out.ProviderHints = mergeStringMaps(out.ProviderHints, offer.ProviderHints)
+		out.ProviderHints = mergeStringMaps(offer.ProviderHints, out.ProviderHints)
+		// Narrow placement allow-lists to the selected offer's canonical value.
+		for _, key := range placementHintKeys {
+			if value, ok := offer.ProviderHints[key]; ok {
+				out.ProviderHints[key] = value
+			}
+		}
 	}
 	return out
 }

@@ -49,3 +49,16 @@ Confirm the instance is deleted in the provider console. See
 [Provider Compatibility](../README.md#provider-compatibility) for supported
 features and limitations, and the [RunPod adapter guide](runpod-adapter.md)
 for RunPod-specific settings.
+
+## Vast placement settings
+
+Intent-based catalog queries use the requested disk size and verification mode.
+Explicit workload settings remain on the selected create request, including disk
+quantities such as `50Gi` and verification aliases such as `any` or `verified`.
+Offer and machine IDs are placement pins; disk and verification are not exact
+string-match constraints. Creation searches again with the selected IDs and the
+requested settings before renting the offer.
+
+Periodic catalog refresh uses an empty intent and therefore quotes configured
+defaults. A different requested disk allocation can change the final price;
+the create path rechecks the price ceiling before renting.

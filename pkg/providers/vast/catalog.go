@@ -29,6 +29,10 @@ func (c *Client) ListOffers(ctx context.Context, intent burstresource.Intent) ([
 		GPUMemory:  intent.GPUMemory,
 		MarketType: core.MarketTypeOnDemand,
 		Provider:   providerName,
+		ProviderHints: map[string]string{
+			core.AnnotationVastDiskGB:   intent.ProviderHints[core.AnnotationVastDiskGB],
+			core.AnnotationVastVerified: intent.ProviderHints[core.AnnotationVastVerified],
+		},
 	}
 	if request.GPUCount <= 0 {
 		request.GPUCount = 1
@@ -37,10 +41,15 @@ func (c *Client) ListOffers(ctx context.Context, intent burstresource.Intent) ([
 		request.MaxPrice = strconv.FormatFloat(intent.MaxHourlyPrice, 'f', -1, 64)
 	}
 
+	diskGB, err := c.diskGBForRequest(request)
+	if err != nil {
+		return nil, err
+	}
+
 	var all []burstresource.Offer
 	for _, market := range markets {
 		request.MarketType = market
-		searchBody, normalizedMarket, _, err := c.createSearchBody(request, c.diskGB)
+		searchBody, normalizedMarket, _, err := c.createSearchBody(request, diskGB)
 		if err != nil {
 			return nil, err
 		}
@@ -63,7 +72,7 @@ func (c *Client) ListOffers(ctx context.Context, intent burstresource.Intent) ([
 			} else if verification := strings.TrimSpace(item.Verification); verification != "" {
 				providerHints[core.AnnotationVastVerified] = strconv.FormatBool(strings.EqualFold(verification, "verified"))
 			}
-			providerHints[core.AnnotationVastDiskGB] = strconv.FormatFloat(c.diskGB, 'f', -1, 64)
+			providerHints[core.AnnotationVastDiskGB] = strconv.FormatFloat(diskGB, 'f', -1, 64)
 
 			marketValue := burstresource.MarketOnDemand
 			if normalizedMarket == core.MarketTypeSpot {

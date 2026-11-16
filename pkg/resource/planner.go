@@ -29,7 +29,17 @@ const (
 	CapabilityPublicIP      Capability = "public-ip"
 )
 
+// Only identity and location selectors use CSV membership semantics.
+var placementHintKeys = [...]string{
+	core.AnnotationRunPodCloudType,
+	core.AnnotationRunPodDataCenterIDs,
+	core.AnnotationLambdaInstanceType,
+	core.AnnotationVastOfferID,
+	core.AnnotationVastMachineID,
+}
+
 type Intent struct {
+	ProviderHints  map[string]string
 	GPUCount       int
 	GPUType        string
 	GPUMemory      string
@@ -98,6 +108,7 @@ type RejectedOffer struct {
 type RejectionReason string
 
 const (
+	ReasonProviderHintMismatch  RejectionReason = "ProviderHintMismatch"
 	ReasonGPUTypeMismatch       RejectionReason = "GPUTypeMismatch"
 	ReasonGPUMemoryMismatch     RejectionReason = "GPUMemoryMismatch"
 	ReasonInsufficientGPUCount  RejectionReason = "InsufficientGPUCount"
@@ -178,6 +189,26 @@ func rejectOffer(intent Intent, offer Offer, policy Policy, now time.Time) (Reje
 			Message: "offer is temporarily blocked by a recent provider failure",
 			Class:   blocked.Class,
 		}, true
+	}
+	for _, key := range placementHintKeys {
+		value, present := offer.ProviderHints[key]
+		if !present {
+			continue
+		}
+		allowed := strings.TrimSpace(intent.ProviderHints[key])
+		if allowed == "" {
+			continue
+		}
+		matches := false
+		for _, candidate := range strings.Split(allowed, ",") {
+			if strings.EqualFold(strings.TrimSpace(candidate), strings.TrimSpace(value)) {
+				matches = true
+				break
+			}
+		}
+		if !matches {
+			return RejectedOffer{Offer: offer, Reason: ReasonProviderHintMismatch, Message: fmt.Sprintf("provider hint %s: offer value %q is not in requested values %q", key, value, allowed)}, true
+		}
 	}
 	if strings.TrimSpace(intent.GPUType) != "" && offer.GPUType != intent.GPUType {
 		return RejectedOffer{Offer: offer, Reason: ReasonGPUTypeMismatch, Message: "offer GPU type does not match request"}, true

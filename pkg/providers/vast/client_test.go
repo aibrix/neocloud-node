@@ -472,3 +472,120 @@ func assertStringSliceValue(t *testing.T, raw any, want []string) {
 		t.Fatalf("array = %#v, want %#v", got, want)
 	}
 }
+
+func TestCatalogPlacementPreservesVastHintSemantics(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"offers":[{"id":71,"gpu_name":"RTX 4090","num_gpus":1,"dph_total":0.30,"machine_id":8,"verified":true,"geolocation":"US"}]}`))
+	}))
+	defer server.Close()
+	client := NewClient(Config{BaseURL: server.URL, V1BaseURL: server.URL, DiskGB: 20})
+	planner := burstresource.LifecycleCandidatePlanner{Catalog: burstresource.CompositeCatalog{Sources: []burstresource.ProviderOfferSource{client}}}
+	for _, tt := range []struct {
+		name  string
+		key   string
+		value string
+		want  int
+	}{
+		{"any verification", core.AnnotationVastVerified, "any", 1},
+		{"verified alias", core.AnnotationVastVerified, "verified", 1},
+		{"disk size", core.AnnotationVastDiskGB, "100", 1},
+		{"disk quantity", core.AnnotationVastDiskGB, "50Gi", 1},
+		{"matching offer", core.AnnotationVastOfferID, "71", 1},
+		{"offer allow list", core.AnnotationVastOfferID, "70, 71", 1},
+		{"conflicting offer", core.AnnotationVastOfferID, "72", 0},
+		{"matching machine", core.AnnotationVastMachineID, "8", 1},
+		{"conflicting machine", core.AnnotationVastMachineID, "9", 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			candidates, err := planner.CreateCandidates(context.Background(), core.Binding{Request: core.WorkloadRequest{
+				Provider: "vast", GPUCount: 1, GPUType: "RTX 4090", MarketType: core.MarketTypeOnDemand,
+				ProviderHints: map[string]string{tt.key: tt.value},
+			}})
+			if len(candidates) != tt.want {
+				t.Fatalf("got %d candidates, error %v; want %d", len(candidates), err, tt.want)
+			}
+			if tt.want == 0 {
+				if core.ClassifyError(err) != core.ErrorClassCapacity {
+					t.Fatalf("expected capacity error, got %v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestCatalogCandidatesPreserveVastCreateSettings(t *testing.T) {
+	for _, tt := range []struct {
+		verified, disk string
+		wantDisk       float64
+		wantVerified   any
+	}{
+		{"any", "100", 100, nil},
+		{"verified", "50Gi", 50, true},
+		{"false", "30", 30, false},
+	} {
+		t.Run(tt.verified, func(t *testing.T) {
+			searches, creates := 0, 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/instances/":
+					_, _ = w.Write([]byte(`{"instances":[],"next_token":null}`))
+				case "/bundles/":
+					searches++
+					var body map[string]any
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Error(err)
+						return
+					}
+					if body["allocated_storage"] != tt.wantDisk {
+						t.Errorf("allocated_storage = %v", body["allocated_storage"])
+					}
+					assertSearchOperator(t, body, "disk_space", "gte", tt.wantDisk)
+					if tt.wantVerified == nil {
+						if _, ok := body["verified"]; ok {
+							t.Error("any must omit verification filter")
+						}
+					} else {
+						assertSearchOperator(t, body, "verified", "eq", tt.wantVerified)
+					}
+					if searches == 2 {
+						assertSearchOperator(t, body, "id", "eq", float64(71))
+					}
+					_, _ = w.Write([]byte(`{"offers":[{"id":71,"gpu_name":"RTX 4090","num_gpus":1,"dph_total":0.3,"machine_id":8,"verified":true}]}`))
+				case "/asks/71/":
+					creates++
+					var body map[string]any
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Error(err)
+						return
+					}
+					if body["disk"] != tt.wantDisk {
+						t.Errorf("create disk = %v, want %v", body["disk"], tt.wantDisk)
+					}
+					_, _ = w.Write([]byte(`{"success":true,"new_contract":9001}`))
+				default:
+					t.Errorf("unexpected path %s", r.URL.Path)
+					w.WriteHeader(404)
+				}
+			}))
+			defer server.Close()
+			client := NewClient(Config{BaseURL: server.URL, V1BaseURL: server.URL, DiskGB: 20})
+			request := core.WorkloadRequest{Image: "busybox:1.37", GPUCount: 1, MarketType: core.MarketTypeOnDemand, ProviderHints: map[string]string{core.AnnotationVastDiskGB: tt.disk, core.AnnotationVastVerified: tt.verified}}
+			planner := burstresource.LifecycleCandidatePlanner{Catalog: burstresource.CompositeCatalog{Sources: []burstresource.ProviderOfferSource{client}}}
+			candidates, err := planner.CreateCandidates(context.Background(), core.Binding{Request: request})
+			if err != nil || len(candidates) != 1 {
+				t.Fatalf("candidates = %v, %v", candidates, err)
+			}
+			if got := candidates[0].Request.ProviderHints; got[core.AnnotationVastDiskGB] != tt.disk || got[core.AnnotationVastVerified] != tt.verified {
+				t.Fatalf("settings overwritten: %v", got)
+			}
+			if _, err := client.Create(context.Background(), "settings-test", candidates[0].Request); err != nil {
+				t.Fatal(err)
+			}
+			if searches != 2 || creates != 1 {
+				t.Fatalf("searches=%d creates=%d", searches, creates)
+			}
+		})
+	}
+}
