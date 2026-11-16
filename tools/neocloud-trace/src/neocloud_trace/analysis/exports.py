@@ -90,6 +90,8 @@ CAPACITY_DEPTH_FIELDS = (
     "gpu_count_per_instance",
     "target_gpu_depth",
     "target_instance_count",
+    "completion_mode",
+    "launch_mode",
     "requested_instance_count",
     "accepted_instance_count",
     "provider_ready_instance_count",
@@ -411,15 +413,20 @@ def capacity_depth_rows(store: TraceStore, run_id: str) -> list[dict[str, Any]]:
                 (trial["catalog_quote_id"],),
             ).fetchone()
         trial_details = json.loads(trial["details_json"]) if trial else {}
-        requirement = (
-            "application"
-            if trial_details.get("require_application_ready")
-            else "provider"
+        epoch_details = json.loads(epoch["details_json"])
+        completion_mode = trial_details.get(
+            "completion_mode", epoch_details.get("completion_mode", "ready")
         )
+        launch_mode = trial_details.get(
+            "launch_mode", epoch_details.get("launch_mode", "staged")
+        )
+        if completion_mode == "allocated":
+            requirement = "allocation"
+        else:
+            requirement = "application" if trial_details.get("require_application_ready") else "provider"
         target_gpu_depth = (
             int(trial["target_gpu_depth"]) if trial else int(epoch["target_gpu_depth"])
         )
-        epoch_details = json.loads(epoch["details_json"]) if epoch else {}
         gpu_count_per_instance = (
             int(trial["gpu_count"])
             if trial
@@ -438,10 +445,12 @@ def capacity_depth_rows(store: TraceStore, run_id: str) -> list[dict[str, Any]]:
             application_ready_instances * gpu_count_per_instance
         )
         provider_success = (
-            int(provider_ready_gpu_depth >= target_gpu_depth) if trial else None
+            int(provider_ready_gpu_depth >= target_gpu_depth)
+            if trial and completion_mode == "ready" else None
         )
         application_success = (
-            int(application_ready_gpu_depth >= target_gpu_depth) if trial else None
+            int(application_ready_gpu_depth >= target_gpu_depth)
+            if trial and completion_mode == "ready" else None
         )
         result.append(
             {
@@ -468,6 +477,8 @@ def capacity_depth_rows(store: TraceStore, run_id: str) -> list[dict[str, Any]]:
                 "gpu_count_per_instance": gpu_count_per_instance,
                 "target_gpu_depth": target_gpu_depth,
                 "target_instance_count": target_instance_count,
+                "completion_mode": completion_mode,
+                "launch_mode": launch_mode,
                 "requested_instance_count": requested_instances if trial else None,
                 "accepted_instance_count": accepted_instances if trial else None,
                 "provider_ready_instance_count": (
@@ -495,7 +506,9 @@ def capacity_depth_rows(store: TraceStore, run_id: str) -> list[dict[str, Any]]:
                 "provider_depth_success": provider_success,
                 "application_depth_success": application_success,
                 "depth_success": (
-                    application_success
+                    (int(accepted_instances >= target_instance_count) if trial else None)
+                    if requirement == "allocation"
+                    else application_success
                     if requirement == "application"
                     else provider_success
                 ),

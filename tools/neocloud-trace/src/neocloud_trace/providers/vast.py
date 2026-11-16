@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import dataclasses
 import datetime as dt
 import json
 import math
@@ -242,7 +243,7 @@ class VastResearchClient:
         return records
 
     def create_replicas(
-        self, cell: TrialCell, requests: Sequence[Any]
+        self, cell: TrialCell, requests: Sequence[Any], *, one_shot: bool = False
     ) -> list[CreateResult]:
         if not requests:
             return []
@@ -288,9 +289,10 @@ class VastResearchClient:
         assigned_requests = requests[:assigned_count]
         assigned_offers = offers[:assigned_count]
         results: list[CreateResult] = []
-        for start in range(0, assigned_count, self.max_workers):
-            request_batch = assigned_requests[start : start + self.max_workers]
-            offer_batch = assigned_offers[start : start + self.max_workers]
+        batch_size = len(requests) if one_shot else self.max_workers
+        for start in range(0, assigned_count, batch_size):
+            request_batch = assigned_requests[start : start + batch_size]
+            offer_batch = assigned_offers[start : start + batch_size]
             barrier = threading.Barrier(len(request_batch))
             with concurrent.futures.ThreadPoolExecutor(
                 max_workers=len(request_batch)
@@ -548,6 +550,25 @@ class VastResearchClient:
                 True, "api-error", False, raw=response.body, api_call=call
             )
         item = _instance(response.payload)
+        if not item:
+            # A null direct lookup can precede visibility of a new rental contract.
+            response = self._request("GET", "/instances/")
+            payload = response.payload or {}
+            items = payload.get("instances") if isinstance(payload, dict) else None
+            if (
+                not response.ok or not isinstance(items, list)
+                or (payload.get("pagination") or {}).get("hasNextPage")
+            ):
+                return ResourceObservation(
+                    True, "api-error", False, raw={"resource_id": resource_id},
+                    api_call=_api_call(
+                        "list_instances", dataclasses.replace(response, payload=None, error=None)
+                    ),
+                )
+            matches = [x for x in items if str(x.get("id")) == resource_id]
+            response = dataclasses.replace(response, payload={"instances": matches})
+            call = _api_call("list_instances", response)
+            item = matches[0] if matches else {}
         if not item:
             return ResourceObservation(
                 False, None, False, raw=response.payload, api_call=call

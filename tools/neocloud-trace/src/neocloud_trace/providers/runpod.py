@@ -204,7 +204,9 @@ class RunPodResearchClient:
                 )
         return records
 
-    def create_replicas(self, cell: TrialCell, requests: Sequence[Any]) -> list[CreateResult]:
+    def create_replicas(
+        self, cell: TrialCell, requests: Sequence[Any], *, one_shot: bool = False
+    ) -> list[CreateResult]:
         if not requests:
             return []
         if cell.market != "on-demand":
@@ -216,14 +218,18 @@ class RunPodResearchClient:
                 )
                 for _ in requests
             ]
-        barrier = threading.Barrier(len(requests))
-        workers = min(self.max_workers, len(requests))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = [
-                executor.submit(self._create_one, cell, request, barrier)
-                for request in requests
-            ]
-            return [future.result() for future in futures]
+        batch_size = len(requests) if one_shot else self.max_workers
+        results: list[CreateResult] = []
+        for start in range(0, len(requests), batch_size):
+            batch = requests[start : start + batch_size]
+            barrier = threading.Barrier(len(batch))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(batch)) as executor:
+                futures = [
+                    executor.submit(self._create_one, cell, request, barrier)
+                    for request in batch
+                ]
+                results.extend(future.result() for future in futures)
+        return results
 
     def _create_one(self, cell: TrialCell, request: Any, barrier: threading.Barrier) -> CreateResult:
         body = {
@@ -251,6 +257,14 @@ class RunPodResearchClient:
         call = provider_api_call("create_pod", response)
         if not response.ok:
             failure = classify_failure(response.status, response.body)
+            if response.status == 400 and any(
+                phrase in str(response.body).lower()
+                for phrase in (
+                    "no longer any instances available",
+                    "machine does not have the resources to deploy your pod",
+                )
+            ):
+                failure = FailureClass.CAPACITY
             return CreateResult(
                 False,
                 failure_class=failure,

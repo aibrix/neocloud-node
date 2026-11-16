@@ -35,7 +35,7 @@ class FakeCapacityProvider:
         self.verified = []
         self.observed = []
 
-    def create_replicas(self, cell, requests):
+    def create_replicas(self, cell, requests, *, one_shot=False):
         self.create_calls.append((cell, tuple(requests)))
         return self.stage_results.pop(0)
 
@@ -147,6 +147,104 @@ class CapacityRunnerTest(unittest.TestCase):
         self.assertEqual(result.requested_gpu_depth, 32)
         self.assertEqual(result.provider_ready_gpu_depth, 32)
         self.assertEqual(result.cleaned_gpu_depth, 32)
+
+    def test_one_shot_counts_partial_allocations_without_readiness_or_retries(self):
+        provider = FakeCapacityProvider([
+            [CreateResult(True, f"pod-{i}") for i in range(11)]
+            + [CreateResult(False, failure_class=FailureClass.CAPACITY) for _ in range(4)]
+        ])
+        runner = CapacityRunner(
+            self.store, provider, completion_mode="allocated", launch_mode="one_shot"
+        )
+
+        result = runner.run_trial(self.run_id, self.cell, target_gpu_depth=15)
+
+        self.assertEqual([len(call[1]) for call in provider.create_calls], [15])
+        self.assertEqual(result.requested_instance_count, 15)
+        self.assertEqual(result.accepted_gpu_depth, 11)
+        self.assertEqual(result.cleaned_gpu_depth, 11)
+        self.assertEqual(result.first_failed_stage, 15)
+        self.assertEqual(result.status, "depth_boundary")
+        self.assertEqual(provider.observed, [])
+        self.assertEqual(len(provider.verified), 11)
+        details = json.loads(self.store.capacity_trial_row(result.trial_id)["details_json"])
+        self.assertEqual(details["completion_mode"], "allocated")
+        self.assertEqual(details["launch_mode"], "one_shot")
+        self.assertEqual(self.store.owned_resources(self.run_id), [])
+
+    def test_allocation_only_keeps_staged_launch_and_does_not_claim_readiness(self):
+        provider = FakeCapacityProvider([
+            [CreateResult(True, "pod-1")], [CreateResult(True, "pod-2")],
+            [CreateResult(True, "pod-3"), CreateResult(True, "pod-4")],
+        ])
+        runner = CapacityRunner(self.store, provider, completion_mode="allocated")
+
+        result = runner.run_trial(self.run_id, self.cell, target_gpu_depth=4)
+
+        self.assertEqual([len(call[1]) for call in provider.create_calls], [1, 1, 2])
+        self.assertEqual(result.accepted_instance_count, 4)
+        self.assertEqual(result.cleaned_instance_count, 4)
+        self.assertEqual(result.provider_ready_instance_count, 0)
+        self.assertEqual(result.application_ready_instance_count, 0)
+        self.assertEqual(provider.observed, [])
+        self.assertEqual(result.status, "complete")
+
+    def test_one_shot_keeps_non_capacity_failures_censored_without_relaunch(self):
+        for failure in (FailureClass.RATE_LIMIT, FailureClass.TIMEOUT, FailureClass.QUOTA):
+            with self.subTest(failure=failure):
+                provider = FakeCapacityProvider([[
+                    CreateResult(False, failure_class=FailureClass.CAPACITY),
+                    CreateResult(True, "pod-accepted"),
+                    CreateResult(False, failure_class=failure),
+                ]])
+                runner = CapacityRunner(
+                    self.store, provider, completion_mode="allocated", launch_mode="one_shot"
+                )
+                result = runner.run_trial(self.run_id, self.cell, target_gpu_depth=3)
+                self.assertEqual(len(provider.create_calls), 1)
+                self.assertEqual(result.failure_class, failure)
+                self.assertEqual(result.status, "transport_censored")
+                self.assertEqual(result.accepted_instance_count, 1)
+                self.assertEqual(result.cleaned_instance_count, 1)
+
+    def test_one_shot_preserves_multi_gpu_shape_and_exact_non_power_of_two_depth(self):
+        cell = TrialCell("runpod", "NVIDIA A40", "A40", None, "secure", "on-demand", 4)
+        provider = FakeCapacityProvider([[
+            CreateResult(True, "pod-1"), CreateResult(True, "pod-2"),
+            CreateResult(False, failure_class=FailureClass.CAPACITY),
+        ]])
+        runner = CapacityRunner(
+            self.store, provider, completion_mode="allocated", launch_mode="one_shot"
+        )
+        result = runner.run_trial(self.run_id, cell, target_gpu_depth=12)
+        self.assertEqual([len(call[1]) for call in provider.create_calls], [3])
+        self.assertEqual(result.target_instance_count, 3)
+        self.assertEqual(result.accepted_instance_count, 2)
+        self.assertEqual(result.accepted_gpu_depth, 8)
+        self.assertEqual(result.cleaned_gpu_depth, 8)
+
+    def test_one_shot_reconciles_lost_response_without_a_second_launch(self):
+        class RecoveringProvider(FakeCapacityProvider):
+            def lookup_replica(self, cell, name):
+                return CreateResult(True, "recovered")
+        provider = RecoveringProvider([[CreateResult(False, failure_class=FailureClass.TIMEOUT)]])
+        runner = CapacityRunner(
+            self.store, provider, completion_mode="allocated", launch_mode="one_shot"
+        )
+        result = runner.run_trial(self.run_id, self.cell, target_gpu_depth=1)
+        self.assertEqual(len(provider.create_calls), 1)
+        self.assertEqual(result.accepted_instance_count, 1)
+        self.assertEqual(provider.deleted, ["recovered"])
+
+    def test_invalid_modes_and_incomplete_instance_targets_fail_before_launch(self):
+        provider = FakeCapacityProvider([])
+        for kwargs in ({"completion_mode": "unknown"}, {"launch_mode": "unknown"}):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                CapacityRunner(self.store, provider, **kwargs)
+        for depth, gpus, mode in ((3, 1, "staged"), (7, 2, "one_shot"), (33, 1, "one_shot")):
+            with self.subTest(depth=depth, gpus=gpus, mode=mode), self.assertRaises(ValueError):
+                capacity_stages(target_gpu_depth=depth, gpu_count_per_instance=gpus, launch_mode=mode)
+        self.assertEqual(provider.create_calls, [])
 
     def test_capacity_shape_and_depth_must_form_a_power_of_two_ladder(self):
         with self.assertRaisesRegex(ValueError, "gpu_count"):

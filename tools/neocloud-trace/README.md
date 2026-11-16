@@ -182,6 +182,45 @@ of replaying a backlog, verifies cleanup, and exits. Result statuses include
 The default experiment ID is reused from the database. Use `--experiment-id`
 for an explicit stable identity.
 
+Capacity cells can opt into allocation-only completion and a concurrent
+single-shot launch:
+
+```json
+{
+  "completion_mode": "allocated",
+  "launch_mode": "one_shot",
+  "gpu_count": 1,
+  "target_gpu_depth": 31
+}
+```
+
+These are fields on an existing capacity cell, alongside its provider, SKU,
+resource class, price estimate and lease limits. Defaults remain
+`completion_mode: ready` and `launch_mode: staged`.
+
+- `allocated` records accepted resource IDs and proceeds to cleanup without
+  provider/application readiness polling. It does not claim that the instances
+  booted successfully. `require_application_ready` applies only to `ready`.
+- `one_shot` is supported by RunPod and Vast. It submits
+  `target_gpu_depth / gpu_count` requests in one concurrent group, overriding
+  the adapter's normal `max_workers` batching limit. Vast first searches once
+  for distinct matching offers. Missing offers are capacity failures.
+  There are no fallback shapes or retry launches; ambiguous create responses
+  still use the existing name-based reconciliation before cleanup.
+- A one-shot target can be any positive multiple of `gpu_count` up to the
+  existing 32-GPU limit. Staged probing retains its power-of-two ladder.
+  Each trial uses one exact cell; configure separate trials for other shapes.
+
+Use `accepted_instance_count` and `accepted_gpu_depth` for allocation results.
+The depth export includes both modes, and `depth_success` uses accepted counts
+for allocation-only trials. Readiness success is unmeasured in that mode.
+Partial one-shot results retain their exact accepted count and individual
+failure records. A non-capacity failure censors the trial rather than
+establishing a capacity boundary. A fully accepted cohort establishes a lower
+bound at the configured cap, not an exhaustive inventory count. Observations
+at different times can differ as availability changes; counts from overlapping
+hardware pools must not be added as though they were independent capacity.
+
 ## Stability Sampling Windows
 
 `run` accepts exactly one `canary_cohorts` entry and no other active section.

@@ -14,6 +14,7 @@ TRACE_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TRACE_ROOT / "src"))
 
 from neocloud_trace import cli as trace_cli
+from neocloud_trace.analysis import capacity_depth_rows
 from neocloud_trace.model import CatalogQuote, TrialCell
 from neocloud_trace.providers import (
     CatalogFetch,
@@ -320,6 +321,58 @@ class ResearchSupervisorTest(unittest.TestCase):
         self.plan_path.write_text(json.dumps(document), encoding="utf-8")
         with self.assertRaises(ValueError):
             load_plan(self.plan_path)
+
+    def test_allocation_only_one_shot_plan_executes_and_exports_accepted_depth(self):
+        document = plan_document()
+        document.update(duration_seconds=180, provider_budgets_usd={"runpod": 1.0})
+        cell = document["capacity_cohorts"][0]["cells"][0]
+        cell.update(provider="runpod", sku="NVIDIA A40", gpu_type="A40",
+                    resource_class="secure", region=None, target_gpu_depth=3,
+                    ready_timeout_seconds=600, max_lease_seconds=60,
+                    completion_mode="allocated", launch_mode="one_shot")
+        self.plan_path.write_text(json.dumps(document), encoding="utf-8")
+        plan = load_plan(self.plan_path)
+        trial = plan.capacity_cohorts[0].cells[0]
+        self.assertEqual(trial.target_instance_count, 3)
+        self.assertEqual(trial.completion_mode, "allocated")
+
+        class AllocatingProvider(ReadyCapacityProvider):
+            def create_replicas(self, cell, requests, *, one_shot=False):
+                self.one_shot = one_shot
+                return super().create_replicas(cell, requests)
+
+            def observe(self, resource_id, cell):
+                raise AssertionError("allocation-only must not wait for readiness")
+
+        store = TraceStore(self.root / "allocation.db")
+        self.addCleanup(store.close)
+        provider = AllocatingProvider()
+        result = PilotSupervisor(store, {"runpod": provider}).capacity_tick(
+            plan, experiment_id="allocation-only", execute=True
+        )
+        self.assertEqual(result["trial_status"], "complete")
+        self.assertTrue(result["cleanup_verified"])
+        self.assertTrue(provider.one_shot)
+        self.assertEqual(len(provider.created), 3)
+        row = capacity_depth_rows(store, result["run_id"])[0]
+        self.assertEqual(row["accepted_gpu_depth"], 3)
+        self.assertEqual(row["provider_ready_gpu_depth"], 0)
+        self.assertEqual(row["readiness_requirement"], "allocation")
+        self.assertEqual(row["completion_mode"], "allocated")
+        self.assertEqual(row["launch_mode"], "one_shot")
+        self.assertEqual(row["depth_success"], 1)
+        self.assertIsNone(row["provider_depth_success"])
+        self.assertIsNone(row["application_depth_success"])
+        self.assertEqual(store.owned_resources(result["run_id"]), [])
+
+    def test_one_shot_plan_rejects_unsupported_provider_and_invalid_modes(self):
+        for options in ({"launch_mode": "one_shot"}, {"launch_mode": "invalid"}, {"completion_mode": "invalid"}):
+            with self.subTest(options=options):
+                document = plan_document()
+                document["capacity_cohorts"][0]["cells"][0].update(options)
+                self.plan_path.write_text(json.dumps(document), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    load_plan(self.plan_path)
 
     def test_billable_cli_commands_default_to_dry_run_and_accept_execute(self):
         parser = trace_cli.build_parser()
