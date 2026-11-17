@@ -169,6 +169,11 @@ func (c *Client) ListRemoteResources(ctx context.Context) ([]core.RemoteResource
 	return c.List(ctx, PodFilter{})
 }
 
+// FindByWorkloadKey recovers an existing allocation without issuing a create.
+func (c *Client) FindByWorkloadKey(ctx context.Context, key string) (core.RemoteResource, error) {
+	return c.FindByExternalName(ctx, externalName(key))
+}
+
 func (c *Client) FindByExternalName(ctx context.Context, name string) (core.RemoteResource, error) {
 	pods, err := c.List(ctx, PodFilter{Name: name})
 	if err != nil {

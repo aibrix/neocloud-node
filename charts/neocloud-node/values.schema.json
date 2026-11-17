@@ -26,7 +26,16 @@
             "GPU_BURST_KUBELET_AUTH_MODE",
             "GPU_BURST_LAMBDA_SSH_USER",
             "GPU_BURST_LAMBDA_SSH_PRIVATE_KEY_FILE",
-            "GPU_BURST_LAMBDA_SSH_KNOWN_HOSTS_FILE"
+            "GPU_BURST_LAMBDA_SSH_KNOWN_HOSTS_FILE",
+            "GPU_BURST_PROVIDER_SECRET_NAMESPACE",
+            "GPU_BURST_PROVIDER_SECRET_POLL_INTERVAL",
+            "GPU_BURST_PROVIDER_SECRET_REQUEST_TIMEOUT",
+            "RUNPOD_API_KEY_SECRET_NAME",
+            "RUNPOD_API_KEY_SECRET_KEY",
+            "LAMBDA_API_KEY_SECRET_NAME",
+            "LAMBDA_API_KEY_SECRET_KEY",
+            "VAST_API_KEY_SECRET_NAME",
+            "VAST_API_KEY_SECRET_KEY"
           ]
         }
       }
@@ -166,6 +175,23 @@
         "user": {
           "type": "string",
           "minLength": 1
+        }
+      }
+    },
+    "credentialPolling": {
+      "type": "object",
+      "required": [
+        "interval",
+        "requestTimeout"
+      ],
+      "properties": {
+        "interval": {
+          "type": "string",
+          "pattern": "^[0-9]+(\\.[0-9]+)?(ms|s|m|h)$"
+        },
+        "requestTimeout": {
+          "type": "string",
+          "pattern": "^[0-9]+(\\.[0-9]+)?(ms|s|m|h)$"
         }
       }
     }

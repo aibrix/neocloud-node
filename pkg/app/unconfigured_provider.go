@@ -8,6 +8,9 @@ import (
 )
 
 func missingCredential(options Options, provider string) bool {
+	if options.ProviderSecrets[provider].Name != "" {
+		return false
+	}
 	switch provider {
 	case ProviderRunPod:
 		return strings.TrimSpace(options.RunPodAPIKey) == ""

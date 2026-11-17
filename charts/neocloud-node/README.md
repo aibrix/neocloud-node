@@ -57,27 +57,26 @@ credentials:
     key: apiKey
 ```
 
-All provider Secret references are optional. With the updated controller image,
-`GPU_BURST_ALLOW_MISSING_CREDENTIALS=true` (the chart default) keeps the controller
-running when a Secret, its key, or its non-empty value is missing. The unconfigured
-primary provider advertises zero GPUs and logs an actionable message. It does not
-send unauthenticated requests or silently switch to the fake provider. A workload
-explicitly bound to the node receives a `MissingCredentials` authentication error.
-Missing credentials never count as proof that a remote allocation was deleted.
+Provider Secret references are optional. Configured references are read directly
+from the release namespace using Kubernetes GET requests; credentials no longer
+enter the controller through environment variables. Missing Secrets, missing keys
+and empty values keep the controller running with new allocations disabled.
+Creating or updating the Secret activates/reloads the provider without a rollout.
+Empty `secretName` entries are not polled. Shared names are read once per cycle.
 
-Create/update the Secret independently, then restart the controller to reload its
-environment variables:
-
-```bash
-kubectl -n aibrix-system rollout restart deployment/neocloud-neocloud-node
-kubectl -n aibrix-system rollout status deployment/neocloud-neocloud-node
+```yaml
+credentialPolling:
+  interval: 15s
+  requestTimeout: 5s
 ```
 
-Secret contents are not watched or hot-reloaded. An optional missing Secret does
-not populate an already-running container when it is later created. Set
-`env.GPU_BURST_ALLOW_MISSING_CREDENTIALS=false` for strict startup validation; the
-standalone CLI remains strict by default. Images from release 0.1.0 do not support
-the tolerant-startup option; use the updated image with this chart.
+Use a controller image containing Secret polling when upgrading this chart;
+release 0.1.0 and older commit images do not understand these references. Follow
+the existing merge → main CI → commit image → Helm upgrade workflow.
+The chart's appVersion/default image tag is not proof that a newer feature is
+included; explicitly select the published commit image for this feature.
+See [credential rotation](../../docs/credentials.md) for refresh timing, failure
+handling, CLI configuration and the same-account rotation boundary.
 
 Maintain one release (`neocloud`) in `aibrix-system` and upgrade it in place.
 Delete test workloads and verify remote GPU cleanup after each run; keep this
