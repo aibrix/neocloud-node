@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/aibrix/neocloud-node/pkg/core"
 	corev1 "k8s.io/api/core/v1"
@@ -15,10 +16,16 @@ func TestCredentialNodeUpdatesCapacityWithoutFailingNode(t *testing.T) {
 	base.Status.Capacity = corev1.ResourceList{corev1.ResourceName(NvidiaGPUResource): resource.MustParse("8")}
 	base.Status.Allocatable = base.Status.Capacity.DeepCopy()
 	node := newCredentialNode(base, source.available)
-	var last *corev1.Node
-	node.NotifyNodeStatus(context.Background(), func(n *corev1.Node) { last = n.DeepCopy() })
+	updates := make(chan *corev1.Node, 1)
+	node.NotifyNodeStatus(context.Background(), func(n *corev1.Node) { updates <- n.DeepCopy() })
 	assert := func(want string) {
 		t.Helper()
+		var last *corev1.Node
+		select {
+		case last = <-updates:
+		case <-time.After(time.Second):
+			t.Fatal("node status was not published")
+		}
 		if last.Status.Phase != corev1.NodeRunning {
 			t.Fatalf("node phase = %s, want Running", last.Status.Phase)
 		}
@@ -42,5 +49,33 @@ func TestCredentialNodeUpdatesCapacityWithoutFailingNode(t *testing.T) {
 	q := base.Status.Capacity[corev1.ResourceName(NvidiaGPUResource)]
 	if q.String() != "8" {
 		t.Fatal("mutated initial node template")
+	}
+}
+
+func TestCredentialNodeRegistrationDoesNotWaitForStatusConsumer(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	node := newCredentialNode(&corev1.Node{}, func() bool { return true })
+	updates := make(chan *corev1.Node)
+	registered := make(chan struct{})
+	go func() {
+		node.NotifyNodeStatus(ctx, func(n *corev1.Node) {
+			select {
+			case updates <- n:
+			case <-ctx.Done():
+			}
+		})
+		close(registered)
+	}()
+	// VK starts its consumer only after NotifyNodeStatus returns.
+	select {
+	case <-registered:
+	case <-time.After(time.Second):
+		t.Fatal("registration blocked waiting for the status consumer")
+	}
+	select {
+	case <-updates:
+	case <-time.After(time.Second):
+		t.Fatal("initial node status missing")
 	}
 }

@@ -41,26 +41,33 @@ func TestReloadableErrorDoesNotExposeEncodedCredential(t *testing.T) {
 	}
 }
 
-func TestReloadableCreatePinsCredentialsAndRecoversBeforeRetry(t *testing.T) {
+func TestReloadableCreatePinsCredentialsDuringRecovery(t *testing.T) {
 	var p *credentialProvider
-	var creates atomic.Int32
-	var allocated atomic.Bool
+	var creates, lists atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodPost:
-			if r.Header.Get("Authorization") != "Bearer test-old" {
-				t.Error("create used wrong credential")
-			}
+		switch {
+		case r.Method == http.MethodPost:
 			creates.Add(1)
-			allocated.Store(true)
+			if r.Header.Get("Authorization") != "Bearer test-old" {
+				t.Error("create changed credentials")
+			}
 			p.update("test-new", "")
 			http.Error(w, "lost response", http.StatusGatewayTimeout)
-		case http.MethodGet:
-			if allocated.Load() {
-				fmt.Fprint(w, `{"pods":[{"id":"remote","name":"neocloud-node-test-uid","status":"RUNNING"}],"pagination":{"hasNextPage":false}}`)
-			} else {
-				fmt.Fprint(w, `{"pods":[],"pagination":{"hasNextPage":false}}`)
+		case r.URL.Path == "/pods":
+			lists.Add(1)
+			if r.Header.Get("Authorization") != "Bearer test-old" {
+				t.Error("create recovery changed credentials")
 			}
+			if creates.Load() == 0 {
+				fmt.Fprint(w, `{"pods":[],"pagination":{"hasNextPage":false}}`)
+				return
+			}
+			fmt.Fprint(w, `{"pods":[{"id":"remote","name":"neocloud-node-test-uid","status":"RUNNING"}],"pagination":{"hasNextPage":false}}`)
+		default:
+			if r.Header.Get("Authorization") != "Bearer test-new" {
+				t.Error("next operation did not use new credentials")
+			}
+			fmt.Fprint(w, `{"id":"remote","status":"RUNNING"}`)
 		}
 	}))
 	defer server.Close()
@@ -69,21 +76,24 @@ func TestReloadableCreatePinsCredentialsAndRecoversBeforeRetry(t *testing.T) {
 	})
 	p.update("test-old", "")
 	adapter := wrapCredentialProvider(p)
-	request := core.WorkloadRequest{Image: "example.test/image", GPUType: "NVIDIA A40", GPUCount: 1}
-	for range 2 {
-		remote, err := adapter.Create(context.Background(), "test/uid", request)
-		if err != nil || remote.ID != "remote" {
-			t.Fatalf("create = %s, %v", remote.ID, err)
-		}
+	remote, err := adapter.Create(context.Background(), "test/uid", core.WorkloadRequest{Image: "example.test/image", GPUType: "NVIDIA A40", GPUCount: 1})
+	if err != nil || remote.ID != "remote" {
+		t.Fatalf("create=%s %v", remote.ID, err)
 	}
-	if creates.Load() != 1 {
-		t.Fatalf("allocated %d times for one UID", creates.Load())
+	if _, err := adapter.Get(context.Background(), "remote"); err != nil {
+		t.Fatal(err)
+	}
+	if creates.Load() != 1 || lists.Load() != 1 {
+		t.Fatalf("POST=%d LIST=%d; credential reload must preserve adapter recovery requests", creates.Load(), lists.Load())
 	}
 }
 
-func TestReloadableFirstNotFoundWithNewCredentialsDoesNotCleanUp(t *testing.T) {
-	var deletes atomic.Int32
+func TestReloadableProviderPreservesSameAccountNotFoundSemantics(t *testing.T) {
+	var gets, deletes atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			gets.Add(1)
+		}
 		if r.Method == http.MethodDelete {
 			deletes.Add(1)
 		}
@@ -95,49 +105,14 @@ func TestReloadableFirstNotFoundWithNewCredentialsDoesNotCleanUp(t *testing.T) {
 	})
 	p.update("test-key", "")
 	adapter := wrapCredentialProvider(p)
-	if _, err := adapter.Get(context.Background(), "existing"); err == nil || errors.Is(err, core.ErrRemoteNotFound) {
-		t.Fatalf("unverified 404 = %v", err)
+	if _, err := adapter.Get(context.Background(), "existing"); !errors.Is(err, core.ErrRemoteNotFound) {
+		t.Fatalf("same-account missing resource=%v", err)
 	}
-	if err := adapter.Delete(context.Background(), "existing"); err == nil {
-		t.Fatal("unverified delete succeeded")
+	if err := adapter.Delete(context.Background(), "existing"); err != nil {
+		t.Fatalf("idempotent delete=%v", err)
 	}
-	if deletes.Load() != 0 {
-		t.Fatal("sent delete before verifying account scope")
-	}
-}
-
-func TestReloadableRetiredGetDoesNotOverwriteCurrentVerification(t *testing.T) {
-	started, release := make(chan struct{}), make(chan struct{})
-	var absent atomic.Bool
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") == "Bearer test-old" {
-			close(started)
-			<-release
-		}
-		if absent.Load() {
-			http.NotFound(w, r)
-			return
-		}
-		fmt.Fprint(w, `{"id":"remote","status":"RUNNING"}`)
-	}))
-	defer server.Close()
-	p := newCredentialProvider(ProviderRunPod, func(key string) core.ProviderAdapter {
-		return runpod.NewClient(runpod.Config{BaseURL: server.URL, APIKey: key})
-	})
-	p.update("test-old", "")
-	adapter := wrapCredentialProvider(p)
-	done := make(chan error, 1)
-	go func() { _, err := adapter.Get(context.Background(), "remote"); done <- err }()
-	<-started
-	p.update("test-new", "")
-	_, newErr := adapter.Get(context.Background(), "remote")
-	close(release)
-	if oldErr := <-done; oldErr != nil || newErr != nil {
-		t.Fatal("fixture resource could not be verified")
-	}
-	absent.Store(true)
-	if _, err := adapter.Get(context.Background(), "remote"); !errors.Is(err, core.ErrRemoteNotFound) {
-		t.Fatalf("retired response invalidated current proof: %v", err)
+	if gets.Load() != 1 || deletes.Load() != 1 {
+		t.Fatal("credential reload added remote existence probes")
 	}
 }
 

@@ -24,13 +24,11 @@ type credentialProvider struct {
 	mu       sync.RWMutex
 	version  *credentialVersion
 	reason   string
-	verified map[string]*credentialVersion
 	onChange func()
-	createMu sync.Mutex
 }
 
 func newCredentialProvider(name string, build func(string) core.ProviderAdapter) *credentialProvider {
-	return &credentialProvider{name: name, build: build, reason: "MissingCredentials", verified: make(map[string]*credentialVersion)}
+	return &credentialProvider{name: name, build: build, reason: "MissingCredentials"}
 }
 
 func (p *credentialProvider) update(key, reason string) {
@@ -52,7 +50,6 @@ func (p *credentialProvider) update(key, reason string) {
 		p.version = &credentialVersion{key: key, client: p.build(key)}
 	}
 	p.reason = reason
-	p.verified = make(map[string]*credentialVersion)
 	p.mu.Unlock()
 	p.notify()
 }
@@ -125,50 +122,13 @@ func wrapCredentialProvider(p *credentialProvider) core.ProviderAdapter {
 
 func (p *reloadableProvider) Provider() string { return p.credentials.name }
 
-// FindByWorkloadKey is implemented by real adapters using their own external-name
-// rules. Lookup before POST also recovers an allocation after a controller restart.
-type workloadFinder interface {
-	FindByWorkloadKey(context.Context, string) (core.RemoteResource, error)
-}
-
 func (p *reloadableProvider) Create(ctx context.Context, key string, request core.WorkloadRequest) (core.RemoteResource, error) {
-	p.credentials.createMu.Lock()
-	defer p.credentials.createMu.Unlock()
 	v, err := p.credentials.acquire("create")
 	if err != nil {
 		return core.RemoteResource{}, err
 	}
-	if finder, ok := v.client.(workloadFinder); ok {
-		remote, findErr := finder.FindByWorkloadKey(ctx, key)
-		if findErr == nil {
-			remote.IdempotencyKey = key
-			remote.Request = request
-			return remote, nil
-		}
-		if !errors.Is(findErr, core.ErrRemoteNotFound) {
-			return core.RemoteResource{}, p.credentials.finish(v, "recover", findErr)
-		}
-	}
 	remote, err := v.client.Create(ctx, key, request)
 	return remote, p.credentials.finish(v, "create", err)
-}
-
-func (p *reloadableProvider) get(ctx context.Context, v *credentialVersion, id string) (core.RemoteResource, error) {
-	remote, err := v.client.Get(ctx, id)
-	p.credentials.mu.Lock()
-	if err == nil && p.credentials.version == v {
-		p.credentials.verified[id] = v
-	}
-	verified := p.credentials.verified[id] == v
-	p.credentials.mu.Unlock()
-	if errors.Is(err, core.ErrRemoteNotFound) && !verified {
-		// A newly loaded key may refer to another account. Preserve the old binding
-		// rather than accepting its first 404 as proof that a paid resource is gone.
-		err = &core.ProviderError{Class: core.ErrorClassAuth, Code: "CredentialScopeUnverified", Message: "existing remote resource is not visible with the current credentials; verify the provider account before cleanup"}
-		// Scope uncertainty does not prove the key itself is invalid.
-		return core.RemoteResource{}, err
-	}
-	return remote, p.credentials.finish(v, "get", err)
 }
 
 func (p *reloadableProvider) Get(ctx context.Context, id string) (core.RemoteResource, error) {
@@ -176,19 +136,13 @@ func (p *reloadableProvider) Get(ctx context.Context, id string) (core.RemoteRes
 	if err != nil {
 		return core.RemoteResource{}, err
 	}
-	return p.get(ctx, v, id)
+	remote, err := v.client.Get(ctx, id)
+	return remote, p.credentials.finish(v, "get", err)
 }
 
 func (p *reloadableProvider) Delete(ctx context.Context, id string) error {
 	v, err := p.credentials.acquire("delete")
 	if err != nil {
-		return err
-	}
-	// DELETE APIs often treat 404 as success internally, so verify scope first.
-	if _, err := p.get(ctx, v, id); err != nil {
-		if errors.Is(err, core.ErrRemoteNotFound) {
-			return nil
-		}
 		return err
 	}
 	return p.credentials.finish(v, "delete", v.client.Delete(ctx, id))
@@ -204,8 +158,7 @@ func (p *reloadableProvider) ListRemoteResources(ctx context.Context) ([]core.Re
 }
 
 func (p *reloadableBatch) ListRemoteStatuses(ctx context.Context) ([]core.RemoteResource, error) {
-	// Do not use list results as authoritative observations across credential
-	// generations. Per-resource Get verifies visibility before accepting a 404.
+	// Discard observations from a retired credential version.
 	v, err := p.credentials.acquire("list")
 	if err != nil {
 		return nil, err
@@ -244,9 +197,6 @@ func (p *reloadableProvider) ListOffers(ctx context.Context, intent resource.Int
 func (p *reloadableRunPod) Stop(ctx context.Context, id string) error {
 	v, err := p.credentials.acquire("stop")
 	if err != nil {
-		return err
-	}
-	if _, err := p.get(ctx, v, id); err != nil {
 		return err
 	}
 	return p.credentials.finish(v, "stop", v.client.(core.RemoteStopper).Stop(ctx, id))

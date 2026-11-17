@@ -16,6 +16,7 @@ type credentialNode struct {
 	base             *corev1.Node
 	available        func() bool
 	notify           func(*corev1.Node)
+	ctx              context.Context
 	lastAvailability corev1.ConditionStatus
 	transition       metav1.Time
 }
@@ -26,17 +27,19 @@ func newCredentialNode(base *corev1.Node, available func() bool) *credentialNode
 
 func (*credentialNode) Ping(ctx context.Context) error { return ctx.Err() }
 
-func (n *credentialNode) NotifyNodeStatus(_ context.Context, notify func(*corev1.Node)) {
+func (n *credentialNode) NotifyNodeStatus(ctx context.Context, notify func(*corev1.Node)) {
 	n.mu.Lock()
+	n.ctx = ctx
 	n.notify = notify
 	n.mu.Unlock()
-	n.publish()
+	// VK starts consuming status only after this registration returns.
+	go n.publish()
 }
 
 func (n *credentialNode) publish() {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if n.notify == nil {
+	if n.notify == nil || n.ctx.Err() != nil {
 		return
 	}
 	out := n.base.DeepCopy()

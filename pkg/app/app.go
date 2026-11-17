@@ -392,29 +392,7 @@ func NewNode(ctx context.Context, options Options, kubeClient kubernetes.Interfa
 	if err != nil {
 		return nil, err
 	}
-	refreshRequests := make(chan struct{}, 1)
-	if placementSetup.Refresher != nil {
-		go func() {
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-refreshRequests:
-					placementSetup.Refresher.Refresh(ctx)
-				}
-			}
-		}()
-	}
-	go credentials.run(ctx, func() {
-		credentialNodeProvider.publish()
-		if placementSetup.Refresher != nil {
-			// Provider HTTP requests must not delay the Secret polling loop.
-			select {
-			case refreshRequests <- struct{}{}:
-			default:
-			}
-		}
-	})
+	go credentials.run(ctx, credentialNodeProvider.publish)
 	return result, nil
 }
 

@@ -158,11 +158,6 @@ func (c *Client) ListRemoteStatuses(ctx context.Context) ([]core.RemoteResource,
 	return c.ListRemoteResources(ctx)
 }
 
-// FindByWorkloadKey preserves Lambda's provider-specific hostname rules.
-func (c *Client) FindByWorkloadKey(ctx context.Context, key string) (core.RemoteResource, error) {
-	return c.FindByExternalName(ctx, externalName(key))
-}
-
 func (c *Client) FindByExternalName(ctx context.Context, name string) (core.RemoteResource, error) {
 	instances, err := c.List(ctx, InstanceFilter{Name: name})
 	if err != nil {

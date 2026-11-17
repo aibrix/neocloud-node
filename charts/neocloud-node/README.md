@@ -57,12 +57,11 @@ credentials:
     key: apiKey
 ```
 
-Provider Secret references are optional. Configured references are read directly
-from the release namespace using Kubernetes GET requests; credentials no longer
-enter the controller through environment variables. Missing Secrets, missing keys
-and empty values keep the controller running with new allocations disabled.
-Creating or updating the Secret activates/reloads the provider without a rollout.
-Empty `secretName` entries are not polled. Shared names are read once per cycle.
+Configured Secret references are read from the release namespace. Missing Secrets,
+missing keys, empty values and API read failures disable provider operations and
+set the primary provider's advertised GPUs to zero without stopping the controller.
+A later successful read restores availability. Empty references are skipped;
+shared Secret names are read once per cycle, independently in each controller.
 
 ```yaml
 credentialPolling:
@@ -70,13 +69,25 @@ credentialPolling:
   requestTimeout: 5s
 ```
 
-Use a controller image containing Secret polling when upgrading this chart;
-release 0.1.0 and older commit images do not understand these references. Follow
-the existing merge → main CI → commit image → Helm upgrade workflow.
-The chart's appVersion/default image tag is not proof that a newer feature is
-included; explicitly select the published commit image for this feature.
-See [credential rotation](../../docs/credentials.md) for refresh timing, failure
-handling, CLI configuration and the same-account rotation boundary.
+Healthy-API refresh takes up to one interval plus that cycle's sequential GETs.
+Each operation pins its credentials, including the adapter's existing recovery
+requests; rotation affects later operations. Catalog offers are filtered while
+unavailable and refresh using the existing placement refresh configuration.
+
+Only same-account key rotation is supported. Before changing accounts, delete
+remote workloads and verify cleanup using the old account. The controller does
+not detect account changes or reinterpret provider 404 responses. Missing
+credentials and authentication failures never count as successful deletion.
+
+Use a published controller image containing polling; older images do not support
+these references. Follow merge → main CI → commit image → Helm upgrade. Static
+API key flags/env remain supported when no Secret reference is configured.
+For standalone use, set `--provider-secret-namespace`,
+`--runpod-api-key-secret-name` and `--runpod-api-key-secret-key` (also `lambda` /
+`vast`), plus optional `--provider-secret-poll-interval` and
+`--provider-secret-request-timeout`. Explicit references take precedence over
+static keys. The polling path needs only named Secret GETs; existing VK RBAC
+already grants broader Secret reads and is unchanged.
 
 Maintain one release (`neocloud`) in `aibrix-system` and upgrade it in place.
 Delete test workloads and verify remote GPU cleanup after each run; keep this

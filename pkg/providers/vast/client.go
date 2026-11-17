@@ -229,11 +229,6 @@ func (c *Client) ListRemoteStatuses(ctx context.Context) ([]core.RemoteResource,
 	return c.ListRemoteResources(ctx)
 }
 
-// FindByWorkloadKey recovers an existing allocation without issuing a create.
-func (c *Client) FindByWorkloadKey(ctx context.Context, key string) (core.RemoteResource, error) {
-	return c.FindByExternalName(ctx, externalName(key))
-}
-
 func (c *Client) FindByExternalName(ctx context.Context, name string) (core.RemoteResource, error) {
 	instances, err := c.listInstances(ctx, name)
 	if err != nil {
