@@ -1,0 +1,16 @@
+{{- if .Values.runnerCallback.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "neocloud.name" . }}-runner
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name | quote }}
+    app.kubernetes.io/name: neocloud-node
+  ports:
+    - name: runner
+      port: 9091
+      targetPort: runner
+{{- end }}

@@ -36,6 +36,18 @@ func BuildCloudInit(config CloudInitConfig) (string, error) {
 		return "", &ConfigError{Code: "MissingImage", Message: "container image is required"}
 	}
 
+	if len(config.Request.Command) > 0 && strings.TrimSpace(config.Request.Command[0]) == "" {
+		return "", &ConfigError{Code: "InvalidCommand", Message: "container entrypoint must not be empty"}
+	}
+	for _, port := range config.Request.Ports {
+		if port.ContainerPort < 1 || port.ContainerPort > 65535 {
+			return "", &ConfigError{Code: "InvalidPort", Message: "container ports must be between 1 and 65535"}
+		}
+		if port.Protocol != "" && port.Protocol != "TCP" {
+			return "", &ConfigError{Code: "UnsupportedProtocol", Message: "VM runner supports only TCP ports"}
+		}
+	}
+
 	command := runnerCommand(config)
 	return strings.Join([]string{
 		"#cloud-config",
@@ -46,6 +58,10 @@ func BuildCloudInit(config CloudInitConfig) (string, error) {
 }
 
 func runnerCommand(config CloudInitConfig) string {
+	bootstrap := bootstrapRunnerCommand()
+	if config.CallbackSecret != "" {
+		bootstrap += "; if ! command -v python3 >/dev/null 2>&1; then apt-get update && apt-get install -y python3; fi"
+	}
 	image := shellQuote(config.Request.Image)
 	runningPayloadFormat := shellQuote(`{"workloadID":%s,"phase":"Running","message":"%s"}`)
 	terminalPayloadFormat := shellQuote(`{"workloadID":%s,"phase":"%s","exitCode":%s}`)
@@ -53,12 +69,13 @@ func runnerCommand(config CloudInitConfig) string {
 
 	return strings.Join([]string{
 		"set -e",
-		bootstrapRunnerCommand(),
+		bootstrap,
 		callbackCommand(config, "$(printf "+runningPayloadFormat+" "+workloadID+` "$runner_message")`) + " || true",
 		"docker pull " + image,
 		"set +e",
 		dockerRunCommand(config.Request),
 		"code=$?",
+		`if [ "$code" -eq 0 ]; then code=$(docker wait neocloud-node-workload) || code=125; fi`,
 		`if [ "$code" -eq 0 ]; then phase=Succeeded; else phase=Failed; fi`,
 		callbackCommand(config, "$(printf "+terminalPayloadFormat+" "+workloadID+` "$phase" "$code")`),
 		"exit $code",
@@ -68,14 +85,14 @@ func runnerCommand(config CloudInitConfig) string {
 func bootstrapRunnerCommand() string {
 	return strings.Join([]string{
 		"if command -v docker >/dev/null 2>&1 && command -v nvidia-container-runtime >/dev/null 2>&1; then",
-		`runner_message='using preinstalled Docker and NVIDIA runtime'`,
+		`runner_message='using preinstalled Docker and NVIDIA runtime';`,
 		"else",
-		"export DEBIAN_FRONTEND=noninteractive",
-		"apt-get update",
-		"apt-get install -y curl docker.io nvidia-container-runtime",
-		"systemctl enable --now docker",
-		`runner_message='installed Docker and the NVIDIA runtime'`,
-		"fi",
+		"export DEBIAN_FRONTEND=noninteractive;",
+		"apt-get update;",
+		"apt-get install -y curl docker.io nvidia-container-runtime;",
+		"systemctl enable --now docker;",
+		`runner_message='installed Docker and the NVIDIA runtime';`,
+		"fi;",
 		"if ! command -v curl >/dev/null 2>&1; then apt-get update && apt-get install -y curl; fi",
 	}, " ")
 }
@@ -105,12 +122,20 @@ func signedCallbackHeaders(secret string) string {
 }
 
 func dockerRunCommand(request core.WorkloadRequest) string {
-	parts := []string{"docker run --rm --gpus all --name neocloud-node-workload"}
+	parts := []string{"docker run -d --log-driver json-file --log-opt max-size=16m --log-opt max-file=2 --gpus all --name neocloud-node-workload"}
 	for _, env := range sortedEnv(request.Env) {
 		parts = append(parts, "-e "+shellQuote(env))
 	}
+	for _, port := range request.Ports {
+		parts = append(parts, "--publish "+shellQuote(fmt.Sprintf("%d:%d/tcp", port.ContainerPort, port.ContainerPort)))
+	}
+	command := request.Command
+	if len(command) > 0 {
+		parts = append(parts, "--entrypoint "+shellQuote(command[0]))
+		command = command[1:]
+	}
 	parts = append(parts, shellQuote(request.Image))
-	for _, arg := range request.Command {
+	for _, arg := range command {
 		parts = append(parts, shellQuote(arg))
 	}
 	for _, arg := range request.Args {

@@ -20,7 +20,13 @@
         "not": {
           "enum": [
             "GPU_BURST_PROVIDER",
-            "GPU_BURST_NODE_NAME"
+            "GPU_BURST_NODE_NAME",
+            "POD_IP",
+            "GPU_BURST_ENABLE_KUBELET_API",
+            "GPU_BURST_KUBELET_AUTH_MODE",
+            "GPU_BURST_LAMBDA_SSH_USER",
+            "GPU_BURST_LAMBDA_SSH_PRIVATE_KEY_FILE",
+            "GPU_BURST_LAMBDA_SSH_KNOWN_HOSTS_FILE"
           ]
         }
       }
@@ -49,6 +55,149 @@
           ]
         }
       }
+    },
+    "kubeletAPI": {
+      "type": "object",
+      "required": [
+        "enabled",
+        "authenticationMode",
+        "tlsSecretName"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "authenticationMode": {
+          "enum": [
+            "",
+            "none"
+          ]
+        },
+        "tlsSecretName": {
+          "type": "string"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "authenticationMode": {
+                "const": "none"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "runnerCallback": {
+      "type": "object",
+      "required": [
+        "enabled",
+        "secretName",
+        "secretKey",
+        "url"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "secretName": {
+          "type": "string"
+        },
+        "secretKey": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "secretName": {
+                "minLength": 1
+              },
+              "secretKey": {
+                "minLength": 1
+              },
+              "url": {
+                "minLength": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "lambdaSSH": {
+      "type": "object",
+      "required": [
+        "secretName",
+        "privateKeyKey",
+        "knownHostsKey",
+        "user"
+      ],
+      "properties": {
+        "secretName": {
+          "type": "string"
+        },
+        "privateKeyKey": {
+          "type": "string",
+          "minLength": 1
+        },
+        "knownHostsKey": {
+          "type": "string",
+          "minLength": 1
+        },
+        "user": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "runnerCallback": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "env": {
+            "propertyNames": {
+              "not": {
+                "enum": [
+                  "GPU_BURST_RUNNER_CALLBACK_ADDR",
+                  "GPU_BURST_RUNNER_CALLBACK_SECRET",
+                  "GPU_BURST_LAMBDA_CALLBACK_URL"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }

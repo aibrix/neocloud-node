@@ -12,7 +12,6 @@ import (
 
 	dto "github.com/prometheus/client_model/go"
 	"github.com/virtual-kubelet/virtual-kubelet/errdefs"
-	"github.com/virtual-kubelet/virtual-kubelet/node/api"
 	"github.com/virtual-kubelet/virtual-kubelet/node/nodeutil"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -282,12 +281,6 @@ func TestUnsupportedStreamingMethodsReturnInvalidInput(t *testing.T) {
 	ctx := context.Background()
 	provider := newTestProvider(t, core.NewFakeProvider("runpod"))
 
-	logs, err := provider.GetContainerLogs(ctx, "default", "pod", "main", api.ContainerLogOpts{})
-	if logs != nil {
-		_ = logs.Close()
-		t.Fatal("GetContainerLogs() returned a stream, want nil")
-	}
-	assertInvalidInput(t, "GetContainerLogs", err)
 	assertInvalidInput(t, "RunInContainer", provider.RunInContainer(ctx, "default", "pod", "main", []string{"nvidia-smi"}, nil))
 	assertInvalidInput(t, "AttachToContainer", provider.AttachToContainer(ctx, "default", "pod", "main", nil))
 	assertInvalidInput(t, "PortForward", provider.PortForward(ctx, "default", "pod", 8000, nopReadWriteCloser{}))

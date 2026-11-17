@@ -5,6 +5,25 @@ image:
   pullPolicy: IfNotPresent
 provider: fake
 nodeName: neocloud-node
+kubeletAPI:
+  enabled: false
+  # Explicit none is for isolated development only. API-server RBAC does not
+  # protect requests made directly to the controller port.
+  authenticationMode: ''
+  tlsSecretName: ''
+lambdaSSH:
+  # Existing Secret containing the private key and verified VM host keys.
+  secretName: ''
+  privateKeyKey: ssh-privatekey
+  knownHostsKey: known_hosts
+  user: ubuntu
+runnerCallback:
+  enabled: false
+  # Existing Secret holding the runner callback signing root, never a Helm value.
+  secretName: ''
+  secretKey: sharedSecret
+  # URLs reachable from the remote Lambda VM; terminate TLS in your own ingress.
+  url: ''
 credentials:
   runpod:
     secretName: ''
@@ -30,7 +49,6 @@ env:
   GPU_BURST_VAST_DISK_GB: '20'
   GPU_BURST_VAST_MIN_RELIABILITY: '0.95'
   GPU_BURST_VAST_OFFER_LIMIT: '100'
-  GPU_BURST_LAMBDA_CALLBACK_URL: ''
   GPU_BURST_LAMBDA_REGION: ''
   GPU_BURST_LAMBDA_INSTANCE_TYPE: ''
   GPU_BURST_LAMBDA_SSH_KEY_NAMES: ''

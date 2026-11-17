@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"testing"
@@ -494,6 +495,35 @@ func TestRecordRunnerStatusMarksBindingSucceeded(t *testing.T) {
 	}
 	if binding.LastError != "" {
 		t.Fatalf("last error = %q, want empty", binding.LastError)
+	}
+}
+
+func TestRunnerTerminalCallbackClearsPublishedEndpoints(t *testing.T) {
+	for _, phase := range []RunnerPhase{RunnerPhaseRunning, RunnerPhaseSucceeded, RunnerPhaseFailed} {
+		t.Run(string(phase), func(t *testing.T) {
+			ctx := context.Background()
+			store := NewMemoryBindingStore()
+			published := []Endpoint{{ContainerPort: 8000, Protocol: "TCP", Host: "203.0.113.10", Port: 8000}}
+			_, _, err := store.CreateOrGet(ctx, Binding{Namespace: "default", WorkloadUID: "runner-endpoints", RemoteID: "vm", Phase: BindingRunning, Endpoints: published})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := RecordRunnerStatus(ctx, store, "default", "runner-endpoints", RunnerStatus{Phase: phase})
+			if err != nil {
+				t.Fatal(err)
+			}
+			stored, err := store.GetByWorkloadUID(ctx, "default", "runner-endpoints")
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := 0
+			if phase == RunnerPhaseRunning {
+				want = 1
+			}
+			if len(got.Endpoints) != want || len(stored.Endpoints) != want {
+				t.Fatalf("callback endpoints: returned=%v stored=%v want count=%d", got.Endpoints, stored.Endpoints, want)
+			}
+		})
 	}
 }
 
@@ -1082,6 +1112,104 @@ func TestLifecycleServiceClearsEndpointsWhenWorkloadStops(t *testing.T) {
 			stored, err := store.GetByWorkloadUID(context.Background(), "default", "pod-restart")
 			if err != nil || len(stored.Endpoints) != 0 {
 				t.Fatalf("stored endpoints = %#v, %v; want none", stored.Endpoints, err)
+			}
+		})
+	}
+}
+
+func directEndpointObservation() RemoteResource {
+	return RemoteResource{ID: "vm-1", Provider: "test-vm", Phase: RemoteRunning, DirectEndpointHost: "203.0.113.10"}
+}
+
+type directEndpointProvider struct {
+	*FakeProvider
+	remote RemoteResource
+	gets   int
+}
+
+func (p *directEndpointProvider) Create(context.Context, string, WorkloadRequest) (RemoteResource, error) {
+	return p.remote, nil
+}
+func (p *directEndpointProvider) Get(context.Context, string) (RemoteResource, error) {
+	p.gets++
+	return p.remote, nil
+}
+func (p *directEndpointProvider) ListRemoteStatuses(context.Context) ([]RemoteResource, error) {
+	return []RemoteResource{p.remote}, nil
+}
+
+func TestLifecycleDirectEndpointsSurviveRestartAndSnapshots(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryBindingStore()
+	provider := &directEndpointProvider{FakeProvider: NewFakeProvider("test-vm"), remote: directEndpointObservation()}
+	service := NewLifecycleService(store, provider)
+	desired := Binding{Namespace: "default", Name: "serve", WorkloadUID: "pod-direct", Request: WorkloadRequest{Provider: "test-vm", Image: "serve", Ports: []Port{{Name: "metrics", ContainerPort: 9000, Protocol: "TCP"}, {Name: "http", ContainerPort: 8000}}}}
+	want := []Endpoint{{ContainerPort: 8000, Protocol: "TCP", Host: "203.0.113.10", Port: 8000}, {ContainerPort: 9000, Protocol: "TCP", Host: "203.0.113.10", Port: 9000}}
+	created, err := service.EnsureCreated(ctx, desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(created.Endpoints, want) {
+		t.Errorf("created endpoints=%#v, want %#v", created.Endpoints, want)
+	}
+	// Simulate persisted binding deserialization into a fresh store and service.
+	data, err := json.Marshal(created)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored Binding
+	if err = json.Unmarshal(data, &restored); err != nil {
+		t.Fatal(err)
+	}
+	restored.Endpoints = nil // prove derivation from durable request, not old endpoints
+	fresh := NewMemoryBindingStore()
+	if _, _, err = fresh.CreateOrGet(ctx, restored); err != nil {
+		t.Fatal(err)
+	}
+	restarted := NewLifecycleService(fresh, provider)
+	got, err := restarted.SyncStatus(ctx, restored.Namespace, restored.WorkloadUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.Endpoints, want) {
+		t.Errorf("restart endpoints=%#v, want %#v", got.Endpoints, want)
+	}
+	if provider.gets != 1 {
+		t.Fatalf("provider GET count=%d, want 1", provider.gets)
+	}
+	snapshot := restarted.SnapshotRemoteStatuses(ctx, []Binding{got})
+	got, err = restarted.SyncStatusWithSnapshot(ctx, got.Namespace, got.WorkloadUID, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.Endpoints, want) {
+		t.Errorf("snapshot endpoints=%#v, want %#v", got.Endpoints, want)
+	}
+	if provider.gets != 1 {
+		t.Fatalf("snapshot made extra GET, count=%d", provider.gets)
+	}
+}
+
+func TestRecordDirectEndpointsOnlyMapsDeclaredValidTCPPorts(t *testing.T) {
+	explicit := []Endpoint{{ContainerPort: 8000, Protocol: "TCP", Host: "proxy.example", Port: 12345}}
+	for _, tt := range []struct {
+		name     string
+		ports    []Port
+		explicit []Endpoint
+		want     []Endpoint
+	}{
+		{name: "no ports"},
+		{name: "invalid ports", ports: []Port{{ContainerPort: 0}, {ContainerPort: -1}, {ContainerPort: 65536}, {ContainerPort: 8000, Protocol: "UDP"}, {ContainerPort: 9000, Protocol: "SCTP"}}},
+		{name: "valid bounds", ports: []Port{{ContainerPort: 1, Protocol: "TCP"}, {ContainerPort: 65535}}, want: []Endpoint{{ContainerPort: 1, Protocol: "TCP", Host: "203.0.113.10", Port: 1}, {ContainerPort: 65535, Protocol: "TCP", Host: "203.0.113.10", Port: 65535}}},
+		{name: "explicit wins", ports: []Port{{ContainerPort: 8000}, {ContainerPort: 9000}}, explicit: explicit, want: explicit},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			remote := directEndpointObservation()
+			remote.Endpoints = tt.explicit
+			binding := Binding{Request: WorkloadRequest{Ports: tt.ports}}
+			recordRemoteEndpoints(&binding, remote)
+			if !reflect.DeepEqual(binding.Endpoints, tt.want) {
+				t.Fatalf("endpoints=%#v, want %#v", binding.Endpoints, tt.want)
 			}
 		})
 	}

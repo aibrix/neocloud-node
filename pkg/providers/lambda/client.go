@@ -18,6 +18,10 @@ import (
 const providerName = "lambda"
 
 type Config struct {
+	SSHUser             string
+	SSHPrivateKeyFile   string
+	SSHKnownHostsFile   string
+	SSHPort             int
 	BaseURL             string
 	APIKey              string
 	CallbackURL         string
@@ -29,6 +33,7 @@ type Config struct {
 }
 
 type Client struct {
+	sshConfig           Config
 	baseURL             string
 	apiKey              string
 	callbackURL         string
@@ -51,6 +56,7 @@ func NewClient(config Config) *Client {
 	}
 
 	return &Client{
+		sshConfig:           config,
 		baseURL:             baseURL,
 		apiKey:              config.APIKey,
 		callbackURL:         config.CallbackURL,
@@ -372,13 +378,14 @@ type InstanceFilter struct {
 
 func remoteFromInstance(instance instance) core.RemoteResource {
 	return core.RemoteResource{
-		ID:           instance.ID,
-		ExternalName: instance.Name,
-		Provider:     providerName,
-		Phase:        phaseFromStatus(instance.Status),
-		Request:      requestFromInstance(instance),
-		HourlyCost:   float64(instance.InstanceType.PriceCentsPerHour) / 100.0,
-		CostSource:   costSource(instance),
+		ID:                 instance.ID,
+		ExternalName:       instance.Name,
+		Provider:           providerName,
+		Phase:              phaseFromStatus(instance.Status),
+		DirectEndpointHost: instance.IP,
+		Request:            requestFromInstance(instance),
+		HourlyCost:         float64(instance.InstanceType.PriceCentsPerHour) / 100.0,
+		CostSource:         costSource(instance),
 	}
 }
 

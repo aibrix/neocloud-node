@@ -99,12 +99,12 @@ controller. Keep the Helm release for subsequent workloads.
 | No duplicate instance after a restart | ✅ | ✅ | ✅ |
 | Orphan sweeper | ✅ | ✅ | ✅ |
 | **Debugging** | | | |
-| `kubectl logs` | ❌ | ❌ | ❌ |
+| `kubectl logs` | ⚠️ [opt-in](docs/container-logs.md) | ❌ | ⚠️ [runner](docs/container-logs.md#lambda) |
 | `kubectl exec` and `attach` | ❌ | ❌ | ❌ |
 | `kubectl port-forward` | ❌ | ❌ | ❌ |
 | **Networking** | | | |
-| Public endpoints for container ports | ✅ | ❌ | ❌ |
-| Readiness probe (`httpGet`, `tcpSocket`) | ✅ | ❌ ² | ❌ ² |
+| Public endpoints for container ports | ✅ | ❌ | ⚠️ [declared TCP](docs/lambda-adapter.md#container-ports) |
+| Readiness probe (`httpGet`, `tcpSocket`) | ✅ | ❌ ² | ⚠️ [declared TCP](docs/lambda-adapter.md#container-ports) |
 | Kubernetes Service ³ | ❌ | ❌ | ❌ |
 | **Images and storage** | | | |
 | Private image registry | ⚠️ ⁴ | ❌ | ❌ |

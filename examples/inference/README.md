@@ -101,10 +101,11 @@ curl --fail --max-time 120 "$BASE_URL/v1/chat/completions" \
 Check that the response contains `choices[0].message.content` with the answer
 `4`. For a second request, try `请用中文用一句话解释什么是 GPU。`.
 
-This path uses the provider's public TCP endpoint. The current adapter does not
-support `kubectl logs`, `exec`, or `port-forward`. A Kubernetes Service does
+This path uses the provider's public TCP endpoint. Container logs are available with the opt-in
+[kubelet log endpoint](../../docs/container-logs.md), subject to provider API access.
+`exec` and `port-forward` remain unsupported. A Kubernetes Service does
 not work for these Pods: it would send traffic to the Pod IP on port 8000, but
-RunPod publishes 8000 on another port. Inspect startup logs in RunPod if the
+RunPod publishes 8000 on another port. Inspect provider startup diagnostics if the
 Pod never becomes `Ready`.
 
 ## Clean up before trying the other engine
@@ -120,3 +121,13 @@ in RunPod. A stopped instance can still incur storage charges; it should be
 deleted. If cleanup fails, resolve or delete that specific remote instance in
 RunPod before starting another test. Keep the Helm release and provider Secret
 for future tests.
+
+## Lambda deployments
+
+The same pinned engine images/model/flags can run on a Lambda virtual node with
+the VM runner. Select `provider: lambda`, the configured Lambda node and GPU
+type, and attach a firewall ruleset permitting TCP8000 from your controller and
+test client. See the [Lambda guide](../../docs/lambda-adapter.md#container-ports)
+for direct port mapping, image entrypoints, driver570 CUDA compatibility setup
+and readiness requirements. These Lambda features require a controller build
+that includes the runner log and declared-port support; release0.1.0 lacks them.

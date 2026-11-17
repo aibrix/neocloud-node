@@ -546,10 +546,10 @@ func TestParseOptionsRequiresLambdaAPIKey(t *testing.T) {
 	}
 }
 
-func TestParseOptionsRequiresTLSFilesWhenKubeletAPIEnabled(t *testing.T) {
+func TestParseOptionsRejectsImplicitKubeletAuthentication(t *testing.T) {
 	_, err := ParseOptions([]string{"--enable-kubelet-api"}, emptyEnv)
 	if err == nil {
-		t.Fatal("ParseOptions() error = nil, want TLS cert/key error")
+		t.Fatal("ParseOptions() error = nil, want explicit kubelet development configuration")
 	}
 }
 

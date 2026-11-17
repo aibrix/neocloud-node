@@ -39,6 +39,7 @@ type EventRecorder interface {
 }
 
 type Config struct {
+	LogReaders       map[string]core.ProviderLogReader
 	Store            core.BindingStore
 	Adapter          core.ProviderAdapter
 	FallbackAdapters map[string]core.ProviderAdapter
@@ -57,6 +58,7 @@ type Config struct {
 }
 
 type Provider struct {
+	logReaders  map[string]core.ProviderLogReader
 	transformer PodTransformer
 	lifecycle   *core.LifecycleService
 	store       core.BindingStore
@@ -102,6 +104,7 @@ func NewProvider(config Config) (*Provider, error) {
 	}
 
 	provider := &Provider{
+		logReaders:  config.LogReaders,
 		transformer: config.Transformer,
 		lifecycle:   core.NewLifecycleService(config.Store, config.Adapter, options...),
 		store:       config.Store,
@@ -232,10 +235,7 @@ func (p *Provider) NotifyPods(ctx context.Context, notifier func(*corev1.Pod)) {
 }
 
 func (p *Provider) GetContainerLogs(ctx context.Context, namespace, podName, containerName string, opts api.ContainerLogOpts) (io.ReadCloser, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	return nil, unsupportedMethod("container logs")
+	return p.containerLogs(ctx, namespace, podName, containerName, opts)
 }
 
 func (p *Provider) RunInContainer(ctx context.Context, namespace, podName, containerName string, cmd []string, attach api.AttachIO) error {

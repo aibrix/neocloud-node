@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
-	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -57,6 +56,13 @@ const (
 )
 
 type Options struct {
+	PodIP                    string
+	KubeletAuthMode          string
+	LambdaSSHUser            string
+	LambdaSSHPrivateKeyFile  string
+	LambdaSSHKnownHostsFile  string
+	LogSnapshotIdle          time.Duration
+	LogSnapshotMax           time.Duration
 	AllowMissingCredentials  bool
 	NodeName                 string
 	Provider                 string
@@ -113,6 +119,13 @@ func ParseOptions(args []string, getenv func(string) string) (Options, error) {
 	}
 
 	options := Options{
+		PodIP:                   envOr(getenv, "POD_IP", ""),
+		KubeletAuthMode:         envOr(getenv, "GPU_BURST_KUBELET_AUTH_MODE", ""),
+		LambdaSSHUser:           envOr(getenv, "GPU_BURST_LAMBDA_SSH_USER", "ubuntu"),
+		LambdaSSHPrivateKeyFile: envOr(getenv, "GPU_BURST_LAMBDA_SSH_PRIVATE_KEY_FILE", ""),
+		LambdaSSHKnownHostsFile: envOr(getenv, "GPU_BURST_LAMBDA_SSH_KNOWN_HOSTS_FILE", ""),
+		LogSnapshotIdle:         durationEnv(getenv, "GPU_BURST_LOG_SNAPSHOT_IDLE", time.Second),
+		LogSnapshotMax:          durationEnv(getenv, "GPU_BURST_LOG_SNAPSHOT_MAX", 30*time.Second),
 		AllowMissingCredentials: boolEnv(getenv, "GPU_BURST_ALLOW_MISSING_CREDENTIALS", false),
 		NodeName:                envOr(getenv, "GPU_BURST_NODE_NAME", DefaultNodeName),
 		Provider:                envOr(getenv, "GPU_BURST_PROVIDER", ProviderFake),
@@ -165,6 +178,13 @@ func ParseOptions(args []string, getenv func(string) string) (Options, error) {
 
 	fs := flag.NewFlagSet("neocloud-node", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
+	fs.StringVar(&options.PodIP, "pod-ip", options.PodIP, "controller Pod IP advertised for the kubelet API")
+	fs.StringVar(&options.KubeletAuthMode, "kubelet-auth-mode", options.KubeletAuthMode, "explicit none for isolated development only")
+	fs.StringVar(&options.LambdaSSHUser, "lambda-ssh-user", options.LambdaSSHUser, "SSH user for Lambda Docker logs")
+	fs.StringVar(&options.LambdaSSHPrivateKeyFile, "lambda-ssh-private-key-file", options.LambdaSSHPrivateKeyFile, "SSH private-key file for Lambda Docker logs")
+	fs.StringVar(&options.LambdaSSHKnownHostsFile, "lambda-ssh-known-hosts-file", options.LambdaSSHKnownHostsFile, "trusted SSH known_hosts file for Lambda Docker logs")
+	fs.DurationVar(&options.LogSnapshotIdle, "log-snapshot-idle", options.LogSnapshotIdle, "RunPod one-shot replay idle gap")
+	fs.DurationVar(&options.LogSnapshotMax, "log-snapshot-max", options.LogSnapshotMax, "RunPod one-shot replay maximum duration")
 	fs.BoolVar(&options.AllowMissingCredentials, "allow-missing-credentials", options.AllowMissingCredentials, "start without provider credentials; disable GPU capacity until credentials are configured and the controller restarts")
 	fs.StringVar(&options.NodeName, "node-name", options.NodeName, "virtual node name")
 	fs.StringVar(&options.Provider, "provider", options.Provider, "provider adapter: fake, runpod, lambda or vast")
@@ -270,6 +290,7 @@ func NewNode(ctx context.Context, options Options, kubeClient kubernetes.Interfa
 	}
 
 	providerConfig := vk.Config{
+		LogReaders:       providerLogReaders(options.Provider, adapter, fallbackAdapters),
 		Store:            store,
 		Adapter:          adapter,
 		FallbackAdapters: fallbackAdapters,
@@ -300,11 +321,11 @@ func NewNode(ctx context.Context, options Options, kubeClient kubernetes.Interfa
 			return nil, err
 		}
 		mux := http.NewServeMux()
-		mux.Handle("/neocloud-node/v1/runner/status", runnerStatusHandler(store, options.RunnerCallbackSecret))
+		log.Printf("neocloud-node kubelet API enabled: address=%s auth=none (isolated development only)", options.PodIP)
 		nodeOptions = append(nodeOptions,
 			nodeutil.AttachProviderRoutes(mux),
 			func(config *nodeutil.NodeConfig) error {
-				config.Handler = mux
+				config.Handler = preserveLogTail(mux)
 				config.TLSConfig = tlsConfig
 				return nil
 			},
@@ -669,11 +690,16 @@ func providerAdapterFor(options Options, provider string) (core.ProviderAdapter,
 		return core.NewFakeProvider(ProviderFake), nil
 	case ProviderRunPod:
 		return runpod.NewClient(runpod.Config{
-			APIKey:  options.RunPodAPIKey,
-			BaseURL: options.RunPodBaseURL,
+			LogSnapshotIdle: options.LogSnapshotIdle,
+			LogSnapshotMax:  options.LogSnapshotMax,
+			APIKey:          options.RunPodAPIKey,
+			BaseURL:         options.RunPodBaseURL,
 		}), nil
 	case ProviderLambda:
 		return lambdacloud.NewClient(lambdacloud.Config{
+			SSHUser:             options.LambdaSSHUser,
+			SSHPrivateKeyFile:   options.LambdaSSHPrivateKeyFile,
+			SSHKnownHostsFile:   options.LambdaSSHKnownHostsFile,
 			APIKey:              options.LambdaAPIKey,
 			BaseURL:             options.LambdaBaseURL,
 			CallbackURL:         options.LambdaCallbackURL,
@@ -800,7 +826,9 @@ func startRunnerCallbackServer(ctx context.Context, listenAddr string, callbackS
 	if err != nil {
 		return "", nil, fmt.Errorf("listen runner callback server: %w", err)
 	}
-	server := &http.Server{Handler: runnerStatusHandler(store, callbackSecret)}
+	mux := http.NewServeMux()
+	mux.Handle("/neocloud-node/v1/runner/status", runnerStatusHandler(store, callbackSecret))
+	server := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -868,17 +896,6 @@ func logOrphanSweepReport(report core.OrphanSweepReport, dryRun bool, err error)
 		len(report.Deleted))
 }
 
-func tlsConfig(options Options) (*tls.Config, error) {
-	certificate, err := tls.LoadX509KeyPair(options.TLSCertFile, options.TLSKeyFile)
-	if err != nil {
-		return nil, fmt.Errorf("load kubelet API TLS certificate: %w", err)
-	}
-	return &tls.Config{
-		Certificates: []tls.Certificate{certificate},
-		MinVersion:   tls.VersionTLS12,
-	}, nil
-}
-
 func validateOptions(options Options) error {
 	if strings.TrimSpace(options.NodeName) == "" {
 		return errors.New("node name is required")
@@ -916,8 +933,8 @@ func validateOptions(options Options) error {
 	default:
 		return fmt.Errorf("unsupported binding store %q", options.BindingStore)
 	}
-	if options.KubeletAPIEnabled && (options.TLSCertFile == "" || options.TLSKeyFile == "") {
-		return errors.New("kubelet API requires --tls-cert-file and --tls-key-file")
+	if err := validateLogOptions(options); err != nil {
+		return err
 	}
 	if options.AdvertiseGPUCount < 0 {
 		return errors.New("advertise gpu count cannot be negative")
@@ -993,6 +1010,19 @@ func normalizeCSV(raw string) string {
 }
 
 func configureNodeSpec(config *nodeutil.NodeConfig, options Options) error {
+	if options.KubeletAPIEnabled {
+		host, port, err := net.SplitHostPort(options.ListenAddr)
+		_ = host
+		if err != nil {
+			return err
+		}
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 {
+			return errors.New("invalid kubelet port")
+		}
+		config.NodeSpec.Status.Addresses = []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: options.PodIP}}
+		config.NodeSpec.Status.DaemonEndpoints.KubeletEndpoint.Port = int32(n)
+	}
 	if config.NodeSpec.Labels == nil {
 		config.NodeSpec.Labels = map[string]string{}
 	}

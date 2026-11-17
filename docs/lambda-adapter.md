@@ -57,12 +57,56 @@ Delete treats `RemoteNotFound` as successful cleanup. If terminate returns a tra
 
 The adapter implements `resource.ProviderOfferSource` by reading `GET /instance-types`. Each region in `regions_with_capacity_available` becomes a normalized on-demand offer with hourly price, GPU count, GPU description and a `lambda-instance-type` provider hint. Empty catalog refreshes are conservative and expose only single-GPU instance types; explicit multi-GPU placement should come through a workload intent or a bootstrap offer so a one-card workload is not accidentally routed to an eight-card VM.
 
+## Container ports
+
+The VM runner publishes declared TCP ports 1:1 on the VM, for example
+`8000:8000/tcp`. The binding request retains these ports; the lifecycle derives
+endpoints from that request and the public VM address, including after controller
+restart or batch status sync. Image entrypoints are replaced only when the Pod
+provides `command`; `args` preserve the image entrypoint when command is absent.
+
+Attach a provider firewall ruleset with
+`cloud.aibrix.ai/lambda-firewall-ids` that permits the controller and intended
+clients to reach the declared ports. Endpoint publication does not open a
+provider firewall. Existing HTTP/TCP readiness probes use these endpoints; an
+active VM alone does not prove the model server is healthy.
+
+## Container logs
+
+Configure the authenticated runner log upload and kubelet endpoint described in
+[container logs](container-logs.md). Both are opt-in. The runner retains bounded
+records and replays them after a controller restart; Python 3.10 nanosecond
+Docker timestamps are supported. Exec, attach and port-forward remain unsupported.
+
+## GPU image compatibility
+
+Choose an engine image compatible with the VM's driver. For a driver570 data
+center GPU, the pinned vLLM0.32.0 and SGLang0.5.23 images include CUDA13 forward
+compatibility libraries. A workload can explicitly activate them before starting
+the original example command:
+
+```bash
+driver=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n1)
+case "$driver" in
+  570.*) export LD_LIBRARY_PATH=/usr/local/cuda-13.0/compat${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH} ;;
+esac
+exec python3 -m vllm.entrypoints.openai.api_server ...
+```
+
+Use `bash -c` to preserve the image's PATH. Do not force compatibility libraries
+on other driver branches without checking NVIDIA's
+[forward compatibility matrix](https://docs.nvidia.com/deploy/cuda-compatibility/latest/forward-compatibility.html).
+The same setup applies to `python3 -m sglang.launch_server`. Keep the original
+example model and engine flags, select the Lambda virtual node/provider, and
+attach a suitable firewall ruleset.
+
 ## Current Limitations
 
-- A gated real Lambda smoke test exists, but the current development environment has not completed it successfully yet.
-- The controller exposes `POST /neocloud-node/v1/runner/status` when the kubelet API server is enabled. The shell runner reports `Running` and terminal `Succeeded`/`Failed` callbacks through this endpoint; periodic heartbeat timeouts and logs are not implemented yet.
+- Lambda support remains experimental and requires a VM runner for container execution.
 - No automatic SSH key creation.
-- No logs collection.
+- Credentials and callback URLs are operator-managed; see the log guide for
+  network, authentication and bounded-retention requirements.
+- PVCs and cluster-internal Pod networking remain unsupported.
 
 ## Gated E2E Smoke
 

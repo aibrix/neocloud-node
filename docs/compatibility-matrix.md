@@ -117,7 +117,7 @@ for example with an API key, or with provider firewalls where they exist.
 | --- | --- |
 | RunPod | `publicIp` and `portMappings` of TCP ports. |
 | Vast.ai | Not reported yet. |
-| Lambda Cloud | Not reported. The VM runner does not publish container ports yet. |
+| Lambda Cloud | VM public IP and declared TCP ports mapped 1:1 by the runner. The provider firewall must permit access. |
 
 ## Readiness
 
@@ -177,3 +177,11 @@ The controller's ClusterRole allows it to read Secrets in all namespaces.
 - Multi-container sidecar semantics.
 - Privileged or host namespace workloads.
 - Provider-specific placement/fallback. That starts after this transformer contract is stable.
+
+## Container logs
+
+Optional RunPod and Lambda backends provide container logs through the kubelet
+HTTPS endpoint. Lambda requires authenticated runner delivery from a new VM.
+See [container logs](container-logs.md) for setup, bounded retention, snapshot
+limitations, supported parameters and control-plane TLS requirements. Exec,
+attach and port-forward remain unsupported.
