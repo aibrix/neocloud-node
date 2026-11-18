@@ -199,7 +199,7 @@ func TestPeriodicStatusSyncSkipsTerminalBinding(t *testing.T) {
 		t.Fatal(err)
 	}
 	binding.Phase = core.BindingFailed
-	if err := store.Update(ctx, binding); err != nil {
+	if _, err := store.Update(ctx, binding); err != nil {
 		t.Fatal(err)
 	}
 	provider.syncCachedPods(ctx)
