@@ -78,7 +78,7 @@ func TestMemoryBindingStoreDeleteStatePreservesRemoteID(t *testing.T) {
 	}
 	binding.RemoteID = "remote-1"
 	binding.Phase = BindingRunning
-	if err := store.Update(ctx, binding); err != nil {
+	if _, err := store.Update(ctx, binding); err != nil {
 		t.Fatalf("Update returned error: %v", err)
 	}
 
@@ -101,5 +101,34 @@ func TestMemoryBindingStoreDeleteStatePreservesRemoteID(t *testing.T) {
 	}
 	if _, err := store.GetByWorkloadUID(ctx, "default", "pod-123"); err == nil {
 		t.Fatalf("GetByWorkloadUID after CompleteDelete returned nil error, want not found")
+	}
+}
+
+func TestMemoryBindingStoreRejectsStaleSnapshots(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryBindingStore()
+	first, _, err := store.CreateOrGet(ctx, Binding{Namespace: "default", WorkloadUID: "uid", Conditions: []BindingCondition{{Type: ConditionReady, Status: ConditionTrue}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale, _ := store.GetByWorkloadUID(ctx, "default", "uid")
+	first.Conditions[0].Status = ConditionFalse
+	if stale.Conditions[0].Status != ConditionTrue {
+		t.Fatal("snapshots alias stored conditions")
+	}
+	updated, err := store.Update(ctx, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.ResourceVersion == first.ResourceVersion {
+		t.Fatal("successful update did not return the new resource version")
+	}
+	stale.Phase = BindingRunning
+	if _, err := store.Update(ctx, stale); err != ErrBindingConflict {
+		t.Fatalf("stale update: %v", err)
+	}
+	got, _ := store.GetByWorkloadUID(ctx, "default", "uid")
+	if got.Conditions[0].Status != ConditionFalse {
+		t.Fatal("stale update overwrote conditions")
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -1210,6 +1211,372 @@ func TestRecordDirectEndpointsOnlyMapsDeclaredValidTCPPorts(t *testing.T) {
 			recordRemoteEndpoints(&binding, remote)
 			if !reflect.DeepEqual(binding.Endpoints, tt.want) {
 				t.Fatalf("endpoints=%#v, want %#v", binding.Endpoints, tt.want)
+			}
+		})
+	}
+}
+
+func TestTerminalCleanupDelay(t *testing.T) {
+	for _, phase := range []BindingPhase{BindingSucceeded, BindingFailed} {
+		for _, tc := range []struct {
+			name           string
+			delay, elapsed time.Duration
+			deleted        bool
+		}{
+			{"disabled", 0, time.Hour, false},
+			{"before", time.Minute, time.Minute - time.Nanosecond, false},
+			{"at", time.Minute, time.Minute, true},
+			{"after", time.Minute, 2 * time.Minute, true},
+		} {
+			t.Run(string(phase)+"/"+tc.name, func(t *testing.T) {
+				ctx := context.Background()
+				finished := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+				store := NewMemoryBindingStore()
+				binding := terminalTestBinding(phase, finished)
+				if _, _, err := store.CreateOrGet(ctx, binding); err != nil {
+					t.Fatal(err)
+				}
+				provider := &terminalTestProvider{FakeProvider: NewFakeProvider("runpod")}
+				events := 0
+				service := NewLifecycleService(store, provider, WithTerminalCleanupDelay(tc.delay), WithRemoteCleanupObserver(func(b Binding) {
+					persisted, err := store.GetByWorkloadUID(ctx, b.Namespace, b.WorkloadUID)
+					if err != nil || !RemoteCleanedUp(persisted) {
+						t.Errorf("event before persistence: %v", err)
+					}
+					events++
+				}))
+				service.now = func() time.Time { return finished.Add(tc.elapsed) }
+				for i := 0; i < 3; i++ {
+					got, err := service.SyncStatus(ctx, binding.Namespace, binding.WorkloadUID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if got.Phase != phase || got.RemoteID != binding.RemoteID || got.LastError != binding.LastError {
+						t.Fatalf("result changed: %+v", got)
+					}
+					if RemoteCleanedUp(got) != tc.deleted {
+						t.Fatalf("cleanup = %v", RemoteCleanedUp(got))
+					}
+				}
+				want := 0
+				if tc.deleted {
+					want = 1
+				}
+				if provider.deletes != want || events != want || provider.gets != want {
+					t.Fatalf("deletes/events = %d/%d, want %d", provider.deletes, events, want)
+				}
+				if tc.deleted {
+					if err := service.EnsureDeleted(ctx, binding.Namespace, binding.WorkloadUID); err != nil {
+						t.Fatal(err)
+					}
+					if provider.deletes != 1 {
+						t.Fatal("Pod deletion repeated completed cleanup")
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestTerminalCleanupDue(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	service := NewLifecycleService(NewMemoryBindingStore(), NewFakeProvider("runpod"), WithTerminalCleanupDelay(time.Minute))
+	service.now = func() time.Time { return now }
+
+	future := terminalTestBinding(BindingSucceeded, now.Add(time.Minute))
+	expired := terminalTestBinding(BindingFailed, now.Add(-time.Minute))
+	legacy := terminalTestBinding(BindingSucceeded, time.Time{})
+	legacy.Conditions = nil
+	pending := terminalTestBinding(BindingSucceeded, now.Add(time.Hour))
+	SetCondition(&pending, BindingCondition{Type: ConditionRemoteCleanedUp, Status: ConditionFalse, Reason: "DeletionRequested"})
+	cleaned := expired
+	SetCondition(&cleaned, BindingCondition{Type: ConditionRemoteCleanedUp, Status: ConditionTrue})
+	deleting := expired
+	deleting.Deleting = true
+
+	for _, tc := range []struct {
+		name    string
+		binding Binding
+		want    bool
+	}{
+		{"before deadline", future, false},
+		{"at deadline", terminalTestBinding(BindingSucceeded, now.Add(-time.Minute)), true},
+		{"legacy timestamp", legacy, true},
+		{"pending confirmation", pending, true},
+		{"already cleaned", cleaned, false},
+		{"deleting", deleting, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := service.TerminalCleanupDue(tc.binding); got != tc.want {
+				t.Fatalf("TerminalCleanupDue() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTerminalCleanupRetryAndRestart(t *testing.T) {
+	ctx := context.Background()
+	finished := time.Now().Add(-time.Hour)
+	store := NewMemoryBindingStore()
+	binding := terminalTestBinding(BindingFailed, finished)
+	store.CreateOrGet(ctx, binding)
+	provider := &terminalTestProvider{FakeProvider: NewFakeProvider("runpod"), failures: 1}
+	service := NewLifecycleService(store, provider, WithTerminalCleanupDelay(time.Minute))
+	if _, err := service.SyncStatus(ctx, binding.Namespace, binding.WorkloadUID); err == nil {
+		t.Fatal("expected delete failure")
+	}
+	// A new service has no timer or other in-memory history.
+	service = NewLifecycleService(store, provider, WithTerminalCleanupDelay(time.Minute))
+	got, err := service.SyncStatus(ctx, binding.Namespace, binding.WorkloadUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !RemoteCleanedUp(got) || provider.deletes != 2 {
+		t.Fatalf("cleanup = %v; deletes = %d", RemoteCleanedUp(got), provider.deletes)
+	}
+	if !FindCondition(got.Conditions, ConditionTerminal).LastTransitionTime.Equal(finished) {
+		t.Fatal("retry moved terminal timestamp")
+	}
+}
+
+func TestTerminalCleanupWaitsForConfirmationAcrossRestart(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryBindingStore()
+	binding := terminalTestBinding(BindingSucceeded, time.Now().Add(-time.Hour))
+	store.CreateOrGet(ctx, binding)
+	provider := &terminalTestProvider{FakeProvider: NewFakeProvider("runpod"), asynchronous: true, phase: RemotePending}
+	service := NewLifecycleService(store, provider, WithTerminalCleanupDelay(time.Minute))
+	got, err := service.SyncStatus(ctx, binding.Namespace, binding.WorkloadUID)
+	if err != nil || RemoteCleanedUp(got) {
+		t.Fatalf("premature cleanup: %+v, %v", got, err)
+	}
+	provider.getError = errors.New("temporary read error")
+	// A longer delay after restart must not postpone confirmation of an accepted delete.
+	service = NewLifecycleService(store, provider, WithTerminalCleanupDelay(2*time.Hour))
+	if _, err := service.SyncStatus(ctx, binding.Namespace, binding.WorkloadUID); err == nil {
+		t.Fatal("expected confirmation error")
+	}
+	provider.getError = ErrRemoteNotFound
+	got, err = service.SyncStatus(ctx, binding.Namespace, binding.WorkloadUID)
+	if err != nil || !RemoteCleanedUp(got) || provider.deletes != 1 {
+		t.Fatalf("confirmation: cleaned=%v deletes=%d err=%v", RemoteCleanedUp(got), provider.deletes, err)
+	}
+}
+
+func TestTerminalCleanupLegacyTimestamp(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now()
+	store := NewMemoryBindingStore()
+	binding := terminalTestBinding(BindingSucceeded, now.Add(-time.Hour))
+	binding.Conditions[0].Type = ConditionReady
+	store.CreateOrGet(ctx, binding)
+	provider := &terminalTestProvider{FakeProvider: NewFakeProvider("runpod")}
+	service := NewLifecycleService(store, provider, WithTerminalCleanupDelay(time.Minute))
+	service.now = func() time.Time { return now }
+	got, err := service.SyncStatus(ctx, binding.Namespace, binding.WorkloadUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provider.deletes != 0 || !FindCondition(got.Conditions, ConditionTerminal).LastTransitionTime.Equal(now) {
+		t.Fatal("used Ready time instead of first terminal observation")
+	}
+	now = now.Add(time.Minute)
+	if _, err := service.SyncStatus(ctx, binding.Namespace, binding.WorkloadUID); err != nil {
+		t.Fatal(err)
+	}
+	if provider.deletes != 1 {
+		t.Fatal("legacy binding did not expire")
+	}
+}
+
+func TestRunnerTerminalTimestampAndLateCallbacks(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryBindingStore()
+	binding := terminalTestBinding(BindingRunning, time.Now().Add(-time.Hour))
+	binding.Conditions[0].Type = ConditionReady
+	store.CreateOrGet(ctx, binding)
+	got, err := RecordRunnerStatus(ctx, store, binding.Namespace, binding.WorkloadUID, RunnerStatus{Phase: RunnerPhaseSucceeded})
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminal := FindCondition(got.Conditions, ConditionTerminal)
+	if terminal == nil || !terminal.LastTransitionTime.After(binding.Conditions[0].LastTransitionTime) {
+		t.Fatal("terminal timestamp reused Running timestamp")
+	}
+	for _, phase := range []RunnerPhase{RunnerPhaseRunning, RunnerPhaseSucceeded, RunnerPhaseFailed} {
+		next, err := RecordRunnerStatus(ctx, store, binding.Namespace, binding.WorkloadUID, RunnerStatus{Phase: phase})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, next) {
+			t.Fatalf("late %s changed terminal result", phase)
+		}
+	}
+}
+
+func TestTerminalCleanupPersistenceFailure(t *testing.T) {
+	for _, failAt := range []int{1, 2} {
+		t.Run(strconv.Itoa(failAt), func(t *testing.T) {
+			ctx := context.Background()
+			store := &cleanupFailingStore{BindingStore: NewMemoryBindingStore(), failAt: failAt}
+			binding := terminalTestBinding(BindingSucceeded, time.Now().Add(-time.Hour))
+			store.CreateOrGet(ctx, binding)
+			provider := &terminalTestProvider{FakeProvider: NewFakeProvider("runpod")}
+			events := 0
+			service := NewLifecycleService(store, provider, WithTerminalCleanupDelay(time.Minute), WithRemoteCleanupObserver(func(Binding) { events++ }))
+			if _, err := service.SyncStatus(ctx, binding.Namespace, binding.WorkloadUID); err == nil {
+				t.Fatal("expected persistence error")
+			}
+			stored, _ := store.GetByWorkloadUID(ctx, binding.Namespace, binding.WorkloadUID)
+			if RemoteCleanedUp(stored) || events != 0 {
+				t.Fatal("completion escaped failed persistence")
+			}
+			got, err := service.SyncStatus(ctx, binding.Namespace, binding.WorkloadUID)
+			if err != nil || !RemoteCleanedUp(got) || events != 1 {
+				t.Fatalf("retry failed: %v, events %d", err, events)
+			}
+			want := 1
+			if failAt == 1 {
+				want = 2
+			}
+			if provider.deletes != want {
+				t.Fatalf("deletes = %d, want %d", provider.deletes, want)
+			}
+		})
+	}
+}
+
+func terminalTestBinding(phase BindingPhase, finished time.Time) Binding {
+	return Binding{Namespace: "default", Name: "job", WorkloadUID: "terminal-job", RemoteID: "remote", Phase: phase,
+		Request: WorkloadRequest{Provider: "runpod"}, LastError: "preserve result",
+		Conditions: []BindingCondition{{Type: ConditionTerminal, Status: ConditionTrue, Reason: string(phase), LastTransitionTime: finished}}}
+}
+
+type terminalTestProvider struct {
+	*FakeProvider
+	deletes, failures, gets int
+	asynchronous            bool
+	phase                   RemotePhase
+	getError                error
+}
+
+func (p *terminalTestProvider) Delete(context.Context, string) error {
+	p.deletes++
+	if p.failures > 0 {
+		p.failures--
+		return errors.New("temporary delete error")
+	}
+	if !p.asynchronous {
+		p.phase = RemoteDeleted
+	}
+	return nil
+}
+func (p *terminalTestProvider) Get(context.Context, string) (RemoteResource, error) {
+	p.gets++
+	return RemoteResource{ID: "remote", Phase: p.phase}, p.getError
+}
+
+type cleanupFailingStore struct {
+	BindingStore
+	updates, failAt int
+}
+
+func (s *cleanupFailingStore) Update(ctx context.Context, binding Binding) (Binding, error) {
+	s.updates++
+	if s.updates == s.failAt {
+		return Binding{}, errors.New("persistence unavailable")
+	}
+	return s.BindingStore.Update(ctx, binding)
+}
+
+func TestTerminalTimestampOnRemoteCompletion(t *testing.T) {
+	for _, phase := range []RemotePhase{RemoteSucceeded, RemoteFailed} {
+		t.Run(string(phase), func(t *testing.T) {
+			ctx := context.Background()
+			now := time.Now()
+			store := NewMemoryBindingStore()
+			binding := terminalTestBinding(BindingRunning, now.Add(-time.Hour))
+			binding.Conditions[0].Type = ConditionReady
+			store.CreateOrGet(ctx, binding)
+			provider := &terminalTestProvider{FakeProvider: NewFakeProvider("runpod"), phase: phase}
+			service := NewLifecycleService(store, provider, WithTerminalCleanupDelay(time.Minute))
+			service.now = func() time.Time { return now }
+			got, err := service.SyncStatus(ctx, binding.Namespace, binding.WorkloadUID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			condition := FindCondition(got.Conditions, ConditionTerminal)
+			if condition == nil || !condition.LastTransitionTime.Equal(now) || provider.deletes != 0 {
+				t.Fatalf("terminal = %+v, deletes = %d", condition, provider.deletes)
+			}
+		})
+	}
+}
+
+func TestTerminalCleanupDoesNotOverwriteConcurrentDeletion(t *testing.T) {
+	ctx := context.Background()
+	memory := NewMemoryBindingStore()
+	store := &cleanupConcurrentStore{BindingStore: memory}
+	binding := terminalTestBinding(BindingSucceeded, time.Now().Add(-time.Hour))
+	store.CreateOrGet(ctx, binding)
+	provider := &terminalTestProvider{FakeProvider: NewFakeProvider("runpod")}
+	service := NewLifecycleService(store, provider, WithTerminalCleanupDelay(time.Minute))
+	if _, err := service.SyncStatus(ctx, binding.Namespace, binding.WorkloadUID); !errors.Is(err, ErrBindingConflict) {
+		t.Fatalf("stale cleanup: %v", err)
+	}
+	got, err := service.SyncStatus(ctx, binding.Namespace, binding.WorkloadUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Deleting || got.Phase != BindingDeleting || RemoteCleanedUp(got) {
+		t.Fatalf("cleanup overwrote concurrent state: %+v", got)
+	}
+	if provider.deletes != 1 {
+		t.Fatal("status sync retried a binding being deleted")
+	}
+}
+
+type cleanupConcurrentStore struct {
+	BindingStore
+	raced bool
+}
+
+func (s *cleanupConcurrentStore) Update(ctx context.Context, binding Binding) (Binding, error) {
+	if !s.raced {
+		s.raced = true
+		if _, err := s.MarkDeleting(ctx, binding.Namespace, binding.WorkloadUID); err != nil {
+			return Binding{}, err
+		}
+	}
+	return s.BindingStore.Update(ctx, binding)
+}
+
+func TestTerminalCleanupIgnoresIneligibleBindings(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		phase    BindingPhase
+		remote   string
+		deleting bool
+	}{
+		{"running", BindingRunning, "remote", false},
+		{"pending", BindingPending, "remote", false},
+		{"deleted", BindingDeleted, "remote", false},
+		{"deleting", BindingFailed, "remote", true},
+		{"no remote", BindingFailed, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := NewMemoryBindingStore()
+			binding := terminalTestBinding(tc.phase, time.Now().Add(-time.Hour))
+			binding.RemoteID, binding.Deleting = tc.remote, tc.deleting
+			store.CreateOrGet(ctx, binding)
+			provider := &terminalTestProvider{FakeProvider: NewFakeProvider("runpod"), phase: RemoteRunning}
+			service := NewLifecycleService(store, provider, WithTerminalCleanupDelay(time.Minute))
+			if _, err := service.SyncStatus(ctx, binding.Namespace, binding.WorkloadUID); err != nil {
+				t.Fatal(err)
+			}
+			if provider.deletes != 0 {
+				t.Fatal("deleted an ineligible binding")
 			}
 		})
 	}
