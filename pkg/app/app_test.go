@@ -840,3 +840,39 @@ func (a catalogProviderAdapter) ListOffers(ctx context.Context, intent burstreso
 		},
 	}, nil
 }
+
+func TestTerminalCleanupOptions(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		args    []string
+		env     string
+		want    time.Duration
+		invalid bool
+	}{
+		{name: "disabled default"},
+		{name: "environment", env: "2m", want: 2 * time.Minute},
+		{name: "flag overrides environment", args: []string{"--terminal-cleanup-delay=3m"}, env: "2m", want: 3 * time.Minute},
+		{name: "negative", args: []string{"--terminal-cleanup-delay=-1s"}, invalid: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			options, err := ParseOptions(tc.args, func(key string) string {
+				if key == "GPU_BURST_TERMINAL_CLEANUP_DELAY" {
+					return tc.env
+				}
+				return ""
+			})
+			if tc.invalid {
+				if err == nil {
+					t.Fatal("negative delay accepted")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if options.TerminalCleanupDelay != tc.want {
+				t.Fatalf("delay = %s, want %s", options.TerminalCleanupDelay, tc.want)
+			}
+		})
+	}
+}

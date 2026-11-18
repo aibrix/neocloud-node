@@ -115,7 +115,8 @@ type Options struct {
 	OrphanSweeperInterval time.Duration
 	OrphanSweeperDryRun   bool
 
-	StatusSyncInterval time.Duration
+	StatusSyncInterval   time.Duration
+	TerminalCleanupDelay time.Duration
 
 	PlacementOffers          string
 	PlacementOfferTTL        time.Duration
@@ -182,6 +183,7 @@ func ParseOptions(args []string, getenv func(string) string) (Options, error) {
 
 		OrphanSweeperInterval: durationEnv(getenv, "GPU_BURST_ORPHAN_SWEEPER_INTERVAL", 0),
 		OrphanSweeperDryRun:   boolEnv(getenv, "GPU_BURST_ORPHAN_SWEEPER_DRY_RUN", true),
+		TerminalCleanupDelay:  durationEnv(getenv, "GPU_BURST_TERMINAL_CLEANUP_DELAY", 0),
 		StatusSyncInterval:    durationEnv(getenv, "GPU_BURST_STATUS_SYNC_INTERVAL", 15*time.Second),
 
 		PlacementOffers:          envOr(getenv, "GPU_BURST_PLACEMENT_OFFERS", ""),
@@ -247,6 +249,7 @@ func ParseOptions(args []string, getenv func(string) string) (Options, error) {
 	fs.StringVar(&options.AdvertiseMemory, "advertise-memory", options.AdvertiseMemory, "virtual node memory capacity advertised to the scheduler")
 	fs.DurationVar(&options.OrphanSweeperInterval, "orphan-sweeper-interval", options.OrphanSweeperInterval, "periodic orphan sweeper interval; 0 disables it")
 	fs.BoolVar(&options.OrphanSweeperDryRun, "orphan-sweeper-dry-run", options.OrphanSweeperDryRun, "report orphaned provider resources without deleting them")
+	fs.DurationVar(&options.TerminalCleanupDelay, "terminal-cleanup-delay", options.TerminalCleanupDelay, "delete remote resources after a terminal binding has aged this long; 0 disables cleanup")
 	fs.DurationVar(&options.StatusSyncInterval, "status-sync-interval", options.StatusSyncInterval, "periodic remote status sync interval; 0 disables it")
 	fs.StringVar(&options.PlacementOffers, "placement-offers", options.PlacementOffers, "semicolon-separated bootstrap placement offers as key=value CSV records")
 	fs.DurationVar(&options.PlacementOfferTTL, "placement-offer-ttl", options.PlacementOfferTTL, "TTL for bootstrap placement offers")
@@ -345,9 +348,10 @@ func NewNode(ctx context.Context, options Options, kubeClient kubernetes.Interfa
 		NodeName:         options.NodeName,
 		EventRecorder: newEventRecorder(kubeClient,
 			"neocloud-node/"+options.Provider),
-		PodClient:          kubeClient.CoreV1(),
-		StatusSyncContext:  ctx,
-		StatusSyncInterval: options.StatusSyncInterval,
+		PodClient:            kubeClient.CoreV1(),
+		StatusSyncContext:    ctx,
+		StatusSyncInterval:   options.StatusSyncInterval,
+		TerminalCleanupDelay: options.TerminalCleanupDelay,
 	}
 
 	nodeOptions := []nodeutil.NodeOpt{
@@ -971,6 +975,9 @@ func validateOptions(options Options) error {
 		if ref.Name != "" && (strings.TrimSpace(options.ProviderSecretNamespace) == "" || ref.Key == "") {
 			return errors.New("provider Secret references require a namespace and nonempty key")
 		}
+	}
+	if options.TerminalCleanupDelay < 0 {
+		return errors.New("terminal cleanup delay cannot be negative")
 	}
 	if strings.TrimSpace(options.NodeName) == "" {
 		return errors.New("node name is required")
