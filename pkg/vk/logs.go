@@ -76,6 +76,9 @@ func (p *Provider) containerLogs(ctx context.Context, namespace, podName, contai
 	if binding.Namespace != namespace || binding.WorkloadUID != string(pod.UID) || binding.RemoteID == "" || binding.Phase == core.BindingDeleted || binding.Deleting {
 		return nil, errdefs.NotFound("pod has no readable remote resource")
 	}
+	if core.FindCondition(binding.Conditions, core.ConditionRemoteCleanedUp) != nil {
+		return nil, errdefs.NotFound("remote resource cleanup has started; logs are no longer available")
+	}
 	selected := binding.Placement.Provider
 	if selected == "" {
 		selected = binding.Request.Provider
