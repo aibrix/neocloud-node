@@ -50,11 +50,13 @@ type Config struct {
 	LaunchGuard      *core.LaunchGuard
 	NodeName         string
 	EventRecorder    EventRecorder
-	// PodClient publishes remote endpoints as a Pod annotation. Optional.
+	// PodClient publishes endpoints and validates persisted Pods during cleanup.
+	// It is required when TerminalCleanupDelay is enabled.
 	PodClient corev1client.PodsGetter
 
-	StatusSyncContext  context.Context
-	StatusSyncInterval time.Duration
+	StatusSyncContext    context.Context
+	StatusSyncInterval   time.Duration
+	TerminalCleanupDelay time.Duration
 }
 
 type Provider struct {
@@ -82,6 +84,9 @@ func NewProvider(config Config) (*Provider, error) {
 	if config.Adapter == nil {
 		return nil, errdefs.InvalidInput("missing provider adapter")
 	}
+	if config.TerminalCleanupDelay > 0 && config.PodClient == nil {
+		return nil, errdefs.InvalidInput("missing Pod client for terminal cleanup")
+	}
 	if config.Transformer == nil {
 		config.Transformer = kube.Transformer{}
 	}
@@ -89,7 +94,7 @@ func NewProvider(config Config) (*Provider, error) {
 		config.NodeName = defaultStatsNodeName
 	}
 
-	options := []core.LifecycleOption{}
+	options := []core.LifecycleOption{core.WithTerminalCleanupDelay(config.TerminalCleanupDelay)}
 	if config.LaunchGuard != nil {
 		options = append(options, core.WithLaunchGuard(*config.LaunchGuard))
 	}
@@ -106,12 +111,29 @@ func NewProvider(config Config) (*Provider, error) {
 	provider := &Provider{
 		logReaders:  config.LogReaders,
 		transformer: config.Transformer,
-		lifecycle:   core.NewLifecycleService(config.Store, config.Adapter, options...),
 		store:       config.Store,
 		nodeName:    config.NodeName,
 		recorder:    config.EventRecorder,
 		podClient:   config.PodClient,
 		pods:        make(map[string]*corev1.Pod),
+	}
+	provider.lifecycle = core.NewLifecycleService(config.Store, config.Adapter, append(options,
+		core.WithRemoteCleanupObserver(func(binding core.Binding) {
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Namespace: binding.Namespace, Name: binding.Name, UID: types.UID(binding.WorkloadUID),
+			}}
+			provider.recordPodEvent(pod, corev1.EventTypeNormal, "RemoteCleanedUp", "remote resource cleaned up")
+		}))...)
+	if config.TerminalCleanupDelay > 0 {
+		ctx := config.StatusSyncContext
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		interval := config.StatusSyncInterval
+		if interval <= 0 {
+			interval = 15 * time.Second
+		}
+		go provider.runTerminalCleanup(ctx, interval)
 	}
 	provider.readiness = newReadinessManager(config.StatusSyncContext, provider.onReadinessChange)
 	if config.StatusSyncInterval > 0 {
@@ -697,7 +719,11 @@ func bindingMetricFamilies(bindings []core.Binding) []*dto.MetricFamily {
 			label("phase", string(binding.Phase)),
 		))
 		if binding.Cost.HourlyUSD > 0 {
-			burnRateFamily.Metric = append(burnRateFamily.Metric, gaugeMetric(binding.Cost.HourlyUSD,
+			hourlyUSD := binding.Cost.HourlyUSD
+			if core.RemoteCleanedUp(binding) {
+				hourlyUSD = 0
+			}
+			burnRateFamily.Metric = append(burnRateFamily.Metric, gaugeMetric(hourlyUSD,
 				label("namespace", binding.Namespace),
 				label("pod", binding.Name),
 				label("provider", provider),
