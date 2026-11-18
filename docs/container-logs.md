@@ -116,3 +116,9 @@ runnerCallback:
 The callback signing Secret and VM-reachable HTTPS route are operator-managed.
 This Service is for status callbacks, not log uploads. No additional callback
 route or signing key is required by SSH log reads.
+
+## Retention after completion
+
+With [terminal cleanup](terminal-cleanup.md) enabled, remote logs are available
+only until cleanup begins after the configured delay. They are not archived.
+New log requests report that cleanup has started; existing streams may end.
