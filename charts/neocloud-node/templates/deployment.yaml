@@ -48,6 +48,7 @@ spec:
             - --advertise-gpu-count=$(GPU_BURST_ADVERTISE_GPU_COUNT)
             - --advertise-pod-capacity=$(GPU_BURST_ADVERTISE_POD_CAPACITY)
             - --status-sync-interval=$(GPU_BURST_STATUS_SYNC_INTERVAL)
+            - --terminal-cleanup-delay=$(GPU_BURST_TERMINAL_CLEANUP_DELAY)
             - --orphan-sweeper-interval=$(GPU_BURST_ORPHAN_SWEEPER_INTERVAL)
             - --orphan-sweeper-dry-run=$(GPU_BURST_ORPHAN_SWEEPER_DRY_RUN)
             - --placement-offers=$(GPU_BURST_PLACEMENT_OFFERS)

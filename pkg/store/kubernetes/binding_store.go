@@ -117,20 +117,26 @@ func (s *BindingStore) List(ctx context.Context) ([]core.Binding, error) {
 	return bindings, nil
 }
 
-func (s *BindingStore) Update(ctx context.Context, binding core.Binding) error {
+func (s *BindingStore) Update(ctx context.Context, binding core.Binding) (core.Binding, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return core.Binding{}, err
 	}
 
 	object, err := s.getObject(ctx, binding.Namespace, binding.WorkloadUID)
 	if apierrors.IsNotFound(err) {
-		return core.ErrBindingNotFound
+		return core.Binding{}, core.ErrBindingNotFound
 	}
 	if err != nil {
-		return err
+		return core.Binding{}, err
 	}
-	_, err = s.persistStatus(ctx, object, binding)
-	return err
+	if object.GetResourceVersion() != binding.ResourceVersion {
+		return core.Binding{}, core.ErrBindingConflict
+	}
+	updated, err := s.persistStatus(ctx, object, binding)
+	if err != nil {
+		return core.Binding{}, err
+	}
+	return bindingFromObject(updated)
 }
 
 func (s *BindingStore) MarkDeleting(ctx context.Context, namespace string, workloadUID string) (core.Binding, error) {
@@ -193,10 +199,21 @@ func (s *BindingStore) persistStatus(ctx context.Context, object *unstructured.U
 	updated.Object["status"] = statusFromBinding(binding)
 
 	out, err := s.resource(binding.Namespace).UpdateStatus(ctx, updated, metav1.UpdateOptions{})
+	if apierrors.IsConflict(err) {
+		return nil, core.ErrBindingConflict
+	}
 	if err == nil {
 		return out, nil
 	}
-	return s.resource(binding.Namespace).Update(ctx, updated, metav1.UpdateOptions{})
+	// Only clients without the status subresource need the full-object fallback.
+	if !apierrors.IsNotFound(err) && !apierrors.IsMethodNotSupported(err) {
+		return nil, err
+	}
+	out, err = s.resource(binding.Namespace).Update(ctx, updated, metav1.UpdateOptions{})
+	if apierrors.IsConflict(err) {
+		return nil, core.ErrBindingConflict
+	}
+	return out, err
 }
 
 func (s *BindingStore) resource(namespace string) dynamic.ResourceInterface {
@@ -260,6 +277,7 @@ func bindingFromObject(object *unstructured.Unstructured) (core.Binding, error) 
 	}
 
 	return core.Binding{
+		ResourceVersion: object.GetResourceVersion(),
 		Namespace:       namespace,
 		Name:            name,
 		WorkloadUID:     workloadUID,
