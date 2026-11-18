@@ -171,3 +171,10 @@ The existing Lambda lifecycle callback can be configured independently with
 The chart creates an internal status Service on port 9091; supply a VM-reachable
 TLS proxy for that route. See the [container log guide](../../docs/container-logs.md)
 for credentials, host verification and Docker retention details.
+
+## Terminal remote cleanup
+
+Set `env.GPU_BURST_TERMINAL_CLEANUP_DELAY` to a duration such as `10m` to
+clean up remote resources after completion. The default `0` disables cleanup.
+Pods retain their result; remote logs and local disks are removed. See
+[terminal cleanup](../../docs/terminal-cleanup.md) for retention and recovery.
