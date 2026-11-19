@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 )
 
@@ -62,7 +63,10 @@ func (s RemoteStatusSnapshot) Errors() map[string]error {
 
 func (s RemoteStatusSnapshot) lookup(ctx context.Context, providerName string, provider ProviderAdapter, remoteID string) (RemoteResource, error) {
 	if err, failed := s.errors[providerName]; failed {
-		return RemoteResource{}, fmt.Errorf("list remote statuses for %q failed: %v", providerName, err)
+		if errors.Is(err, ErrRemoteNotFound) || ClassifyError(err) == ErrorClassRemoteNotFound {
+			return RemoteResource{}, fmt.Errorf("list remote statuses for %q failed: %v", providerName, err)
+		}
+		return RemoteResource{}, fmt.Errorf("list remote statuses for %q failed: %w", providerName, err)
 	}
 	if remotes, listed := s.listed[providerName]; listed {
 		if remote, found := remotes[remoteID]; found {

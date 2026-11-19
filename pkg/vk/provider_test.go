@@ -105,6 +105,7 @@ func TestCreatePodUsesConfiguredCandidatePlanner(t *testing.T) {
 
 func TestCreatePodFallbackSuccessDoesNotExposeStaleCapacityCondition(t *testing.T) {
 	ctx := context.Background()
+	recorder := record.NewFakeRecorder(10)
 	runpod := failingProvider{
 		err: &core.ProviderError{
 			Provider:  "runpod",
@@ -121,6 +122,7 @@ func TestCreatePodFallbackSuccessDoesNotExposeStaleCapacityCondition(t *testing.
 			"lambda": lambda,
 		},
 		FallbackOrder: []string{"lambda"},
+		EventRecorder: recorder,
 	})
 
 	if err := provider.CreatePod(ctx, gpuPod("fallback-clean", "uid-fallback-clean")); err != nil {
@@ -141,6 +143,29 @@ func TestCreatePodFallbackSuccessDoesNotExposeStaleCapacityCondition(t *testing.
 	if ready.Reason == string(core.ErrorClassCapacity) || strings.Contains(ready.Message, "no A40 capacity") {
 		t.Fatalf("PodReady = %#v, want no stale capacity error after fallback success", ready)
 	}
+	assertRecordedEvent(t, recorder, "Warning FallbackAttempt Trying provider lambda after provider runpod failed (Capacity)")
+	if err := provider.UpdatePod(ctx, cached); err != nil {
+		t.Fatal(err)
+	}
+	assertNoRecordedEvent(t, recorder)
+}
+
+func TestCreatePodAuthFailureDoesNotEmitFallbackAttempt(t *testing.T) {
+	recorder := record.NewFakeRecorder(10)
+	runpod := failingProvider{err: &core.ProviderError{Provider: "runpod", Class: core.ErrorClassAuth}}
+	lambda := core.NewFakeProvider("lambda")
+	provider := newTestProviderWithConfig(t, Config{
+		Adapter: runpod, FallbackOrder: []string{"lambda"}, EventRecorder: recorder,
+		FallbackAdapters: map[string]core.ProviderAdapter{"runpod": runpod, "lambda": lambda},
+	})
+	if err := provider.CreatePod(context.Background(), gpuPod("auth-failure", "uid-auth-failure")); err == nil {
+		t.Fatal("CreatePod() succeeded with invalid credentials")
+	}
+	if lambda.CreateCount() != 0 {
+		t.Fatal("fallback provider called after auth failure")
+	}
+	assertEventContains(t, recorder, "Warning", "Auth")
+	assertNoRecordedEvent(t, recorder)
 }
 
 func TestCreatePodRejectsUnsupportedSpecBeforeLaunchingRemoteWorkload(t *testing.T) {
@@ -224,7 +249,8 @@ func TestCreatePodCachesProviderFailureForDeletion(t *testing.T) {
 
 func TestDeletePodIsIdempotentAndRemovesCachedPod(t *testing.T) {
 	ctx := context.Background()
-	provider := newTestProvider(t, core.NewFakeProvider("runpod"))
+	recorder := record.NewFakeRecorder(10)
+	provider := newTestProviderWithConfig(t, Config{Adapter: core.NewFakeProvider("runpod"), EventRecorder: recorder})
 	pod := gpuPod("batch", "uid-batch")
 
 	if err := provider.CreatePod(ctx, pod); err != nil {
@@ -244,6 +270,7 @@ func TestDeletePodIsIdempotentAndRemovesCachedPod(t *testing.T) {
 	if !errdefs.IsNotFound(err) {
 		t.Fatalf("GetPod() error = %T %[1]v, want errdefs.NotFound", err)
 	}
+	assertNoRecordedEvent(t, recorder)
 }
 
 func TestGetPodsReturnsDeepCopies(t *testing.T) {
@@ -444,7 +471,8 @@ func TestGetPodStatusSurfacesRemoteDeletedCondition(t *testing.T) {
 
 	ctx := context.Background()
 	adapter := core.NewFakeProvider("runpod")
-	provider := newTestProvider(t, adapter)
+	recorder := record.NewFakeRecorder(10)
+	provider := newTestProviderWithConfig(t, Config{Adapter: adapter, EventRecorder: recorder})
 	pod := gpuPod("remote-deleted", "uid-remote-deleted")
 
 	if err := provider.CreatePod(ctx, pod); err != nil {
@@ -458,6 +486,15 @@ func TestGetPodStatusSurfacesRemoteDeletedCondition(t *testing.T) {
 		t.Fatalf("fake Delete() setup error = %v", err)
 	}
 
+	var synced sync.WaitGroup
+	for range 4 {
+		synced.Go(func() {
+			if _, err := provider.syncPodStatus(ctx, pod); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	synced.Wait()
 	status, err := provider.GetPodStatus(ctx, "default", "remote-deleted")
 	if err != nil {
 		t.Fatalf("GetPodStatus() error = %v", err)
@@ -474,6 +511,8 @@ func TestGetPodStatusSurfacesRemoteDeletedCondition(t *testing.T) {
 	if got := podReadyCondition(status.Conditions).Message; got == "" {
 		t.Fatal("PodReady message is empty, want provider error message")
 	}
+	assertRecordedEvent(t, recorder, "Warning RemoteNotFound "+podReadyCondition(status.Conditions).Message)
+	assertNoRecordedEvent(t, recorder)
 }
 
 func TestGetPodStatusReportsRemoteExitAsFailed(t *testing.T) {
@@ -821,6 +860,27 @@ func assertEventContains(t *testing.T, recorder *record.FakeRecorder, eventType 
 		}
 	default:
 		t.Fatalf("no event recorded, want %s %s", eventType, reason)
+	}
+}
+
+func assertRecordedEvent(t *testing.T, recorder *record.FakeRecorder, want string) {
+	t.Helper()
+	select {
+	case event := <-recorder.Events:
+		if event != want {
+			t.Fatalf("event = %q, want %q", event, want)
+		}
+	default:
+		t.Fatalf("no event recorded, want %q", want)
+	}
+}
+
+func assertNoRecordedEvent(t *testing.T, recorder *record.FakeRecorder) {
+	t.Helper()
+	select {
+	case event := <-recorder.Events:
+		t.Fatalf("unexpected event: %q", event)
+	default:
 	}
 }
 

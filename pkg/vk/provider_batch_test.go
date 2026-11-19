@@ -8,6 +8,7 @@ import (
 	"github.com/aibrix/neocloud-node/pkg/core"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 )
 
 type countingStatusLister struct {
@@ -127,7 +128,8 @@ func TestPeriodicStatusSyncConfirmsMissingIDBeforeMarkingRemoteDeleted(t *testin
 	ctx := context.Background()
 	store := core.NewMemoryBindingStore()
 	adapter := &countingStatusLister{FakeProvider: core.NewFakeProvider("runpod")}
-	provider := newTestProviderWithConfig(t, Config{Store: store, Adapter: adapter})
+	recorder := record.NewFakeRecorder(10)
+	provider := newTestProviderWithConfig(t, Config{Store: store, Adapter: adapter, EventRecorder: recorder})
 	if err := provider.CreatePod(ctx, gpuPod("missing", "uid-missing")); err != nil {
 		t.Fatal(err)
 	}
@@ -147,6 +149,42 @@ func TestPeriodicStatusSyncConfirmsMissingIDBeforeMarkingRemoteDeleted(t *testin
 	if binding.Phase != core.BindingFailed || core.FindCondition(binding.Conditions, core.ConditionRemoteDeleted) == nil {
 		t.Fatalf("binding = %#v, want failed with RemoteDeleted condition", binding)
 	}
+	assertEventContains(t, recorder, "Warning", "RemoteNotFound")
+	provider.syncCachedPods(ctx)
+	assertNoRecordedEvent(t, recorder)
+}
+
+func TestPeriodicStatusSyncReportsProviderFailureOnceUntilRecovery(t *testing.T) {
+	ctx := context.Background()
+	store := core.NewMemoryBindingStore()
+	adapter := &countingStatusLister{FakeProvider: core.NewFakeProvider("runpod")}
+	recorder := record.NewFakeRecorder(10)
+	provider := newTestProviderWithConfig(t, Config{Store: store, Adapter: adapter, EventRecorder: recorder})
+	if err := provider.CreatePod(ctx, gpuPod("status-failure", "uid-status-failure")); err != nil {
+		t.Fatal(err)
+	}
+	statusError := &core.ProviderError{Provider: "runpod", Class: core.ErrorClassRateLimited, Message: "raw provider response"}
+	adapter.listErr = statusError
+	for range 2 {
+		provider.syncCachedPods(ctx)
+	}
+	assertRecordedEvent(t, recorder, "Warning ProviderStatusSyncFailed Could not refresh status from provider runpod (RateLimited)")
+	assertNoRecordedEvent(t, recorder)
+	binding, err := store.GetByWorkloadUID(ctx, "default", "uid-status-failure")
+	if err != nil || binding.Phase != core.BindingRunning || core.FindCondition(binding.Conditions, core.ConditionRemoteDeleted) != nil {
+		t.Fatalf("binding = %#v, err = %v; want running with no remote deletion", binding, err)
+	}
+	adapter.listErr = nil
+	provider.syncCachedPods(ctx)
+	assertNoRecordedEvent(t, recorder)
+	adapter.listErr = core.ErrRemoteNotFound
+	provider.syncCachedPods(ctx)
+	assertRecordedEvent(t, recorder, "Warning ProviderStatusSyncFailed Could not refresh status from provider runpod (Unknown)")
+	binding, err = store.GetByWorkloadUID(ctx, "default", "uid-status-failure")
+	if err != nil || binding.Phase != core.BindingRunning || core.FindCondition(binding.Conditions, core.ConditionRemoteDeleted) != nil {
+		t.Fatalf("binding = %#v, err = %v; list-level not-found must not mark it deleted", binding, err)
+	}
+	assertNoRecordedEvent(t, recorder)
 }
 
 func TestPeriodicStatusSyncListsOnlyCachedPodsBySelectedProvider(t *testing.T) {
