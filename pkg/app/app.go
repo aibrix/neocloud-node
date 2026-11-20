@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"strconv"
@@ -96,6 +97,10 @@ type Options struct {
 	RequireMaxPrice bool
 	MaxGPUCount     int
 	MaxPorts        int
+
+	// FakeHourlyCost is the hourly price the fake provider reports, so cost
+	// accounting can be developed without a real provider or cloud spend.
+	FakeHourlyCost float64
 
 	AdvertiseGPUCount    int
 	AdvertisePodCapacity int
@@ -214,6 +219,7 @@ func ParseOptions(args []string, getenv func(string) string) (Options, error) {
 	fs.BoolVar(&options.RequireMaxPrice, "require-max-price", options.RequireMaxPrice, "reject pods without max price annotation")
 	fs.IntVar(&options.MaxGPUCount, "max-gpu-count", intEnv(getenv, "GPU_BURST_MAX_GPU_COUNT", 0), "maximum GPUs per pod; 0 disables the guard")
 	fs.IntVar(&options.MaxPorts, "max-ports", intEnv(getenv, "GPU_BURST_MAX_PORTS", 0), "maximum exposed container ports per pod; 0 disables the guard")
+	fs.Float64Var(&options.FakeHourlyCost, "fake-hourly-cost", 0, "hourly price the fake provider reports for every remote; 0 reports no cost")
 	fs.IntVar(&options.AdvertiseGPUCount, "advertise-gpu-count", options.AdvertiseGPUCount, "virtual node GPU capacity advertised to the scheduler")
 	fs.IntVar(&options.AdvertisePodCapacity, "advertise-pod-capacity", options.AdvertisePodCapacity, "virtual node pod capacity advertised to the scheduler")
 	fs.StringVar(&options.AdvertiseCPU, "advertise-cpu", options.AdvertiseCPU, "virtual node CPU capacity advertised to the scheduler")
@@ -687,7 +693,7 @@ func providerAdapterFor(options Options, provider string) (core.ProviderAdapter,
 	}
 	switch provider {
 	case ProviderFake:
-		return core.NewFakeProvider(ProviderFake), nil
+		return core.NewFakeProvider(ProviderFake).WithHourlyCost(options.FakeHourlyCost), nil
 	case ProviderRunPod:
 		return runpod.NewClient(runpod.Config{
 			LogSnapshotIdle: options.LogSnapshotIdle,
@@ -944,6 +950,9 @@ func validateOptions(options Options) error {
 	}
 	if options.OrphanSweeperInterval < 0 {
 		return errors.New("orphan sweeper interval cannot be negative")
+	}
+	if math.IsNaN(options.FakeHourlyCost) || math.IsInf(options.FakeHourlyCost, 0) || options.FakeHourlyCost < 0 {
+		return errors.New("fake hourly cost must be finite and non-negative")
 	}
 	if options.PlacementOfferTTL < 0 {
 		return errors.New("placement offer ttl cannot be negative")

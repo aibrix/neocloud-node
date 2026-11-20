@@ -502,6 +502,43 @@ func TestParseOptionsValidatesVastSearchConfiguration(t *testing.T) {
 	}
 }
 
+func TestParseOptionsValidatesFakeHourlyCost(t *testing.T) {
+	for _, args := range [][]string{
+		{"--provider=fake", "--fake-hourly-cost=-1"},
+		{"--provider=fake", "--fake-hourly-cost=NaN"},
+	} {
+		if _, err := ParseOptions(args, emptyEnv); err == nil {
+			t.Fatalf("ParseOptions(%v) error = nil", args)
+		}
+	}
+}
+
+func TestFakeProviderAdapterUsesConfiguredHourlyCost(t *testing.T) {
+	options, err := ParseOptions([]string{
+		"--provider=fake",
+		"--binding-store=memory",
+		"--fake-hourly-cost=0.75",
+	}, emptyEnv)
+	if err != nil {
+		t.Fatalf("ParseOptions() error = %v", err)
+	}
+	adapter, err := newProviderAdapter(options)
+	if err != nil {
+		t.Fatalf("newProviderAdapter() error = %v", err)
+	}
+	remote, err := adapter.Create(context.Background(), "default/pod-123", core.WorkloadRequest{
+		Image:    "example.com/train:latest",
+		GPUCount: 1,
+		Provider: "fake",
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if remote.HourlyCost != 0.75 || remote.CostSource != "fake.hourlyCost" {
+		t.Fatalf("remote cost = %v/%q, want 0.75/fake.hourlyCost", remote.HourlyCost, remote.CostSource)
+	}
+}
+
 func TestParseOptionsReadsLambdaOptions(t *testing.T) {
 	env := mapEnv(map[string]string{
 		"LAMBDA_API_KEY":                   "lambda-key",

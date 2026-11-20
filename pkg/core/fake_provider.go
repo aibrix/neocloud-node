@@ -67,6 +67,8 @@ type FakeProvider struct {
 	createCount int
 	stopCount   int
 	stopErr     error
+	hourlyCost  float64
+	costSource  string
 	byKey       map[string]RemoteResource
 	byID        map[string]RemoteResource
 }
@@ -77,6 +79,19 @@ func NewFakeProvider(provider string) *FakeProvider {
 		byKey:    make(map[string]RemoteResource),
 		byID:     make(map[string]RemoteResource),
 	}
+}
+
+// WithHourlyCost makes every fake remote report an hourly price, so cost
+// accounting can be exercised without a real provider or cloud spend. A
+// non-positive value keeps the default behavior of reporting no cost.
+func (p *FakeProvider) WithHourlyCost(hourly float64) *FakeProvider {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if hourly > 0 {
+		p.hourlyCost = hourly
+		p.costSource = "fake.hourlyCost"
+	}
+	return p
 }
 
 func (p *FakeProvider) Create(ctx context.Context, idempotencyKey string, request WorkloadRequest) (RemoteResource, error) {
@@ -100,6 +115,8 @@ func (p *FakeProvider) Create(ctx context.Context, idempotencyKey string, reques
 		Provider:       p.provider,
 		Phase:          RemoteRunning,
 		Request:        request,
+		HourlyCost:     p.hourlyCost,
+		CostSource:     p.costSource,
 	}
 	p.byKey[idempotencyKey] = remote
 	p.byID[remote.ID] = remote

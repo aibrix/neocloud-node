@@ -33,6 +33,50 @@ func TestFakeProviderCreateIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestFakeProviderReportsConfiguredHourlyCost(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	provider := NewFakeProvider("fake").WithHourlyCost(1.25)
+	remote, err := provider.Create(ctx, "default/pod-123", WorkloadRequest{
+		Image:    "example.com/train:latest",
+		GPUCount: 1,
+		Provider: "fake",
+	})
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if remote.HourlyCost != 1.25 {
+		t.Fatalf("remote hourly cost = %v, want 1.25", remote.HourlyCost)
+	}
+	if remote.CostSource != "fake.hourlyCost" {
+		t.Fatalf("remote cost source = %q, want fake.hourlyCost", remote.CostSource)
+	}
+	got, err := provider.Get(ctx, remote.ID)
+	if err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if got.HourlyCost != 1.25 {
+		t.Fatalf("Get hourly cost = %v, want 1.25", got.HourlyCost)
+	}
+}
+
+func TestFakeProviderOmitsCostByDefault(t *testing.T) {
+	t.Parallel()
+
+	remote, err := NewFakeProvider("fake").Create(context.Background(), "default/pod-123", WorkloadRequest{
+		Image:    "example.com/train:latest",
+		GPUCount: 1,
+		Provider: "fake",
+	})
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if remote.HourlyCost != 0 || remote.CostSource != "" {
+		t.Fatalf("remote cost = %v/%q, want zero cost", remote.HourlyCost, remote.CostSource)
+	}
+}
+
 func TestFakeProviderGetAndDelete(t *testing.T) {
 	t.Parallel()
 
