@@ -67,9 +67,10 @@ type Provider struct {
 	podClient   corev1client.PodsGetter
 	readiness   *readinessManager
 
-	mu       sync.RWMutex
-	pods     map[string]*corev1.Pod
-	notifier func(*corev1.Pod)
+	mu           sync.RWMutex
+	pods         map[string]*corev1.Pod
+	statusEvents map[string]statusEvent
+	notifier     func(*corev1.Pod)
 }
 
 var _ nodeutil.Provider = (*Provider)(nil)
@@ -104,14 +105,15 @@ func NewProvider(config Config) (*Provider, error) {
 	}
 
 	provider := &Provider{
-		logReaders:  config.LogReaders,
-		transformer: config.Transformer,
-		lifecycle:   core.NewLifecycleService(config.Store, config.Adapter, options...),
-		store:       config.Store,
-		nodeName:    config.NodeName,
-		recorder:    config.EventRecorder,
-		podClient:   config.PodClient,
-		pods:        make(map[string]*corev1.Pod),
+		logReaders:   config.LogReaders,
+		transformer:  config.Transformer,
+		lifecycle:    core.NewLifecycleService(config.Store, config.Adapter, options...),
+		store:        config.Store,
+		nodeName:     config.NodeName,
+		recorder:     config.EventRecorder,
+		podClient:    config.PodClient,
+		pods:         make(map[string]*corev1.Pod),
+		statusEvents: make(map[string]statusEvent),
 	}
 	provider.readiness = newReadinessManager(config.StatusSyncContext, provider.onReadinessChange)
 	if config.StatusSyncInterval > 0 {
@@ -168,6 +170,7 @@ func (p *Provider) DeletePod(ctx context.Context, pod *corev1.Pod) error {
 
 	p.mu.Lock()
 	delete(p.pods, key)
+	delete(p.statusEvents, key)
 	p.mu.Unlock()
 	p.readiness.stop(key)
 
@@ -362,7 +365,10 @@ func (p *Provider) upsertPod(ctx context.Context, pod *corev1.Pod) error {
 		return normalizeProviderError(err)
 	}
 
-	binding, err = p.lifecycle.EnsureCreated(ctx, binding)
+	binding, err = p.lifecycle.EnsureCreatedWithFallbackObserver(ctx, binding, func(from, to core.CreateCandidate, class core.ErrorClass) {
+		p.recordPodEvent(pod, corev1.EventTypeWarning, "FallbackAttempt",
+			fmt.Sprintf("Trying %s after %s failed (%s)", describeCreateCandidate(to), describeCreateCandidate(from), class))
+	})
 	if err != nil {
 		cached := podWithBindingStatus(pod, binding)
 		p.mu.Lock()
@@ -415,6 +421,9 @@ func (p *Provider) syncPodStatusWith(ctx context.Context, pod *corev1.Pod, syncS
 		return pod.DeepCopy(), nil
 	}
 	if err != nil && !errors.Is(err, core.ErrRemoteNotFound) {
+		if ctx.Err() == nil && binding.RemoteID != "" && !binding.Deleting {
+			p.recordStatusSyncFailure(pod, binding, err)
+		}
 		return nil, normalizeProviderError(err)
 	}
 
@@ -426,6 +435,9 @@ func (p *Provider) syncPodStatusWith(ctx context.Context, pod *corev1.Pod, syncS
 		p.pods[key] = synced.DeepCopy()
 	}
 	p.mu.Unlock()
+	if !binding.Deleting {
+		p.recordStatusSyncResult(synced, binding)
+	}
 
 	if restarts := restartCount(synced.Status) - restartCount(pod.Status); restarts > 0 && len(pod.Status.ContainerStatuses) > 0 {
 		p.recordPodEvent(synced, corev1.EventTypeWarning, "ContainerRestarted",

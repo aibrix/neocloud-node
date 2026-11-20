@@ -145,6 +145,20 @@ validation, not admission validation: `kubectl apply` can succeed. Inspect
 `kubectl describe pod` and remove the field from the workload template. For a
 Deployment, update the template to stop repeated replacement of failed Pods.
 
+## Provider Events
+
+Inspect `kubectl describe pod` for provider warnings:
+
+| Reason | Meaning |
+| --- | --- |
+| `FallbackAttempt` | The controller tries another placement candidate after a create failure. The Pod can still become Ready. |
+| `ProviderStatusSyncFailed` | The provider status request failed. The controller keeps the last known Pod status and reports the error class without the provider response body. |
+| `RemoteNotFound` | The provider confirmed the instance is missing. The Pod fails and its `CloudPodBinding` records `RemoteDeleted=True`. |
+
+The controller suppresses repeated status warnings for the same Pod and error
+class until a successful refresh or a change in error class. A confirmed
+missing instance is reported once per Pod UID during the controller run.
+
 ## Environment Sources
 
 The controller reads Secrets and ConfigMaps referenced by `env[*].valueFrom`
