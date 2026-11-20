@@ -24,6 +24,10 @@ runnerCallback:
   secretKey: sharedSecret
   # URLs reachable from the remote Lambda VM; terminate TLS in your own ingress.
   url: ''
+# References only; Secret contents are read by the controller without a restart.
+credentialPolling:
+  interval: 15s
+  requestTimeout: 5s
 credentials:
   runpod:
     secretName: ''

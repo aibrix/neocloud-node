@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/virtual-kubelet/virtual-kubelet/node"
 	"github.com/virtual-kubelet/virtual-kubelet/node/nodeutil"
 	corev1 "k8s.io/api/core/v1"
 	kresource "k8s.io/apimachinery/pkg/api/resource"
@@ -56,6 +57,10 @@ const (
 )
 
 type Options struct {
+	ProviderSecretNamespace  string
+	ProviderSecrets          map[string]providerSecretRef
+	SecretPollInterval       time.Duration
+	SecretRequestTimeout     time.Duration
 	PodIP                    string
 	KubeletAuthMode          string
 	LambdaSSHUser            string
@@ -119,6 +124,10 @@ func ParseOptions(args []string, getenv func(string) string) (Options, error) {
 	}
 
 	options := Options{
+		ProviderSecretNamespace: envOr(getenv, "GPU_BURST_PROVIDER_SECRET_NAMESPACE", ""),
+		SecretPollInterval:      durationEnv(getenv, "GPU_BURST_PROVIDER_SECRET_POLL_INTERVAL", 15*time.Second),
+		SecretRequestTimeout:    durationEnv(getenv, "GPU_BURST_PROVIDER_SECRET_REQUEST_TIMEOUT", 5*time.Second),
+		ProviderSecrets:         make(map[string]providerSecretRef),
 		PodIP:                   envOr(getenv, "POD_IP", ""),
 		KubeletAuthMode:         envOr(getenv, "GPU_BURST_KUBELET_AUTH_MODE", ""),
 		LambdaSSHUser:           envOr(getenv, "GPU_BURST_LAMBDA_SSH_USER", "ubuntu"),
@@ -176,8 +185,20 @@ func ParseOptions(args []string, getenv func(string) string) (Options, error) {
 		PlacementSignalCooldown:  durationEnv(getenv, "GPU_BURST_PLACEMENT_SIGNAL_COOLDOWN", burstresource.DefaultFailureSignalCooldown),
 	}
 
+	for _, provider := range []string{ProviderRunPod, ProviderLambda, ProviderVast} {
+		options.ProviderSecrets[provider] = providerSecretRef{Name: envOr(getenv, strings.ToUpper(provider)+"_API_KEY_SECRET_NAME", ""), Key: envOr(getenv, strings.ToUpper(provider)+"_API_KEY_SECRET_KEY", "apiKey")}
+	}
 	fs := flag.NewFlagSet("neocloud-node", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
+	fs.StringVar(&options.ProviderSecretNamespace, "provider-secret-namespace", options.ProviderSecretNamespace, "namespace containing user-managed provider Secrets")
+	fs.DurationVar(&options.SecretPollInterval, "provider-secret-poll-interval", options.SecretPollInterval, "interval between reads of configured provider Secrets")
+	fs.DurationVar(&options.SecretRequestTimeout, "provider-secret-request-timeout", options.SecretRequestTimeout, "timeout per provider Secret GET")
+	refNames, refKeys := make(map[string]*string), make(map[string]*string)
+	for _, provider := range []string{ProviderRunPod, ProviderLambda, ProviderVast} {
+		ref := options.ProviderSecrets[provider]
+		refNames[provider] = fs.String(provider+"-api-key-secret-name", ref.Name, "existing Secret holding the provider API key")
+		refKeys[provider] = fs.String(provider+"-api-key-secret-key", ref.Key, "provider API key entry in the Secret")
+	}
 	fs.StringVar(&options.PodIP, "pod-ip", options.PodIP, "controller Pod IP advertised for the kubelet API")
 	fs.StringVar(&options.KubeletAuthMode, "kubelet-auth-mode", options.KubeletAuthMode, "explicit none for isolated development only")
 	fs.StringVar(&options.LambdaSSHUser, "lambda-ssh-user", options.LambdaSSHUser, "SSH user for Lambda Docker logs")
@@ -185,7 +206,7 @@ func ParseOptions(args []string, getenv func(string) string) (Options, error) {
 	fs.StringVar(&options.LambdaSSHKnownHostsFile, "lambda-ssh-known-hosts-file", options.LambdaSSHKnownHostsFile, "trusted SSH known_hosts file for Lambda Docker logs")
 	fs.DurationVar(&options.LogSnapshotIdle, "log-snapshot-idle", options.LogSnapshotIdle, "RunPod one-shot replay idle gap")
 	fs.DurationVar(&options.LogSnapshotMax, "log-snapshot-max", options.LogSnapshotMax, "RunPod one-shot replay maximum duration")
-	fs.BoolVar(&options.AllowMissingCredentials, "allow-missing-credentials", options.AllowMissingCredentials, "start without provider credentials; disable GPU capacity until credentials are configured and the controller restarts")
+	fs.BoolVar(&options.AllowMissingCredentials, "allow-missing-credentials", options.AllowMissingCredentials, "start without provider credentials; disable GPU capacity while credentials are unavailable; Secret references refresh automatically")
 	fs.StringVar(&options.NodeName, "node-name", options.NodeName, "virtual node name")
 	fs.StringVar(&options.Provider, "provider", options.Provider, "provider adapter: fake, runpod, lambda or vast")
 	fs.StringVar(&options.FallbackProviders, "fallback-providers", options.FallbackProviders, "comma-separated provider adapters to try after the primary provider fails with a fallback-safe error")
@@ -229,6 +250,9 @@ func ParseOptions(args []string, getenv func(string) string) (Options, error) {
 	if err := fs.Parse(args); err != nil {
 		return Options{}, err
 	}
+	for _, provider := range []string{ProviderRunPod, ProviderLambda, ProviderVast} {
+		options.ProviderSecrets[provider] = providerSecretRef{Name: strings.TrimSpace(*refNames[provider]), Key: strings.TrimSpace(*refKeys[provider])}
+	}
 	options.Provider = strings.ToLower(strings.TrimSpace(options.Provider))
 	options.FallbackProviders = normalizeCSV(options.FallbackProviders)
 	options.BindingStore = strings.ToLower(strings.TrimSpace(options.BindingStore))
@@ -268,18 +292,32 @@ func NewNode(ctx context.Context, options Options, kubeClient kubernetes.Interfa
 	if err != nil {
 		return nil, err
 	}
-	adapter, err := newProviderAdapter(options)
+	credentials := newSecretCredentials(options, kubeClient)
+	credentials.refresh(ctx)
+	adapter, err := credentials.adapter(options.Provider)
 	if err != nil {
 		return nil, err
 	}
-	fallbackAdapters, fallbackOrder, err := newFallbackProviderAdapters(options)
-	if err != nil {
-		return nil, err
+	fallbackAdapters := make(map[string]core.ProviderAdapter)
+	fallbackOrder := commaSeparated(options.FallbackProviders)
+	for _, name := range fallbackOrder {
+		if name == options.Provider {
+			continue
+		}
+		fallback, err := credentials.adapter(name)
+		if err != nil {
+			return nil, err
+		}
+		fallbackAdapters[name] = fallback
 	}
 	placementSetup, err := newPlacementPlannerSetup(options, fallbackOrder,
 		placementProviderAdapters(options.Provider, adapter, fallbackAdapters))
 	if err != nil {
 		return nil, err
+	}
+	if planner, ok := placementSetup.Planner.(burstresource.LifecycleCandidatePlanner); ok {
+		planner.Catalog = credentialCatalog{catalog: planner.Catalog, credentials: credentials}
+		placementSetup.Planner = planner
 	}
 	startCatalogRefresher(ctx, options, placementSetup.Refresher)
 	if err := startOrphanSweeper(ctx, store, adapter, options); err != nil {
@@ -332,7 +370,30 @@ func NewNode(ctx context.Context, options Options, kubeClient kubernetes.Interfa
 		)
 	}
 
-	return nodeutil.NewNode(options.NodeName, vk.NewProviderFunc(providerConfig), nodeOptions...)
+	factory := vk.NewProviderFunc(providerConfig)
+	if len(credentials.providers) == 0 {
+		return nodeutil.NewNode(options.NodeName, factory, nodeOptions...)
+	}
+	var credentialNodeProvider *credentialNode
+	dynamicFactory := func(config nodeutil.ProviderConfig) (nodeutil.Provider, node.NodeProvider, error) {
+		provider, _, err := factory(config)
+		if err != nil {
+			return nil, nil, err
+		}
+		credentialNodeProvider = newCredentialNode(config.Node, func() bool {
+			if source := credentials.providers[options.Provider]; source != nil {
+				return source.available()
+			}
+			return !missingCredential(options, options.Provider)
+		})
+		return provider, credentialNodeProvider, nil
+	}
+	result, err := nodeutil.NewNode(options.NodeName, dynamicFactory, nodeOptions...)
+	if err != nil {
+		return nil, err
+	}
+	go credentials.run(ctx, credentialNodeProvider.publish)
+	return result, nil
 }
 
 func clientsFromOptions(options Options) (kubernetes.Interface, dynamic.Interface, error) {
@@ -897,6 +958,14 @@ func logOrphanSweepReport(report core.OrphanSweepReport, dryRun bool, err error)
 }
 
 func validateOptions(options Options) error {
+	if options.SecretPollInterval <= 0 || options.SecretRequestTimeout <= 0 {
+		return errors.New("provider Secret poll interval and request timeout must be positive")
+	}
+	for _, ref := range options.ProviderSecrets {
+		if ref.Name != "" && (strings.TrimSpace(options.ProviderSecretNamespace) == "" || ref.Key == "") {
+			return errors.New("provider Secret references require a namespace and nonempty key")
+		}
+	}
 	if strings.TrimSpace(options.NodeName) == "" {
 		return errors.New("node name is required")
 	}
@@ -906,15 +975,15 @@ func validateOptions(options Options) error {
 	switch options.Provider {
 	case ProviderFake:
 	case ProviderRunPod:
-		if !options.AllowMissingCredentials && strings.TrimSpace(options.RunPodAPIKey) == "" {
+		if !options.AllowMissingCredentials && missingCredential(options, "runpod") {
 			return errors.New("runpod provider requires --runpod-api-key or RUNPOD_API_KEY")
 		}
 	case ProviderLambda:
-		if !options.AllowMissingCredentials && strings.TrimSpace(options.LambdaAPIKey) == "" {
+		if !options.AllowMissingCredentials && missingCredential(options, "lambda") {
 			return errors.New("lambda provider requires --lambda-api-key or LAMBDA_API_KEY")
 		}
 	case ProviderVast:
-		if !options.AllowMissingCredentials && strings.TrimSpace(options.VastAPIKey) == "" {
+		if !options.AllowMissingCredentials && missingCredential(options, "vast") {
 			return errors.New("vast provider requires --vast-api-key or VAST_API_KEY")
 		}
 	default:
@@ -971,17 +1040,17 @@ func validateProviderConfigured(options Options, provider string) error {
 	case ProviderFake:
 		return nil
 	case ProviderRunPod:
-		if !options.AllowMissingCredentials && strings.TrimSpace(options.RunPodAPIKey) == "" {
+		if !options.AllowMissingCredentials && missingCredential(options, "runpod") {
 			return errors.New("runpod fallback provider requires --runpod-api-key or RUNPOD_API_KEY")
 		}
 		return nil
 	case ProviderLambda:
-		if !options.AllowMissingCredentials && strings.TrimSpace(options.LambdaAPIKey) == "" {
+		if !options.AllowMissingCredentials && missingCredential(options, "lambda") {
 			return errors.New("lambda fallback provider requires --lambda-api-key or LAMBDA_API_KEY")
 		}
 		return nil
 	case ProviderVast:
-		if !options.AllowMissingCredentials && strings.TrimSpace(options.VastAPIKey) == "" {
+		if !options.AllowMissingCredentials && missingCredential(options, "vast") {
 			return errors.New("vast fallback provider requires --vast-api-key or VAST_API_KEY")
 		}
 		return nil

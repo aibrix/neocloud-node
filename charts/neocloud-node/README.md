@@ -57,27 +57,37 @@ credentials:
     key: apiKey
 ```
 
-All provider Secret references are optional. With the updated controller image,
-`GPU_BURST_ALLOW_MISSING_CREDENTIALS=true` (the chart default) keeps the controller
-running when a Secret, its key, or its non-empty value is missing. The unconfigured
-primary provider advertises zero GPUs and logs an actionable message. It does not
-send unauthenticated requests or silently switch to the fake provider. A workload
-explicitly bound to the node receives a `MissingCredentials` authentication error.
-Missing credentials never count as proof that a remote allocation was deleted.
+Configured Secret references are read from the release namespace. Missing Secrets,
+missing keys, empty values and API read failures disable provider operations and
+set the primary provider's advertised GPUs to zero without stopping the controller.
+A later successful read restores availability. Empty references are skipped;
+shared Secret names are read once per cycle, independently in each controller.
 
-Create/update the Secret independently, then restart the controller to reload its
-environment variables:
-
-```bash
-kubectl -n aibrix-system rollout restart deployment/neocloud-neocloud-node
-kubectl -n aibrix-system rollout status deployment/neocloud-neocloud-node
+```yaml
+credentialPolling:
+  interval: 15s
+  requestTimeout: 5s
 ```
 
-Secret contents are not watched or hot-reloaded. An optional missing Secret does
-not populate an already-running container when it is later created. Set
-`env.GPU_BURST_ALLOW_MISSING_CREDENTIALS=false` for strict startup validation; the
-standalone CLI remains strict by default. Images from release 0.1.0 do not support
-the tolerant-startup option; use the updated image with this chart.
+Healthy-API refresh takes up to one interval plus that cycle's sequential GETs.
+Each operation pins its credentials, including the adapter's existing recovery
+requests; rotation affects later operations. Catalog offers are filtered while
+unavailable and refresh using the existing placement refresh configuration.
+
+Only same-account key rotation is supported. Before changing accounts, delete
+remote workloads and verify cleanup using the old account. The controller does
+not detect account changes or reinterpret provider 404 responses. Missing
+credentials and authentication failures never count as successful deletion.
+
+Use a published controller image containing polling; older images do not support
+these references. Follow merge → main CI → commit image → Helm upgrade. Static
+API key flags/env remain supported when no Secret reference is configured.
+For standalone use, set `--provider-secret-namespace`,
+`--runpod-api-key-secret-name` and `--runpod-api-key-secret-key` (also `lambda` /
+`vast`), plus optional `--provider-secret-poll-interval` and
+`--provider-secret-request-timeout`. Explicit references take precedence over
+static keys. The polling path needs only named Secret GETs; existing VK RBAC
+already grants broader Secret reads and is unchanged.
 
 Maintain one release (`neocloud`) in `aibrix-system` and upgrade it in place.
 Delete test workloads and verify remote GPU cleanup after each run; keep this
