@@ -78,6 +78,10 @@ func WithCreateCandidatePlanner(planner CreateCandidatePlanner) LifecycleOption 
 }
 
 func (s *LifecycleService) EnsureCreated(ctx context.Context, desired Binding) (Binding, error) {
+	return s.EnsureCreatedWithFallbackObserver(ctx, desired, nil)
+}
+
+func (s *LifecycleService) EnsureCreatedWithFallbackObserver(ctx context.Context, desired Binding, onFallback func(from, to CreateCandidate, class ErrorClass)) (Binding, error) {
 	binding, _, err := s.store.CreateOrGet(ctx, desired)
 	if err != nil {
 		return Binding{}, err
@@ -100,7 +104,7 @@ func (s *LifecycleService) EnsureCreated(ctx context.Context, desired Binding) (
 		}
 	}
 
-	remote, candidate, err := s.createWithFallback(ctx, &binding)
+	remote, candidate, err := s.createWithFallback(ctx, &binding, onFallback)
 	if err != nil {
 		_ = s.store.Update(ctx, binding)
 		return binding, err
@@ -125,7 +129,7 @@ func (s *LifecycleService) EnsureCreated(ctx context.Context, desired Binding) (
 	return binding, nil
 }
 
-func (s *LifecycleService) createWithFallback(ctx context.Context, binding *Binding) (RemoteResource, CreateCandidate, error) {
+func (s *LifecycleService) createWithFallback(ctx context.Context, binding *Binding, onFallback func(from, to CreateCandidate, class ErrorClass)) (RemoteResource, CreateCandidate, error) {
 	var lastErr error
 	candidates, err := s.createCandidates(ctx, *binding)
 	if err != nil {
@@ -150,6 +154,9 @@ func (s *LifecycleService) createWithFallback(ctx context.Context, binding *Bind
 			}
 			recordProviderFailure(binding, candidate.Provider, candidate.Request.RegionHint, "CreateFailed", lastErr)
 			return RemoteResource{}, candidate, lastErr
+		}
+		if index > 0 && onFallback != nil {
+			onFallback(candidates[index-1], candidate, ClassifyError(lastErr))
 		}
 		remote, err := adapter.Create(ctx, idempotencyKey(*binding), requestWithEnv(candidate.Request, env))
 		if err == nil {
@@ -223,7 +230,9 @@ func (s *LifecycleService) syncStatus(ctx context.Context, namespace string, wor
 				Message: "remote resource is missing; it may have been deleted outside the controller",
 			})
 			clearStoppedEndpoints(&binding)
-			_ = s.store.Update(ctx, binding)
+			if err := s.store.Update(ctx, binding); err != nil {
+				return Binding{}, err
+			}
 		}
 		return binding, err
 	}
