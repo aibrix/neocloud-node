@@ -8,10 +8,12 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic/fake"
+	ktesting "k8s.io/client-go/testing"
 
 	"github.com/aibrix/neocloud-node/pkg/core"
 )
@@ -74,7 +76,7 @@ func TestCreateOrGetReturnsExistingBindingWithoutOverwritingRemoteState(t *testi
 	binding.RemoteID = "remote-1"
 	binding.Phase = core.BindingRunning
 	binding.Placement.Provider = "runpod"
-	if err := store.Update(ctx, binding); err != nil {
+	if _, err := store.Update(ctx, binding); err != nil {
 		t.Fatalf("Update() setup error = %v", err)
 	}
 
@@ -131,8 +133,12 @@ func TestUpdatePersistsRemoteStatus(t *testing.T) {
 	binding.Endpoints = []core.Endpoint{
 		{ContainerPort: 8000, Protocol: "TCP", Host: "203.0.113.10", Port: 40123},
 	}
-	if err := store.Update(ctx, binding); err != nil {
+	updated, err := store.Update(ctx, binding)
+	if err != nil {
 		t.Fatalf("Update() error = %v", err)
+	}
+	if updated.RemoteID != "rp-123" || updated.Phase != core.BindingRunning {
+		t.Fatalf("Update() result = %#v, want persisted remote state", updated)
 	}
 
 	got, err := store.GetByWorkloadUID(ctx, binding.Namespace, binding.WorkloadUID)
@@ -275,4 +281,71 @@ func hasString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestBindingUpdateRejectsStaleResourceVersion(t *testing.T) {
+	ctx := context.Background()
+	store := newTestBindingStore()
+	binding, _, err := store.CreateOrGet(ctx, testBinding())
+	if err != nil {
+		t.Fatal(err)
+	}
+	resource := store.client.Resource(CloudPodBindingsGVR).Namespace(binding.Namespace)
+	object, err := resource.Get(ctx, BindingName(binding.WorkloadUID), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	object.SetResourceVersion("2")
+	if _, err := resource.Update(ctx, object, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Update(ctx, binding); !errors.Is(err, core.ErrBindingConflict) {
+		t.Fatalf("stale Update = %v", err)
+	}
+	current, err := store.GetByWorkloadUID(ctx, binding.Namespace, binding.WorkloadUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.ResourceVersion != "2" {
+		t.Fatalf("resource version = %s", current.ResourceVersion)
+	}
+	finished := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	current.Phase = core.BindingSucceeded
+	core.SetCondition(&current, core.BindingCondition{Type: core.ConditionTerminal, Status: core.ConditionTrue, LastTransitionTime: finished})
+	core.SetCondition(&current, core.BindingCondition{Type: core.ConditionRemoteCleanedUp, Status: core.ConditionFalse, Reason: "DeletionRequested", LastTransitionTime: finished.Add(time.Minute)})
+	if _, err := store.Update(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	// Reopen the store to verify these conditions survive controller restarts.
+	restored, err := NewBindingStore(store.client).GetByWorkloadUID(ctx, binding.Namespace, binding.WorkloadUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(current.Conditions, restored.Conditions) {
+		t.Fatalf("conditions did not round trip: %+v", restored.Conditions)
+	}
+}
+
+func TestBindingUpdateConflictDoesNotFallBackToFullUpdate(t *testing.T) {
+	ctx := context.Background()
+	store := newTestBindingStore()
+	binding, _, err := store.CreateOrGet(ctx, testBinding())
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := store.client.(*fake.FakeDynamicClient)
+	updates := 0
+	client.PrependReactor("update", "cloudpodbindings", func(action ktesting.Action) (bool, runtime.Object, error) {
+		updates++
+		if action.GetSubresource() != "status" {
+			t.Error("conflict retried as full-object update")
+		}
+		return true, nil, apierrors.NewConflict(CloudPodBindingsGVR.GroupResource(), binding.Name, errors.New("concurrent write"))
+	})
+	if _, err := store.Update(ctx, binding); !errors.Is(err, core.ErrBindingConflict) {
+		t.Fatalf("Update = %v", err)
+	}
+	if updates != 1 {
+		t.Fatalf("update attempts = %d", updates)
+	}
 }

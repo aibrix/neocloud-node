@@ -6,6 +6,7 @@ import (
 )
 
 var ErrBindingNotFound = errors.New("binding not found")
+var ErrBindingConflict = errors.New("binding changed; reload before updating")
 
 type BindingPhase string
 
@@ -81,6 +82,8 @@ type Attempt struct {
 type ConditionType string
 
 const (
+	ConditionTerminal        ConditionType = "Terminal"
+	ConditionRemoteCleanedUp ConditionType = "RemoteCleanedUp"
 	ConditionReady           ConditionType = "Ready"
 	ConditionUnsupportedSpec ConditionType = "UnsupportedSpec"
 	ConditionProviderError   ConditionType = "ProviderError"
@@ -122,17 +125,19 @@ type RunnerStatus struct {
 }
 
 type Binding struct {
-	Namespace   string
-	Name        string
-	WorkloadUID string
-	Request     WorkloadRequest
-	RemoteID    string
-	Phase       BindingPhase
-	Placement   Placement
-	Cost        CostStatus
-	Attempts    []Attempt
-	Conditions  []BindingCondition
-	Endpoints   []Endpoint
+	// ResourceVersion identifies the snapshot used for an optimistic update.
+	ResourceVersion string
+	Namespace       string
+	Name            string
+	WorkloadUID     string
+	Request         WorkloadRequest
+	RemoteID        string
+	Phase           BindingPhase
+	Placement       Placement
+	Cost            CostStatus
+	Attempts        []Attempt
+	Conditions      []BindingCondition
+	Endpoints       []Endpoint
 	// ContainerUptime is the container uptime the provider last reported.
 	// RestartCount counts container restarts observed by the provider.
 	ContainerUptime time.Duration

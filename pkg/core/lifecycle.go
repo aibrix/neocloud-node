@@ -3,19 +3,26 @@ package core
 import (
 	"context"
 	"errors"
+	"hash/fnv"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 )
 
 type LifecycleService struct {
-	store            BindingStore
-	provider         ProviderAdapter
-	providers        map[string]ProviderAdapter
-	fallbackOrder    []string
-	guard            *LaunchGuard
-	candidatePlanner CreateCandidatePlanner
-	envReader        EnvSourceReader
+	// Bounded lock stripes serialize remote operations for each binding locally.
+	locks                [64]sync.Mutex
+	terminalCleanupDelay time.Duration
+	onRemoteCleanup      func(Binding)
+	now                  func() time.Time
+	store                BindingStore
+	provider             ProviderAdapter
+	providers            map[string]ProviderAdapter
+	fallbackOrder        []string
+	guard                *LaunchGuard
+	candidatePlanner     CreateCandidatePlanner
+	envReader            EnvSourceReader
 }
 
 type LifecycleOption func(*LifecycleService)
@@ -34,6 +41,7 @@ type CreateCandidatePlanner interface {
 func NewLifecycleService(store BindingStore, provider ProviderAdapter, options ...LifecycleOption) *LifecycleService {
 	service := &LifecycleService{
 		store:    store,
+		now:      time.Now,
 		provider: provider,
 	}
 	for _, option := range options {
@@ -82,6 +90,8 @@ func (s *LifecycleService) EnsureCreated(ctx context.Context, desired Binding) (
 }
 
 func (s *LifecycleService) EnsureCreatedWithFallbackObserver(ctx context.Context, desired Binding, onFallback func(from, to CreateCandidate, class ErrorClass)) (Binding, error) {
+	unlock := s.lockBinding(desired.Namespace, desired.WorkloadUID)
+	defer unlock()
 	binding, _, err := s.store.CreateOrGet(ctx, desired)
 	if err != nil {
 		return Binding{}, err
@@ -99,14 +109,14 @@ func (s *LifecycleService) EnsureCreatedWithFallbackObserver(ctx context.Context
 				Reason:  ClassifyError(err).String(),
 				Message: err.Error(),
 			})
-			_ = s.store.Update(ctx, binding)
+			_ = s.persistBinding(ctx, &binding)
 			return binding, err
 		}
 	}
 
 	remote, candidate, err := s.createWithFallback(ctx, &binding, onFallback)
 	if err != nil {
-		_ = s.store.Update(ctx, binding)
+		_ = s.persistBinding(ctx, &binding)
 		return binding, err
 	}
 	request := candidate.Request
@@ -123,7 +133,7 @@ func (s *LifecycleService) EnsureCreatedWithFallbackObserver(ctx context.Context
 	recordCandidateCost(&binding, candidate)
 	recordRemoteCost(&binding, remote)
 	recordRemoteEndpoints(&binding, remote)
-	if err := s.store.Update(ctx, binding); err != nil {
+	if err := s.persistBinding(ctx, &binding); err != nil {
 		return Binding{}, err
 	}
 	return binding, nil
@@ -192,15 +202,17 @@ func (s *LifecycleService) SyncStatusWithSnapshot(ctx context.Context, namespace
 }
 
 func (s *LifecycleService) syncStatus(ctx context.Context, namespace string, workloadUID string, snapshot *RemoteStatusSnapshot) (Binding, error) {
+	unlock := s.lockBinding(namespace, workloadUID)
+	defer unlock()
 	binding, err := s.store.GetByWorkloadUID(ctx, namespace, workloadUID)
 	if err != nil {
 		return Binding{}, err
 	}
-	if binding.RemoteID == "" {
+	if binding.RemoteID == "" || binding.Deleting {
 		return binding, nil
 	}
 	if isTerminalBindingPhase(binding.Phase) {
-		return binding, nil
+		return s.cleanupTerminal(ctx, binding)
 	}
 
 	provider := s.providerForBinding(binding)
@@ -230,7 +242,7 @@ func (s *LifecycleService) syncStatus(ctx context.Context, namespace string, wor
 				Message: "remote resource is missing; it may have been deleted outside the controller",
 			})
 			clearStoppedEndpoints(&binding)
-			if err := s.store.Update(ctx, binding); err != nil {
+			if err := s.persistBinding(ctx, &binding); err != nil {
 				return Binding{}, err
 			}
 		}
@@ -242,11 +254,11 @@ func (s *LifecycleService) syncStatus(ctx context.Context, namespace string, wor
 	recordRemoteCost(&binding, remote)
 	recordRemoteEndpoints(&binding, remote)
 	if err := handleContainerRestart(ctx, provider, &binding, remote); err != nil {
-		_ = s.store.Update(ctx, binding)
+		_ = s.persistBinding(ctx, &binding)
 		return binding, err
 	}
 	clearStoppedEndpoints(&binding)
-	if err := s.store.Update(ctx, binding); err != nil {
+	if err := s.persistBinding(ctx, &binding); err != nil {
 		return Binding{}, err
 	}
 	return binding, nil
@@ -367,6 +379,8 @@ func recordRemoteFailure(binding *Binding, remote RemoteResource) {
 }
 
 func (s *LifecycleService) EnsureDeleted(ctx context.Context, namespace string, workloadUID string) error {
+	unlock := s.lockBinding(namespace, workloadUID)
+	defer unlock()
 	binding, err := s.store.MarkDeleting(ctx, namespace, workloadUID)
 	if err != nil {
 		if errors.Is(err, ErrBindingNotFound) {
@@ -375,7 +389,7 @@ func (s *LifecycleService) EnsureDeleted(ctx context.Context, namespace string, 
 		return err
 	}
 
-	if binding.RemoteID != "" {
+	if binding.RemoteID != "" && !RemoteCleanedUp(binding) {
 		provider := s.providerForBinding(binding)
 		if provider == nil {
 			err := &ProviderError{
@@ -385,12 +399,12 @@ func (s *LifecycleService) EnsureDeleted(ctx context.Context, namespace string, 
 				Message:   "provider adapter is not configured",
 			}
 			recordDeleteFailure(&binding, err)
-			_ = s.store.Update(ctx, binding)
+			_ = s.persistBinding(ctx, &binding)
 			return err
 		}
 		if err := provider.Delete(ctx, binding.RemoteID); err != nil && !errors.Is(err, ErrRemoteNotFound) {
 			recordDeleteFailure(&binding, err)
-			_ = s.store.Update(ctx, binding)
+			_ = s.persistBinding(ctx, &binding)
 			return err
 		}
 	}
@@ -407,6 +421,9 @@ func RecordRunnerStatus(ctx context.Context, store BindingStore, namespace strin
 	binding, err := store.GetByWorkloadUID(ctx, namespace, workloadUID)
 	if err != nil {
 		return Binding{}, err
+	}
+	if isTerminalBindingPhase(binding.Phase) || binding.Deleting {
+		return binding, nil
 	}
 	phase := status.Phase
 	if phase == "" {
@@ -450,10 +467,8 @@ func RecordRunnerStatus(ctx context.Context, store BindingStore, namespace strin
 		}
 	}
 	clearStoppedEndpoints(&binding)
-	if err := store.Update(ctx, binding); err != nil {
-		return Binding{}, err
-	}
-	return binding, nil
+	recordTerminal(&binding, time.Now())
+	return store.Update(ctx, binding)
 }
 
 func runnerPhaseFromExitCode(exitCode int) RunnerPhase {
@@ -722,4 +737,12 @@ func isTerminalBindingPhase(phase BindingPhase) bool {
 	default:
 		return false
 	}
+}
+
+func (s *LifecycleService) lockBinding(namespace, uid string) func() {
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(bindingKey(namespace, uid)))
+	mutex := &s.locks[hash.Sum32()%uint32(len(s.locks))]
+	mutex.Lock()
+	return mutex.Unlock
 }

@@ -135,6 +135,14 @@ and no init containers, volumes, host network, or privileged mode. The
 [Pod compatibility matrix](docs/compatibility-matrix.md) lists every supported
 field.
 
+## Cleanup after workload completion
+
+Remote cleanup is opt-in: set `--terminal-cleanup-delay=10m` to delete remote
+resources ten minutes after a binding becomes Succeeded or Failed. The Pod and
+its result remain; remote logs and local disks are not retained. The default
+is `0` (off). See [terminal cleanup](docs/terminal-cleanup.md) for restart, retry,
+and rollout behavior.
+
 ## Documentation
 
 | Topic | Document |
