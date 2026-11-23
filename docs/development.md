@@ -55,6 +55,11 @@ To exercise changes beyond the chart's default release image, add
 `--set image.tag=<published-main-commit-sha>` to the install command; see
 [Container Images](#container-images).
 
+The fake provider reports no cost by default. To exercise cost accounting
+without a real provider, pass `--fake-hourly-cost=<usd per hour>` in the
+container args; every fake remote then reports that price, and the binding's
+`status.cost` carries it like a real provider's.
+
 Clean up the sample before removing the development release:
 
 ```bash
